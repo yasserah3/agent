@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1043,6 +1043,21 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
     const k = o.scale || 1, w = o.width_m * k, d = o.depth_m * k;
     return (o.turn || 0) % 2 ? [d, w, o.height_m * k] : [w, d, o.height_m * k];   // a quarter turn swaps them
   }
+  const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+
+  // Packages: several objects mixed in one placement. Each slot is an imported
+  // object with a weight; each slot has its own colour on the map.
+  S.gen.packages = [];
+  const pkgById = id => S.gen.packages.find(k => k.id === id);
+  const SLOT_COLOURS = ['216,96,76', '76,163,107', '201,162,39', '142,107,201', '63,167,201', '201,107,160', '122,143,61', '181,112,58'];
+  function pkgSlots(pk){
+    // the slots whose object is there, with footprints in metres (w along a row, d across)
+    return (pk ? pk.slots : []).map((sl, k) => {
+      const o = objById(sl.object); if(!o) return null;
+      const [w, d] = objSize(o);
+      return { o, w, d, weight: sl.weight, turn: o.turn || 0, colour: SLOT_COLOURS[k % SLOT_COLOURS.length] };
+    }).filter(Boolean);
+  }
 
   // A curved placement: copies along a smooth line through its points. These
   // are the same steps as app/curves.py (keep the two alike), so the map shows
@@ -1075,30 +1090,36 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
     out.push(P[n-1].slice());
     return out;
   }
+  // the line through the points: its samples, their spacing, distance along it, length
+  function lineOf(P){
+    const S = curveSamples(P), seg = [], s = [0];
+    for(let k = 0; k + 1 < S.length; k++){ seg.push(Math.hypot(S[k+1][0]-S[k][0], S[k+1][1]-S[k][1])); s.push(s[k] + seg[k]); }
+    return { S, seg, s, L: s[s.length - 1] };
+  }
+  // the point at distance `at` along the line, and the line's direction there
+  function lineAt(ln, at){
+    const { S, seg, s, L } = ln;
+    if(!seg.length || L <= 0) return [S.length ? S[0].slice() : [0, 0], 0];
+    let k = 0;
+    while(k + 1 < s.length && s[k+1] <= at) k++;
+    k = Math.min(Math.max(k, 0), seg.length - 1);
+    const t = seg[k] > 0 ? (at - s[k]) / seg[k] : 0;
+    const pos = [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t];
+    let j = k;                                              // the direction of the nearest span with length
+    while(j < seg.length - 1 && seg[j] <= 1e-12) j++;
+    while(j > 0 && seg[j] <= 1e-12) j--;
+    return [pos, Math.atan2(S[j+1][1] - S[j][1], S[j+1][0] - S[j][0])];
+  }
   // copies fill the line at the gap, centred on it; each turns with the curve:
   // its X along the line, its front (+Y) to the left of the line's direction,
   // or the right when flipped. Returns [x, y, angle] per copy (angle: its X).
   function curveCopies(P, w, d, gx, gy, ny, flip){
-    const S = curveSamples(P), seg = [], s = [0];
-    for(let k = 0; k + 1 < S.length; k++){ seg.push(Math.hypot(S[k+1][0]-S[k][0], S[k+1][1]-S[k][1])); s.push(s[k] + seg[k]); }
-    const L = s[s.length - 1], step = Math.max(w + gx, 1e-9);
+    const ln = lineOf(P), L = ln.L, step = Math.max(w + gx, 1e-9);
     const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
     const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2, Ly = ny*d + (ny - 1)*gy;
     const spots = [];
     for(let i = 0; i < n; i++){
-      const at = Math.min(Math.max(first + i*step, 0), L);
-      let pos = S.length ? S[0].slice() : [0, 0], ang = 0;
-      if(seg.length && L > 0){
-        let k = 0;
-        while(k + 1 < s.length && s[k+1] <= at) k++;
-        k = Math.min(Math.max(k, 0), seg.length - 1);
-        const t = seg[k] > 0 ? (at - s[k]) / seg[k] : 0;
-        pos = [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t];
-        let j = k;                                          // the direction of the nearest span with length
-        while(j < seg.length - 1 && seg[j] <= 1e-12) j++;
-        while(j > 0 && seg[j] <= 1e-12) j--;
-        ang = Math.atan2(S[j+1][1] - S[j][1], S[j+1][0] - S[j][0]);
-      }
+      let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
       if(flip) ang += Math.PI;
       const v = [-Math.sin(ang), Math.cos(ang)];            // across the line, towards the copy's back
       for(let r = 0; r < ny; r++){
@@ -1106,7 +1127,64 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
       }
     }
-    return { spots, n, L, samples: S };
+    return { spots, n, L, samples: ln.S };
+  }
+
+  // A package mixes several objects in one placement: each row is filled with
+  // random picks (weighted, never the same object twice in a row), each taking
+  // its own width with the same gap between every pair, the run centred; fronts
+  // in line on the row's front edge. Same steps and the same random numbers as
+  // app/curves.py (mulberry32, bit for bit), so the map shows the exported mix.
+  function rng(seed){
+    let a = seed | 0;
+    return () => {
+      a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, a | 1);
+      t = t + Math.imul(t ^ t >>> 7, t | 61) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  const rowSeed = (seed, row) => (seed ^ Math.imul(row + 1, 0x9E3779B9)) >>> 0;   // each row its own stream
+  function pickSlot(rnd, weights, prev){
+    let cand = weights.map((w, k) => w > 0 ? k : -1).filter(k => k >= 0);
+    if(cand.length > 1 && cand.includes(prev)) cand = cand.filter(k => k !== prev);
+    let total = 0;
+    for(const k of cand) total += weights[k];
+    const r = rnd() * total;
+    let acc = 0;
+    for(const k of cand){ acc += weights[k]; if(r < acc) return k; }
+    return cand[cand.length - 1];
+  }
+  // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
+  function packageCopies(P, slots, gx, gy, ny, flip, seed){
+    const ln = lineOf(P), L = ln.L;
+    let weights = slots.map(q => Math.max(0, +q[2] || 0));
+    if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
+    const D = Math.max(...slots.map(q => q[1])), Ly = ny*D + (ny - 1)*gy;
+    const spots = [], counts = [];
+    for(let r = 0; r < ny; r++){
+      const rnd = rng(rowSeed(seed, r)), picks = [];
+      let used = 0, prev = null;
+      while(picks.length < 5000){
+        const k = pickSlot(rnd, weights, prev);
+        const need = Math.max(slots[k][0], 1e-6) + (picks.length ? gx : 0);
+        if(picks.length && used + need > L + 1e-9) break;      // the row is full: always at least one
+        picks.push(k); used += need; prev = k;
+      }
+      counts.push(picks.length);
+      const front = -Ly/2 + r*(D + gy);                      // the row's front edge, across the line
+      let at = (L - used) / 2;
+      picks.forEach((k, i) => {
+        const [w, d] = slots[k];
+        if(i) at += gx;
+        let [pos, ang] = lineAt(ln, Math.min(Math.max(at + w/2, 0), L));
+        at += Math.max(w, 1e-6);
+        if(flip) ang += Math.PI;
+        const v = [-Math.sin(ang), Math.cos(ang)], off = front + d/2;
+        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang, k]);
+      });
+    }
+    return { spots, counts, L, D, samples: ln.S };
   }
 
   function roadAt(x, y){
@@ -1125,39 +1203,63 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
   const isCurve = p => Array.isArray(p.path) && p.path.length >= 2;
 
   function placementGeom(p){
-    const o = objById(p.object); if(!o) return null;
-    const m = mppMask(), [w, d] = objSize(o);
-    // one copy: its footprint in mask pixels, turned so its X points along a
-    const copyAt = (cx, cy, a) => {
+    const m = mppMask();
+    // one copy: its footprint in mask pixels (w, d in metres), turned so its X points along a
+    const copyAt = (cx, cy, a, w, d, slot) => {
       const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], hw = w / m / 2, hd = d / m / 2;
       const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
       const onRoad = pts.concat([[cx, cy]]).some(q => roadAt(q[0], q[1]));
-      return { cx, cy, a, u, v, pts, onRoad };
+      return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null };
     };
-    if(isCurve(p)){
-      // worked out in metres, as the 3D export does, then back to mask pixels
-      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip);
-      const line = r.samples.map(q => [q[0]/m, q[1]/m]);
-      const half = (p.ny * d + (p.ny - 1) * p.gap_y) / m / 2;
-      // the band the rows cover, either side of the line: blue between copies is the gap
+    // the band the rows cover, either side of a curve: blue between copies is the gap
+    const band = (line, half) => {
       const left = [], right = [];
       line.forEach((q, k) => {
         const a = line[Math.max(k - 1, 0)], b = line[Math.min(k + 1, line.length - 1)];
         const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
         left.push([q[0] + nx*half, q[1] + ny*half]); right.push([q[0] - nx*half, q[1] - ny*half]);
       });
-      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a)), line,
-               outer: left.concat(right.reverse()), along: r.n, length_m: r.L, w: w/m, d: d/m };
+      return left.concat(right.reverse());
+    };
+    const box = (a, Lx, Ly) => {
+      const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
+      return { u, v, Lx, Ly, outer: [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) =>
+        [p.cx + u[0]*sx*Lx/2 + v[0]*sy*Ly/2, p.cy + u[1]*sx*Lx/2 + v[1]*sy*Ly/2]) };
+    };
+    if(p.package){
+      // a package: its mix along a line, straight through the rectangle or curved,
+      // worked out in metres exactly as the 3D export does, then back to mask pixels
+      const slots = pkgSlots(pkgById(p.package)); if(!slots.length) return null;
+      const curve = isCurve(p), a = p.angle * Math.PI / 180, Lx = p.length || 0;
+      const P = curve ? p.path : [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]];
+      const r = packageCopies(P.map(q => [q[0]*m, q[1]*m]), slots.map(s => [s.w, s.d, s.weight]),
+                              p.gap_x, p.gap_y, p.ny, curve && !!p.flip, p.seed >>> 0);
+      const copies = r.spots.map(([x, y, ang, k]) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k]));
+      const Ly = (p.ny * r.D + (p.ny - 1) * p.gap_y) / m;
+      const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L };
+      if(curve){
+        const line = r.samples.map(q => [q[0]/m, q[1]/m]);
+        return { ...base, curve: true, line, outer: band(line, Ly / 2) };
+      }
+      return { ...base, ...box(a, Lx, Ly) };
+    }
+    const o = objById(p.object); if(!o) return null;
+    const [w, d] = objSize(o);
+    if(isCurve(p)){
+      // worked out in metres, as the 3D export does, then back to mask pixels
+      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip);
+      const line = r.samples.map(q => [q[0]/m, q[1]/m]);
+      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a, w, d)), line,
+               outer: band(line, (p.ny * d + (p.ny - 1) * p.gap_y) / m / 2), along: r.n, length_m: r.L, w: w/m, d: d/m };
     }
     const a = p.angle * Math.PI / 180, u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
     const Lx = (p.nx * w + (p.nx - 1) * p.gap_x) / m, Ly = (p.ny * d + (p.ny - 1) * p.gap_y) / m;
     const copies = [];
     for(let i = 0; i < p.nx; i++) for(let k = 0; k < p.ny; k++){
       const ox = (-Lx/2 + (w/2 + i*(w + p.gap_x)) / m), oy = (-Ly/2 + (d/2 + k*(d + p.gap_y)) / m);
-      copies.push(copyAt(p.cx + u[0]*ox + v[0]*oy, p.cy + u[1]*ox + v[1]*oy, a));
+      copies.push(copyAt(p.cx + u[0]*ox + v[0]*oy, p.cy + u[1]*ox + v[1]*oy, a, w, d));
     }
-    const outer = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [p.cx + u[0]*sx*Lx/2 + v[0]*sy*Ly/2, p.cy + u[1]*sx*Lx/2 + v[1]*sy*Ly/2]);
-    return { u, v, Lx, Ly, w: w/m, d: d/m, copies, outer };
+    return { ...box(a, Lx, Ly), w: w/m, d: d/m, copies };
   }
 
   // editing a curve: points are kept in mask pixels, like the rectangles
@@ -1220,26 +1322,32 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
         fill:'rgba(70,130,220,.35)', stroke:'#4682DC', 'stroke-width': sel ? hr*0.6 : hr*0.35 }, g);
       area.addEventListener('pointerdown', e => startScatterDrag(e, i, 'move'));
       g0.copies.forEach(c => {
-        el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : 'rgba(216,96,76,.55)',
-          stroke: c.onRoad ? '#999' : '#D8604C', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
+        // a package's copies in their slot's colour, so the mix shows
+        const col = c.slot ? c.slot.colour : '216,96,76';
+        el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`,
+          stroke: c.onRoad ? '#999' : `rgb(${col})`, 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
         if(c.onRoad){
           el('line', { x1:c.pts[0][0]*f, y1:c.pts[0][1]*f, x2:c.pts[2][0]*f, y2:c.pts[2][1]*f, stroke:'#ddd', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
           el('line', { x1:c.pts[1][0]*f, y1:c.pts[1][1]*f, x2:c.pts[3][0]*f, y2:c.pts[3][1]*f, stroke:'#ddd', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
         }
       });
-      const ob = objById(p.object), turn = (ob && ob.turn) || 0;
+      const ob = p.package ? null : objById(p.object), turn = (ob && ob.turn) || 0;
       if(g0.curve){
-        p.nx = g0.along;                                     // copies along the line, for the panel and the file
-        // the line itself, then a small arrow on each copy's front: Blender's +Y, turned with the curve
+        if(!g0.pkg) p.nx = g0.along;                         // copies along the line, for the panel and the file
         el('polyline', { points: g0.line.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
           'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g);
+      }
+      if(g0.curve || g0.pkg){
+        // a small arrow on each copy's front: Blender's +Y, turned with the curve and the object
         g0.copies.forEach(c => {
-          const th = c.a + turn * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
-          const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * g0.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * g0.d/2;
-          const fx = c.cx + fd[0]*reach, fy = c.cy + fd[1]*reach, s = Math.min(hr*1.4/f, Math.min(g0.w, g0.d) / 3);
+          const th = c.a + (c.slot ? c.slot.turn : turn) * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
+          const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * c.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * c.d/2;
+          const fx = c.cx + fd[0]*reach, fy = c.cy + fd[1]*reach, s = Math.min(hr*1.4/f, Math.min(c.w, c.d) / 3);
           el('polygon', { points: [[fx + fd[0]*s*1.4, fy + fd[1]*s*1.4], [fx - sd[0]*s, fy - sd[1]*s], [fx + sd[0]*s, fy + sd[1]*s]].map(P).join(' '),
             fill:'#fff', 'pointer-events':'none' }, g);
         });
+      }
+      if(g0.curve){
         // the points: drag to bend, double-click one in the middle to remove it
         p.path.forEach((q, k) => {
           const end = k === 0 || k === p.path.length - 1;
@@ -1249,14 +1357,16 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
         });
         return;
       }
-      // the front: Blender's +Y, the top edge at rotation 0, turned with the object
-      const th = (p.angle + 90 * turn) * Math.PI / 180;
-      const fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
-      const reach = Math.abs(fd[0]*g0.u[0] + fd[1]*g0.u[1]) * g0.Lx/2 + Math.abs(fd[0]*g0.v[0] + fd[1]*g0.v[1]) * g0.Ly/2;
-      const fx = p.cx + fd[0]*reach, fy = p.cy + fd[1]*reach;
-      const tip = [fx + fd[0]*hr*2.2/f, fy + fd[1]*hr*2.2/f];
-      const l = [fx - sd[0]*hr*1.2/f, fy - sd[1]*hr*1.2/f], r = [fx + sd[0]*hr*1.2/f, fy + sd[1]*hr*1.2/f];
-      el('polygon', { points: [tip, l, r].map(P).join(' '), fill:'#fff', 'pointer-events':'none' }, g);
+      if(!g0.pkg){
+        // the front: Blender's +Y, the top edge at rotation 0, turned with the object
+        const th = (p.angle + 90 * turn) * Math.PI / 180;
+        const fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
+        const reach = Math.abs(fd[0]*g0.u[0] + fd[1]*g0.u[1]) * g0.Lx/2 + Math.abs(fd[0]*g0.v[0] + fd[1]*g0.v[1]) * g0.Ly/2;
+        const fx = p.cx + fd[0]*reach, fy = p.cy + fd[1]*reach;
+        const tip = [fx + fd[0]*hr*2.2/f, fy + fd[1]*hr*2.2/f];
+        const l = [fx - sd[0]*hr*1.2/f, fy - sd[1]*hr*1.2/f], r = [fx + sd[0]*hr*1.2/f, fy + sd[1]*hr*1.2/f];
+        el('polygon', { points: [tip, l, r].map(P).join(' '), fill:'#fff', 'pointer-events':'none' }, g);
+      }
       g0.outer.forEach(q => {
         const c = el('circle', { cx:q[0]*f, cy:q[1]*f, r:hr*0.9, class:'corner', fill:'#fff', stroke:'#4682DC', 'stroke-width': hr*0.3 }, g);
         c.addEventListener('pointerdown', e => startScatterDrag(e, i, 'size'));
@@ -1307,13 +1417,21 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
     } else if(sdrag.mode === 'move'){
       p.cx = o.cx + q[0] - sdrag.start[0]; p.cy = o.cy + q[1] - sdrag.start[1];
     } else if(sdrag.mode === 'size'){
-      // stretch adds whole copies; the rectangle never goes below one object
-      const ob = objById(p.object); if(!ob) return;
-      const [w, d] = objSize(ob), m = mppMask();
-      const a = o.angle * Math.PI / 180, dx = q[0] - o.cx, dy = q[1] - o.cy;
+      const m = mppMask(), a = o.angle * Math.PI / 180, dx = q[0] - o.cx, dy = q[1] - o.cy;
       const wantX = 2 * Math.abs(dx*Math.cos(a) + dy*Math.sin(a)) * m, wantY = 2 * Math.abs(-dx*Math.sin(a) + dy*Math.cos(a)) * m;
-      p.nx = Math.max(1, Math.round((wantX + p.gap_x) / (w + p.gap_x)));
-      p.ny = Math.max(1, Math.round((wantY + p.gap_y) / (d + p.gap_y)));
+      if(p.package){
+        // a package fills the length it is given; rows are as deep as its deepest object.
+        // It never gets shorter than its widest object
+        const slots = pkgSlots(pkgById(p.package)); if(!slots.length) return;
+        p.length = Math.max(wantX, ...slots.map(s => s.w)) / m;
+        p.ny = Math.max(1, Math.round((wantY + p.gap_y) / (Math.max(...slots.map(s => s.d)) + p.gap_y)));
+      } else {
+        // stretch adds whole copies; the rectangle never goes below one object
+        const ob = objById(p.object); if(!ob) return;
+        const [w, d] = objSize(ob);
+        p.nx = Math.max(1, Math.round((wantX + p.gap_x) / (w + p.gap_x)));
+        p.ny = Math.max(1, Math.round((wantY + p.gap_y) / (d + p.gap_y)));
+      }
     } else {
       p.angle = Math.atan2(q[1] - o.cy, q[0] - o.cx) * 180 / Math.PI;
     }
@@ -1333,11 +1451,13 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
     const p = S.gen.placements[S.gen.plSel];
     if(!p){ box.hidden = true; return; }
     box.hidden = false;
-    const o = objById(p.object);
+    const o = p.package ? null : objById(p.object), pk = p.package ? pkgById(p.package) : null;
     const g0 = placementGeom(p);
     const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
     const curve = isCurve(p);
-    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: ${o ? o.name : 'missing object'}` + (curve ? ', curved' : '');
+    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: `
+      + (p.package ? (pk ? `package ${pk.name}` : 'missing package') : (o ? o.name : 'missing object')) + (curve ? ', curved' : '');
+    $('#btnShuffle').hidden = !p.package;
     $('#gapXLabel').textContent = curve ? 'Gap along the line (m)' : 'Gap along X (m)';
     $('#gapYLabel').textContent = curve ? 'Gap between rows (m)' : 'Gap along Y (m)';
     $('#plCurveBox').hidden = !curve; $('#btnCurve').hidden = curve;
@@ -1345,6 +1465,16 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
     if(document.activeElement !== $('#gapY')) $('#gapY').value = p.gap_y;
     if(document.activeElement !== $('#plRows')) $('#plRows').value = p.ny;
     const road = onRoad ? `, ${onRoad} on the road (left out)` : '';
+    if(p.package){
+      // how many of each object the mix holds
+      const n = {};
+      (g0 ? g0.copies : []).forEach(c => { n[c.slot.o.name] = (n[c.slot.o.name] || 0) + 1; });
+      $('#plInfo').textContent = !g0 ? 'This package has no objects yet: import some into its slots.'
+        : `${g0.copies.length} copies in ${p.ny} row${p.ny > 1 ? 's' : ''}: ` + Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', ')
+          + road + (curve ? `, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
+                          : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`);
+      return;
+    }
     $('#plInfo').textContent = curve && g0
       ? `${g0.along} along the line × ${p.ny} row${p.ny > 1 ? 's' : ''} = ${g0.copies.length} copies${road}, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
@@ -1365,6 +1495,10 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
       + 'double-click a point to remove it. Drag an end to make the line longer or shorter.');
     saveScatter();
   });
+  $('#btnShuffle').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.package) return;
+    p.seed = (Math.random() * 4294967296) >>> 0; log('New mix.'); saveScatter();
+  });
   $('#btnAddPt').addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
     addCurvePointMiddle(p); curveCentre(p); log('Point added: drag it to bend the line.'); saveScatter();
@@ -1376,11 +1510,14 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
   $('#btnStraight').addEventListener('click', () => {
     // back to a rectangle along the line from its first point to its last, facing the same way
     const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
-    const o = objById(p.object), A = p.path[0], B = p.path[p.path.length - 1];
-    const m = mppMask(), w = o ? objSize(o)[0] : 1, len = Math.hypot(B[0] - A[0], B[1] - A[1]) * m;
+    const A = p.path[0], B = p.path[p.path.length - 1], m = mppMask(), len = Math.hypot(B[0] - A[0], B[1] - A[1]);
     p.cx = (A[0] + B[0]) / 2; p.cy = (A[1] + B[1]) / 2;
     p.angle = Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI + (p.flip ? 180 : 0);
-    p.nx = Math.max(1, Math.floor((len + p.gap_x) / Math.max(w + p.gap_x, 1e-9) + 1e-6));
+    if(p.package) p.length = len;                                        // a package fills the length
+    else {
+      const o = objById(p.object), w = o ? objSize(o)[0] : 1;
+      p.nx = Math.max(1, Math.floor((len * m + p.gap_x) / Math.max(w + p.gap_x, 1e-9) + 1e-6));
+    }
     delete p.path; delete p.flip;
     log('Placement is a straight rectangle again.'); saveScatter();
   });
@@ -1398,9 +1535,10 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
   });
 
   function renderObjList(){
-    $('#objCount').textContent = S.gen.objects.length ? `${S.gen.objects.length}` : '';
+    const layers = S.gen.objects.filter(o => !o.package);            // objects in a package show in its slots
+    $('#objCount').textContent = layers.length ? `${layers.length}` : '';
     const list = $('#objList'); list.innerHTML = '';
-    S.gen.objects.forEach(o => {
+    layers.forEach(o => {
       const [w, d, hgt] = objSize(o);
       const big = Math.max(w, d, hgt) > 60;
       const row = document.createElement('div');
@@ -1447,12 +1585,136 @@ const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
       list.appendChild(row);
     });
     $('#btnAddObj').disabled = !(S.gen.objSel && S.gen.mask);
+    renderPkgList();
   }
 
   async function loadObjects(){
-    try{ S.gen.objects = (await api('/api/objects')).objects; renderObjList(); }catch(_){}
+    try{
+      S.gen.objects = (await api('/api/objects')).objects;
+      S.gen.packages = (await api('/api/packages')).packages;
+      renderObjList(); drawBridges();
+    }catch(_){}
   }
   loadObjects();
+
+  /* ------------------------------------------------ packages */
+  const jsonPost = (url, body) => api(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  function renderPkgList(){
+    const list = $('#pkgList'); list.innerHTML = '';
+    $('#pkgCount').textContent = S.gen.packages.length ? `${S.gen.packages.length}` : '';
+    S.gen.packages.forEach(pk => {
+      const slots = pkgSlots(pk);
+      const box = document.createElement('div');
+      box.className = 'pkg';
+      box.innerHTML = `
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="pkg-name" value="${esc(pk.name)}" aria-label="Package name">
+          <button class="x pkg-del" title="Delete this package and its objects" aria-label="Delete package ${esc(pk.name)}"
+            style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:15px">×</button>
+        </div>
+        <div class="pkg-slots"></div>
+        ${slots.length ? '' : '<div class="note">No objects yet: import some into this package.</div>'}
+        <div class="btn-row">
+          <button class="btn secondary pkg-import">Import object</button>
+          <button class="btn secondary pkg-place" ${S.gen.mask && slots.length ? '' : 'disabled'}
+            title="${S.gen.mask ? '' : 'Load a street mask first'}">Place on the map</button>
+        </div>`;
+      const holder = $('.pkg-slots', box);
+      slots.forEach(sl => {
+        const o = sl.o, [w, d, hgt] = objSize(o);
+        const row = document.createElement('div');
+        row.className = 'bridge-item slot';
+        row.style.flexWrap = 'wrap'; row.style.marginTop = '6px';
+        row.innerHTML = `<span style="flex:1;min-width:0"><span class="swatch" style="background:rgb(${sl.colour})"></span>${esc(o.name)}
+            <span style="color:var(--muted)">· ${w.toFixed(1)} × ${d.toFixed(1)} × ${hgt.toFixed(1)} m</span></span>
+          <span style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+            <span style="color:var(--muted);font-size:11.5px">weight</span>
+            <input type="number" class="wt" value="${sl.weight}" step="0.5" min="0" title="How often this object is picked: 2 is twice as often as 1, 0 never">
+            <span style="color:var(--muted);font-size:11.5px">scale</span>
+            <input type="number" class="sc" value="${o.scale || 1}" step="0.01" min="0.0001" title="Scale">
+            <button class="x turn" title="Turn the object a quarter turn" aria-label="Turn ${esc(o.name)}" style="font-size:13px">↻ ${90 * ((o.turn || 0) % 4)}°</button>
+            <button class="x del" title="Remove this object from the package" aria-label="Remove ${esc(o.name)}">×</button></span>`;
+        $('.wt', row).addEventListener('change', async ev => {
+          try{
+            const res = await jsonPost('/api/packages/' + pk.id, { weights: { [o.id]: Math.max(0, +ev.target.value || 0) } });
+            Object.assign(pk, res); drawBridges();
+          }catch(err){ log(err.message, 'bad'); }
+        });
+        $('.sc', row).addEventListener('change', async ev => {
+          try{
+            Object.assign(o, await jsonPost('/api/objects/' + o.id, { scale: Math.max(0.0001, +ev.target.value || 1) }));
+            renderPkgList(); drawBridges();
+          }catch(err){ log(err.message, 'bad'); }
+        });
+        $('.turn', row).addEventListener('click', async () => {
+          try{
+            Object.assign(o, await jsonPost('/api/objects/' + o.id, { turn: ((o.turn || 0) + 1) % 4 }));
+            log(`${o.name}: turned to ${90 * o.turn}°.`); renderPkgList(); drawBridges();
+          }catch(err){ log(err.message, 'bad'); }
+        });
+        $('.del', row).addEventListener('click', async () => {
+          try{
+            await api('/api/objects/' + o.id, { method:'DELETE' });
+            log(`Removed ${o.name} from ${pk.name}.`); await loadObjects();
+          }catch(err){ log(err.message, 'bad'); }
+        });
+        holder.appendChild(row);
+      });
+      $('.pkg-name', box).addEventListener('change', async ev => {
+        try{ Object.assign(pk, await jsonPost('/api/packages/' + pk.id, { name: ev.target.value })); drawBridges(); }
+        catch(err){ log(err.message, 'bad'); }
+      });
+      $('.pkg-del', box).addEventListener('click', async () => {
+        try{
+          await api('/api/packages/' + pk.id, { method:'DELETE' });
+          S.gen.placements = S.gen.placements.filter(p => p.package !== pk.id); S.gen.plSel = -1;
+          log(`Deleted package ${pk.name}, its objects and its placements.`);
+          await loadObjects(); saveScatter();
+        }catch(err){ log(err.message, 'bad'); }
+      });
+      $('.pkg-import', box).addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = '.glb,.obj,.fbx'; inp.multiple = true;
+        inp.addEventListener('change', async () => {
+          for(const f of inp.files){
+            status('Importing object…'); log(`Importing ${f.name} into ${pk.name}…`);
+            try{
+              const fd = new FormData(); fd.append('file', f); fd.append('package', pk.id);
+              const r = await fetch(API + '/api/objects/import', { method:'POST', body: fd });
+              const res = await r.json();
+              if(!r.ok) throw new Error(res.detail || 'import failed');
+              log(`Imported ${res.name} into ${pk.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m.`, 'ok');
+              if(Math.max(res.width_m, res.depth_m, res.height_m) > 60)
+                log('  That is very large for an object: the file\'s units were probably off. Set its scale (for example 0.01).', 'bad');
+            }catch(e){ log('Import failed: ' + e.message, 'bad'); }
+          }
+          status('Ready.'); await loadObjects();
+        });
+        inp.click();
+      });
+      $('.pkg-place', box).addEventListener('click', () => {
+        if(!S.gen.mask || !slots.length) return;
+        // in the middle of the view, long enough for about three objects, with a mix of its own
+        const r = $('#genVp').getBoundingClientRect(), c = genVp.canvas.getBoundingClientRect(), f = shown();
+        const cx = ((r.left + r.width/2) - c.left) / c.width * genVp.canvas.width / f;
+        const cy = ((r.top + r.height/2) - c.top) / c.height * genVp.canvas.height / f;
+        S.gen.placements.push({ package: pk.id, cx: Math.min(Math.max(cx, 0), S.gen.mask.width), cy: Math.min(Math.max(cy, 0), S.gen.mask.height),
+          angle: 0, length: 3 * Math.max(...slots.map(s => s.w)) / mppMask(), nx: 1, ny: 1, gap_x: 0, gap_y: 0,
+          seed: (Math.random() * 4294967296) >>> 0 });
+        S.gen.plSel = S.gen.placements.length - 1;
+        log(`Placed ${pk.name}. Drag a corner to make it longer or add rows; Shuffle the mix for another random order.`);
+        saveScatter();
+      });
+      list.appendChild(box);
+    });
+  }
+  $('#btnCreatePkg').addEventListener('click', async () => {
+    try{
+      const res = await jsonPost('/api/packages', {});
+      S.gen.packages.push(res); log(`Created ${res.name}. Import objects into it, then place it on the map.`);
+      renderPkgList();
+    }catch(err){ log(err.message, 'bad'); }
+  });
 
   $('#btnImportObj').addEventListener('click', () => {
     const inp = document.createElement('input');

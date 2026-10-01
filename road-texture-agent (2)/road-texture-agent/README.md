@@ -699,6 +699,41 @@ each end, holding the same copies as before.
   out, as with rectangles. On a tight bend, copies on the inside of the curve
   can touch; add a gap or move the line outwards.
 
+### Packages: several objects in one placement
+
+A package mixes several objects, for example different buildings along one
+street. Under Objects, press **Create package**, then **Import object** in it
+(several files at once are fine). Each object becomes a **slot** with its own
+colour, **weight**, **scale** and **↻** quarter turn; × removes it. Rename the
+package by editing its name. Objects in a package do not appear as layers.
+
+- **Place on the map** puts the package in the middle of the view. It works
+  like a layer's rectangle: drag it to move it, a corner to make it longer or
+  add rows, the round handle to rotate it, and **Bend into a curve** for curved
+  streets, with the same points, **Flip side** and **Rows** as a layer.
+- **The mix**: each spot gets a random object from the slots. The weight sets
+  how often: 2 is picked about twice as often as 1, 0 never. Two neighbours are
+  never the same object when the package has more than one, so a heavy weight
+  cannot fill a row on its own. **Shuffle the mix** picks a new random order.
+  The mix is saved with the placement and never changes on its own; making a
+  row longer only adds to its end.
+- **Spacing**: each object takes its own width along the row, with the same gap
+  between every pair; a row holds as many as fit in its length, the run
+  centred. Rows are as deep as the deepest object.
+- **Fronts in line**: every object's front sits on the row's front edge, so a
+  row of different buildings has one street line; deeper objects reach further
+  back.
+- On the map, copies are coloured by slot and each has a small arrow at its
+  front. The panel lists how many of each object a placement holds.
+- The map and the 3D export use the same steps and the same random numbers
+  (`ui/app.js` and `app/curves.py`), so the model holds exactly the mix the map
+  shows. In the GLB each object is still stored once and placed as instances.
+- Packages live in `workspace/packages`, their objects in `workspace/objects`.
+  Deleting a package deletes its objects and its placements.
+
+GLB objects with a plain colour (no texture) now keep that colour; before, they
+came in grey.
+
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.
 ASCII FBX, rigs and animation are not read. OBJ textures need their MTL and

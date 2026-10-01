@@ -111,6 +111,10 @@
   .bridge-layer .corner{ pointer-events:all; cursor:nwse-resize; }
   .bridge-layer .spin{ pointer-events:all; cursor:grab; }
   .bridge-layer .pt{ pointer-events:all; cursor:move; }
+  .pkg{ border:1px solid var(--line); border-radius:6px; padding:8px; margin-top:8px; }
+  .pkg .pkg-name{ flex:1; background:var(--field); border:1px solid var(--line); border-radius:4px; padding:4px 6px; font-weight:600; min-width:0; }
+  .pkg .swatch{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+  .pkg .slot input{ width:52px; background:var(--field); border:1px solid var(--line); border-radius:4px; padding:2px 4px; }
   .bridge-item{ display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:12.5px;
                 padding:5px 8px; border:1px solid var(--line); border-radius:4px; margin-bottom:5px; cursor:pointer; }
   .bridge-item.sel{ border-color:var(--red); }
@@ -327,6 +331,12 @@
           <div class="note" style="color:var(--amber);margin-top:6px">Before importing: the object's front must face the +Y axis (Blender's green arrow). Use ↻ on a layer to turn an object that faces another way. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
           <div id="objList" style="margin-top:8px"></div>
           <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
+          <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
+            <div style="font-size:12.5px;font-weight:600">Packages <small id="pkgCount" style="color:var(--muted);font-weight:400"></small></div>
+            <div class="note" style="margin-top:2px">A package mixes several objects in one placement. Import objects into its slots; each spot on the map gets a random one (the weight sets how often), never the same twice in a row. Each object takes its own width, and fronts line up.</div>
+            <div id="pkgList"></div>
+            <button class="btn secondary" id="btnCreatePkg">Create package</button>
+          </div>
           <div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
             <div class="field"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
@@ -339,6 +349,7 @@
               </div>
               <button class="btn secondary" id="btnStraight">Make straight again</button>
             </div>
+            <button class="btn secondary" id="btnShuffle" hidden title="A new random mix of the package's objects">Shuffle the mix</button>
             <button class="btn secondary" id="btnCurve" title="Turn this rectangle into a line you can bend to follow a curved street">Bend into a curve</button>
             <div class="note" id="plInfo"></div>
             <button class="btn secondary" id="btnRemovePl">Remove this placement</button>

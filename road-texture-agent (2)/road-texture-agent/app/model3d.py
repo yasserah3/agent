@@ -1318,8 +1318,10 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
     Each placement is a grid of copies of one object: nx along the rectangle's
     width, ny along its depth, with the gaps between them. A curved placement
     has a path instead: its copies fill the smooth line through the path's
-    points, each turned with the curve, in ny rows (app/curves.py). Each copy
-    is an instance of the object, standing on the block or sidewalk. Copies
+    points, each turned with the curve, in ny rows (app/curves.py). A package
+    placement mixes its slots' objects along its line (straight for a
+    rectangle, or curved), each by its own width. Each copy is an instance of
+    its object, standing on the block or sidewalk. Copies
     whose footprint lies on the road are left out: objects stand only on
     blocks and sidewalks.
     """
@@ -1331,30 +1333,51 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
     road = make_valid(road)                    # a repaired shape: intersections cannot fail on it
     placed, skipped, by_obj = 0, 0, {}
     problems = []
-    for p in scatter["placements"]:
-      try:
-        o = scatter["objects"][p["object"]]
-        meta = o["meta"]
+    def sized(oid):
+        """An object's scale, quarter turn, and footprint: w along its row, d across."""
+        meta = scatter["objects"][oid]["meta"]
         k = float(meta.get("scale", 1.0))
         turn = int(meta.get("turn", 0)) % 4
         w, d = meta["width_m"] * k, meta["depth_m"] * k
-        if turn % 2:
-            w, d = d, w                                         # a quarter turn swaps width and depth
-        # every copy: its centre in metres (image axes) and the direction of its X
-        if p.get("path"):
-            spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
-                                    p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False))
-            spots = [(np.array([x, y]), ang) for x, y, ang in spots]
+        return (k, turn) + ((d, w) if turn % 2 else (w, d))   # a quarter turn swaps width and depth
+
+    for p in scatter["placements"]:
+      label = p.get("object") or "package"
+      try:
+        # every copy: its object, centre in metres (image axes) and the direction of its X
+        if "package" in p:
+            pk = scatter["packages"][p["package"]]
+            label = "package %s" % pk["name"]
+            slots = [sl for sl in pk["slots"] if sl["object"] in scatter["objects"]]
+            sizes = [sized(sl["object"]) for sl in slots]
+            if p.get("path"):
+                pts = np.asarray(p["path"], float) * mpp_mask
+            else:
+                a = math.radians(p["angle"])
+                u = np.array([math.cos(a), math.sin(a)])
+                c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
+                pts = np.array([c - u * half, c + u * half])     # a rectangle is a straight line
+            spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
+                                            p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"])
+            spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
         else:
-            a = math.radians(p["angle"])
-            u = np.array([math.cos(a), math.sin(a)])             # along the width, in image axes
-            v = np.array([-u[1], u[0]])                           # along the depth
-            Lx = p["nx"] * w + (p["nx"] - 1) * p["gap_x"]
-            Ly = p["ny"] * d + (p["ny"] - 1) * p["gap_y"]
-            c = np.array([p["cx"], p["cy"]]) * mpp_mask          # metres, image axes
-            spots = [(c + u * (-Lx / 2 + w / 2 + i * (w + p["gap_x"])) + v * (-Ly / 2 + d / 2 + j * (d + p["gap_y"])), a)
-                     for i in range(p["nx"]) for j in range(p["ny"])]
-        for cc, a in spots:
+            label = scatter["objects"][p["object"]]["meta"].get("name", "object")
+            k, turn, w, d = sized(p["object"])
+            if p.get("path"):
+                spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
+                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False))
+                spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
+            else:
+                a = math.radians(p["angle"])
+                u = np.array([math.cos(a), math.sin(a)])         # along the width, in image axes
+                v = np.array([-u[1], u[0]])                       # along the depth
+                Lx = p["nx"] * w + (p["nx"] - 1) * p["gap_x"]
+                Ly = p["ny"] * d + (p["ny"] - 1) * p["gap_y"]
+                c = np.array([p["cx"], p["cy"]]) * mpp_mask      # metres, image axes
+                spots = [(p["object"], c + u * (-Lx / 2 + w / 2 + i * (w + p["gap_x"])) + v * (-Ly / 2 + d / 2 + j * (d + p["gap_y"])), a)
+                         for i in range(p["nx"]) for j in range(p["ny"])]
+        for oid, cc, a in spots:
+            k, turn, w, d = sized(oid)
             u = np.array([math.cos(a), math.sin(a)])
             v = np.array([-u[1], u[0]])
             corners = [cc + u * sx * w / 2 + v * sy * d / 2 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
@@ -1369,10 +1392,10 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
             # quarter turn clockwise, seen from above
             phi = -(a + turn * math.pi / 2)
             q = (0.0, math.sin(phi / 2), 0.0, math.cos(phi / 2))
-            by_obj.setdefault(p["object"], []).append((tr, q, k))
+            by_obj.setdefault(oid, []).append((tr, q, k))
             placed += 1
       except Exception as e:
-        problems.append("%s: %s" % (scatter["objects"].get(p["object"], {}).get("meta", {}).get("name", "object"), e))
+        problems.append("%s: %s" % (label, e))
     for oid, inst in list(by_obj.items()):
       try:
         o = scatter["objects"][oid]

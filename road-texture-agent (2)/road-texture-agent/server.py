@@ -18,6 +18,7 @@ What is not built yet (these endpoints say so honestly instead of pretending):
 """
 
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -43,7 +44,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.01-curves1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.01-packages1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -70,7 +71,8 @@ _FRESH = not (WORK / "memory.db").exists()
 UPLOADS = WORK / "uploads"
 ARTIFACTS = WORK / "artifacts"
 OBJECTS = WORK / "objects"
-for d in (UPLOADS, ARTIFACTS, OBJECTS):
+PACKAGES = WORK / "packages"
+for d in (UPLOADS, ARTIFACTS, OBJECTS, PACKAGES):
     d.mkdir(parents=True, exist_ok=True)
 
 mem = Memory(WORK / "memory.db")
@@ -653,12 +655,22 @@ def _bridge_list(raw):
 
 # ------------------------------------------------------------------ objects
 @app.post("/api/objects/import")
-async def import_object(file: UploadFile = File(...)):
-    """Import a GLB, OBJ or FBX object: normalised to metres, footprint centred, base at 0."""
+async def import_object(file: UploadFile = File(...), package: str = Form("")):
+    """
+    Import a GLB, OBJ or FBX object: normalised to metres, footprint centred,
+    base at 0. With a package, the object becomes a new slot of that package
+    instead of a layer of its own.
+    """
     name = Path(file.filename or "object").name
     ext = name.lower().rsplit(".", 1)[-1]
     if ext not in ("glb", "obj", "fbx"):
         raise HTTPException(400, "use a GLB, OBJ or FBX file")
+    pk = None
+    if package:
+        package = _safe_id(package)
+        pk = _package(package)
+        if pk is None:
+            raise HTTPException(404, "unknown package")
     oid = uuid.uuid4().hex[:12]
     folder = OBJECTS / oid
     folder.mkdir(parents=True, exist_ok=True)
@@ -672,9 +684,14 @@ async def import_object(file: UploadFile = File(...)):
         raise HTTPException(400, "could not read %s: %s" % (name, e))
     OB.save(parts, folder)
     meta = {"name": Path(name).stem, "file": name, "format": ext, "scale": 1.0, "turn": 0, **info}
+    if pk is not None:
+        meta["package"] = package
+        pk["slots"].append({"object": oid, "weight": 1.0})
+        _save_package(package, pk)
     (folder / "meta.json").write_text(json.dumps(meta))
-    mem.record("object_import", "imported %s: %.2f x %.2f x %.2f m" % (name, info["width_m"], info["depth_m"],
-                                                                      info["height_m"]), {"id": oid, **meta})
+    mem.record("object_import", "imported %s: %.2f x %.2f x %.2f m%s" % (
+        name, info["width_m"], info["depth_m"], info["height_m"],
+        " into package %s" % pk["name"] if pk is not None else ""), {"id": oid, **meta})
     return {"id": oid, **meta}
 
 
@@ -696,6 +713,7 @@ def list_objects():
 @app.post("/api/objects/{oid}")
 def update_object(oid: str, payload: dict):
     """Change an object's scale, for files whose units were written inconsistently."""
+    oid = _safe_id(oid)
     m = _object_meta(oid)
     if not m:
         raise HTTPException(404, "unknown object")
@@ -710,9 +728,94 @@ def update_object(oid: str, payload: dict):
 @app.delete("/api/objects/{oid}")
 def delete_object(oid: str):
     import shutil
+    oid = _safe_id(oid)
     if not (OBJECTS / oid).exists():
         raise HTTPException(404, "unknown object")
+    m = _object_meta(oid) or {}
     shutil.rmtree(OBJECTS / oid, ignore_errors=True)
+    # an object in a package is one of its slots: the slot goes with it
+    if m.get("package") and _package(m["package"]) is not None:
+        pk = _package(m["package"])
+        pk["slots"] = [sl for sl in pk["slots"] if sl["object"] != oid]
+        _save_package(m["package"], pk)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ packages
+# A package mixes several objects in one placement. Each is stored as
+# packages/<id>.json: a name and its slots, each slot an imported object (its
+# meta says which package it belongs to) with a weight for how often it is picked.
+def _safe_id(x):
+    """Ids are 12 hex characters: anything else never reaches the file system."""
+    x = str(x)
+    if not re.fullmatch(r"[0-9a-f]{12}", x):
+        raise HTTPException(404, "unknown id")
+    return x
+
+
+def _package(pid):
+    if not re.fullmatch(r"[0-9a-f]{12}", str(pid)):
+        return None
+    f = PACKAGES / ("%s.json" % pid)
+    if not f.exists():
+        return None
+    pk = json.loads(f.read_text())
+    pk["slots"] = [sl for sl in pk.get("slots", []) if _object_meta(sl["object"])]   # slots whose object is gone drop out
+    return pk
+
+
+def _save_package(pid, pk):
+    (PACKAGES / ("%s.json" % pid)).write_text(json.dumps({"name": pk["name"], "slots": pk["slots"]}))
+
+
+@app.get("/api/packages")
+def list_packages():
+    out = []
+    for f in sorted(PACKAGES.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        pk = _package(f.stem)
+        if pk is not None:
+            out.append({"id": f.stem, **pk})
+    return {"packages": out}
+
+
+@app.post("/api/packages")
+def create_package(payload: dict):
+    pid = uuid.uuid4().hex[:12]
+    pk = {"name": str(payload.get("name") or "Package %d" % (len(list(PACKAGES.glob("*.json"))) + 1))[:80], "slots": []}
+    _save_package(pid, pk)
+    mem.record("package_create", "created package %s" % pk["name"], {"id": pid})
+    return {"id": pid, **pk}
+
+
+@app.post("/api/packages/{pid}")
+def update_package(pid: str, payload: dict):
+    """Rename a package, or set its slots' weights: {"weights": {object id: weight}}."""
+    pid = _safe_id(pid)
+    pk = _package(pid)
+    if pk is None:
+        raise HTTPException(404, "unknown package")
+    if str(payload.get("name") or "").strip():
+        pk["name"] = str(payload["name"]).strip()[:80]
+    for sl in pk["slots"]:
+        if sl["object"] in (payload.get("weights") or {}):
+            sl["weight"] = max(0.0, float(payload["weights"][sl["object"]]))
+    _save_package(pid, pk)
+    return {"id": pid, **pk}
+
+
+@app.delete("/api/packages/{pid}")
+def delete_package(pid: str):
+    """A package and the objects in its slots."""
+    import shutil
+    pid = _safe_id(pid)
+    pk = _package(pid)
+    if pk is None:
+        raise HTTPException(404, "unknown package")
+    for sl in pk["slots"]:
+        if (_object_meta(sl["object"]) or {}).get("package") == pid:
+            shutil.rmtree(OBJECTS / _safe_id(sl["object"]), ignore_errors=True)
+    (PACKAGES / ("%s.json" % pid)).unlink(missing_ok=True)
+    mem.record("package_delete", "deleted package %s" % pk["name"], {"id": pid})
     return {"ok": True}
 
 
@@ -720,23 +823,38 @@ def _scatter_for_export(raw):
     pl = _placement_list(raw)
     if not pl:
         return None
-    objs = {}
-    for p in pl:
-        if p["object"] not in objs:
-            m = _object_meta(p["object"])
+    objs, pkgs, keep = {}, {}, []
+
+    def have(oid):
+        if oid not in objs:
+            m = _object_meta(oid)
             if m:
-                objs[p["object"]] = {"meta": m, "parts": OB.load_saved(OBJECTS / p["object"])}
-    return {"placements": [p for p in pl if p["object"] in objs], "objects": objs}
+                objs[oid] = {"meta": m, "parts": OB.load_saved(OBJECTS / oid)}
+        return oid in objs
+    for p in pl:
+        if "package" in p:
+            pk = pkgs.get(p["package"]) or _package(p["package"])
+            if pk is not None and [have(sl["object"]) for sl in pk["slots"]].count(True):
+                pkgs[p["package"]] = pk
+                keep.append(p)
+        elif have(p["object"]):
+            keep.append(p)
+    return {"placements": keep, "objects": objs, "packages": pkgs}
 
 
 def _placement_list(raw):
     out = []
     for p in raw or []:
         try:
-            q = {"object": str(p["object"]), "cx": float(p["cx"]), "cy": float(p["cy"]),
-                 "angle": float(p.get("angle", 0.0)), "nx": max(1, int(p.get("nx", 1))),
-                 "ny": max(1, int(p.get("ny", 1))), "gap_x": max(0.0, float(p.get("gap_x", 0.0))),
-                 "gap_y": max(0.0, float(p.get("gap_y", 0.0)))}
+            # one object, or a package: a mix of objects, filling a length (mask
+            # pixels) in rows, its random mix fixed by the seed
+            q = ({"package": str(p["package"]), "seed": int(p.get("seed", 1)) & 0xFFFFFFFF,
+                  "length": max(0.0, float(p.get("length", 0.0)))}
+                 if p.get("package") else {"object": str(p["object"])})
+            q.update({"cx": float(p["cx"]), "cy": float(p["cy"]),
+                      "angle": float(p.get("angle", 0.0)), "nx": max(1, int(p.get("nx", 1))),
+                      "ny": max(1, int(p.get("ny", 1))), "gap_x": max(0.0, float(p.get("gap_x", 0.0))),
+                      "gap_y": max(0.0, float(p.get("gap_y", 0.0)))})
             # a curved placement: copies along the smooth line through these points
             path = [[float(x), float(y)] for x, y in (p.get("path") or [])]
             if len(path) >= 2:
