@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Road Texture Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Dark desktop-tool palette in both viewer themes: images are judged against a neutral dark surround */
+  :root{
+    --app:#1E2226; --panel:#262B30; --panel-2:#2E343A; --field:#1A1E22;
+    --line:#383F46; --ink:#E4E7EA; --muted:#98A0A8; --faint:#6C747C;
+    --view:#34393F; --view-2:#2A2F34;
+    --blue:#3D7BE0; --blue-ink:#8FB6F2; --red:#D8604C; --green:#5CAF7F; --amber:#D9A441;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --app:#1E2226; } }
+  :root[data-theme="dark"]{ --app:#1E2226; }
+  html{ height:100%; scroll-padding-top:env(safe-area-inset-top,0px); }
+  *{ box-sizing:border-box; }
+  /* anything marked hidden stays hidden, whatever display rule it also has */
+  [hidden]{ display:none !important; }
+  body{
+    margin:0; height:100%; background:var(--app); color:var(--ink);
+    font-family:'IBM Plex Sans',system-ui,sans-serif; font-size:13.5px; line-height:1.45;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  button,select,input{ font:inherit; color:inherit; }
+  :focus-visible{ outline:2px solid var(--blue); outline-offset:1px; }
+  .mono{ font-family:'IBM Plex Mono',ui-monospace,monospace; }
+
+  .topbar{ height:46px; flex-shrink:0; display:flex; align-items:stretch; gap:22px; padding:0 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  .app-name{ display:flex; align-items:center; gap:9px; font-weight:600; }
+  .app-mark{ width:16px; height:16px; border-radius:3px; background:
+      linear-gradient(90deg, transparent 43%, #E8E3D3 43%, #E8E3D3 57%, transparent 57%) 0 0/100% 5px repeat-y, #4A5058; }
+  .tabs{ display:flex; gap:2px; }
+  .tab{ background:none; border:none; padding:0 16px; cursor:pointer; color:var(--muted); font-weight:500; border-bottom:2px solid transparent; }
+  .tab:hover{ color:var(--ink); }
+  .tab[aria-selected="true"]{ color:var(--ink); border-bottom-color:var(--blue); }
+  .engine{ margin-left:auto; display:flex; align-items:center; gap:7px; color:var(--muted); font-size:12.5px; }
+  .engine i{ width:8px; height:8px; border-radius:50%; background:var(--amber); }
+
+  .workspace{ flex:1; min-height:0; display:grid; grid-template-columns:290px 1fr 290px; grid-template-rows:1fr 190px; gap:6px; padding:6px; }
+  .tabpane{ display:contents; }
+  .tabpane[hidden]{ display:none; }
+
+  .left{ grid-row:1 / 3; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+  .right{ grid-column:3; grid-row:1 / 2; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+  .pane-wide{ grid-column:2 / 4; grid-row:1; overflow-y:auto; }
+  .bottom{ grid-column:2 / 4; grid-row:2; display:grid; grid-template-columns:1fr 300px; gap:6px; min-height:0; }
+
+  .panel{ background:var(--panel); border:1px solid var(--line); border-radius:6px; }
+  .panel-h{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px 8px; font-weight:600; font-size:14px; }
+  .panel-h small{ font-weight:400; color:var(--muted); font-size:12px; }
+  .panel-b{ padding:0 12px 12px; }
+  .panel-b.tight{ padding:0 8px 8px; }
+
+  .imgrow{ display:grid; grid-template-columns:62px 1fr auto; gap:10px; align-items:center; padding:7px 6px; border-radius:5px; cursor:pointer; }
+  .imgrow:hover{ background:var(--panel-2); }
+  .imgrow.sel{ background:var(--panel-2); box-shadow:inset 2px 0 0 var(--blue); }
+  .thumb{ width:62px; height:46px; border-radius:3px; background:var(--field); border:1px solid var(--line); overflow:hidden; display:grid; place-items:center; color:var(--faint); font-size:18px; }
+  .thumb canvas{ width:100%; height:100%; object-fit:cover; display:block; }
+  .imgrow-t{ font-weight:500; }
+  .imgrow-s{ color:var(--muted); font-size:12px; }
+  .imgrow-s.bad{ color:var(--red); }
+  .load{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:4px 9px; cursor:pointer; font-size:12px; color:var(--muted); }
+  .load:hover{ color:var(--ink); border-color:var(--blue); }
+
+  .pair{ border:1px solid var(--line); border-radius:5px; padding:8px; margin-bottom:8px; background:var(--field); }
+  .pair-h{ display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:12.5px; }
+  .pair-h .dot{ width:8px; height:8px; border-radius:50%; background:var(--faint); flex-shrink:0; }
+  .pair-h .dot.ok{ background:var(--green); } .pair-h .dot.bad{ background:var(--red); }
+  .pair-h .x{ margin-left:auto; background:none; border:none; color:var(--faint); cursor:pointer; font-size:15px; line-height:1; }
+  .pair-h .x:hover{ color:var(--red); }
+  .pair-slots{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; }
+  .pslot{ display:flex; flex-direction:column; gap:3px; align-items:stretch; cursor:pointer; background:none; border:none; padding:0; text-align:left; }
+  .pslot .thumb{ width:100%; height:52px; }
+  .pslot span{ font-size:11.5px; color:var(--muted); }
+  .pslot.sel .thumb{ border-color:var(--blue); }
+  .pslot:disabled{ cursor:not-allowed; opacity:.45; }
+
+  .field{ display:grid; grid-template-columns:1fr 130px; align-items:center; gap:8px; padding:4px 0; }
+  .field label{ color:var(--muted); }
+  .field input[type=number], .select-full{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:5px 8px; width:100%; }
+  .field input[type=range]{ width:100%; accent-color:var(--blue); }
+  .select-full{ margin:4px 0 10px; }
+
+  .btn{ width:100%; border:none; border-radius:5px; padding:10px; font-weight:500; cursor:pointer; background:var(--blue); color:#fff; margin-top:8px; }
+  .btn:disabled{ background:var(--panel-2); color:var(--faint); cursor:not-allowed; }
+  .btn.secondary{ background:var(--panel-2); color:var(--ink); border:1px solid var(--line); }
+  .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
+  .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
+  .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .note{ color:var(--muted); font-size:12px; margin-top:6px; }
+
+  .viewport{
+    grid-column:2; grid-row:1; position:relative; overflow:hidden; border-radius:6px; border:1px solid var(--line);
+    background:radial-gradient(ellipse at 50% 40%, var(--view), var(--view-2));
+    cursor:grab; touch-action:none; min-height:260px;
+  }
+  .viewport.dragging{ cursor:grabbing; }
+  .viewport.inspect .stage{ cursor:crosshair; }
+  .stage{ position:absolute; left:0; top:0; transform-origin:0 0; }
+  .stage canvas{ display:block; box-shadow:0 10px 40px rgba(0,0,0,.45); }
+  .bridge-layer{ position:absolute; left:0; top:0; pointer-events:none; overflow:visible; }
+  .bridge-layer .grab{ pointer-events:all; cursor:move; }
+  .bridge-layer .corner{ pointer-events:all; cursor:nwse-resize; }
+  .bridge-layer .spin{ pointer-events:all; cursor:grab; }
+  .bridge-item{ display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:12.5px;
+                padding:5px 8px; border:1px solid var(--line); border-radius:4px; margin-bottom:5px; cursor:pointer; }
+  .bridge-item.sel{ border-color:var(--red); }
+  .bridge-item .x{ background:none; border:none; color:var(--faint); cursor:pointer; font-size:15px; }
+  .stage.pixelated canvas{ image-rendering:pixelated; }
+  .vp-label{ position:absolute; top:10px; left:12px; font-size:13px; background:rgba(26,30,34,.75); padding:3px 9px; border-radius:4px; pointer-events:none; }
+  .vp-tools{ position:absolute; top:10px; right:10px; display:flex; gap:4px; }
+  .vp-tools button, .chip{ background:rgba(26,30,34,.8); border:1px solid var(--line); border-radius:4px; padding:4px 10px; cursor:pointer; font-size:12px; color:var(--muted); }
+  .vp-tools button:hover{ color:var(--ink); }
+  .vp-empty{ position:absolute; inset:0; display:grid; place-items:center; color:var(--faint); text-align:center; padding:20px; pointer-events:none; }
+  .vp-tools{ align-items:center; }
+  .vp-tools [data-in], .vp-tools [data-out]{ width:28px; padding:4px 0; font-size:14px; line-height:1; }
+  .vp-zoom{ min-width:52px; text-align:center; font-size:12.5px; color:var(--ink);
+            background:rgba(26,30,34,.8); border:1px solid var(--line); border-radius:4px; padding:4px 6px; }
+  .vp-zoom.enlarged{ color:var(--amber); border-color:var(--amber); }
+  .vp-enlarged{ position:absolute; bottom:10px; right:12px; font-size:12px; color:var(--amber);
+                background:rgba(26,30,34,.85); border:1px solid rgba(217,164,65,.4);
+                padding:4px 9px; border-radius:4px; pointer-events:none; }
+
+  .preview{ aspect-ratio:4/3; background:var(--view-2); border:1px solid var(--line); border-radius:4px; overflow:hidden; display:grid; place-items:center; position:relative; cursor:pointer; }
+  .preview canvas{ max-width:100%; max-height:100%; display:block; }
+  .preview .ph{ color:var(--faint); font-size:12px; text-align:center; padding:10px; }
+  .slider-row{ display:flex; align-items:center; gap:8px; margin-top:8px; color:var(--muted); font-size:12px; }
+  .slider-row input{ flex:1; accent-color:var(--blue); }
+
+  .layers{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .layer{ background:none; border:1px solid var(--line); border-radius:4px; padding:4px; cursor:pointer; text-align:left; }
+  .layer .preview{ aspect-ratio:1; border:none; cursor:inherit; }
+  .layer span{ display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--muted); margin-top:4px; }
+  .layer span::before{ content:""; width:9px; height:9px; border-radius:2px; border:1px solid var(--muted); }
+  .layer[aria-pressed="true"]{ border-color:var(--blue); }
+  .layer[aria-pressed="true"] span{ color:var(--ink); }
+  .layer[aria-pressed="true"] span::before{ background:var(--blue); border-color:var(--blue); }
+
+  .tree ul{ list-style:none; margin:0; padding-left:14px; border-left:1px solid var(--line); }
+  .tree > ul{ padding-left:0; border-left:none; }
+  .node{ background:none; border:none; padding:3px 6px; border-radius:4px; cursor:pointer; text-align:left; display:inline-flex; gap:6px; align-items:baseline; font-size:12.5px; }
+  .node:hover{ background:var(--panel-2); }
+  .node .a{ color:var(--faint); }
+  .cdot{ width:7px; height:7px; border-radius:50%; display:inline-block; flex-shrink:0; }
+  .tree-tabs{ display:flex; gap:4px; margin-bottom:8px; }
+  .chip[aria-pressed="true"]{ color:var(--ink); border-color:var(--blue); }
+
+  dl.kv{ display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:0; font-size:12.5px; }
+  dl.kv dt{ color:var(--muted); }
+  dl.kv dd{ margin:0; }
+  .bar{ height:4px; background:var(--field); border-radius:2px; margin-top:3px; overflow:hidden; }
+  .bar i{ display:block; height:100%; }
+  .lesson{ background:var(--field); border-radius:4px; padding:8px 9px; font-size:12.5px; margin-top:8px; }
+  .routes{ list-style:none; padding:0; margin:6px 0 0; font-size:12px; }
+  .routes li{ display:flex; justify-content:space-between; gap:8px; padding:3px 0; border-bottom:1px solid var(--line); }
+  .routes li.tried{ color:var(--faint); text-decoration:line-through; }
+  .routes li.cur{ color:var(--blue-ink); }
+  .empty{ color:var(--faint); font-size:12.5px; margin:0; }
+
+  .console{ background:var(--field); border:1px solid var(--line); border-radius:6px; display:flex; flex-direction:column; min-height:0; }
+  .console .panel-h{ padding:8px 12px 4px; font-size:13.5px; }
+  .log{ list-style:none; margin:0; padding:0 12px 10px; overflow-y:auto; flex:1; font-family:'IBM Plex Mono',monospace; font-size:12.5px; }
+  .log li{ padding:1px 0; color:var(--muted); }
+  .log li.ok{ color:var(--green); } .log li.bad{ color:var(--red); } .log li.hi{ color:var(--ink); }
+  .info{ overflow-y:auto; }
+  .info dl.kv{ font-family:'IBM Plex Mono',monospace; gap:6px 16px; }
+
+  .statusbar{ height:26px; flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 14px; border-top:1px solid var(--line); background:var(--panel); color:var(--muted); font-size:12px; }
+
+  @media (max-width:1100px){
+    body{ overflow:auto; height:auto; }
+    .workspace{ grid-template-columns:1fr; grid-template-rows:auto; }
+    .left,.right,.viewport,.bottom{ grid-column:1; grid-row:auto; }
+    .viewport{ height:60vh; }
+    .bottom{ grid-template-columns:1fr; }
+    .console{ height:180px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="app-name"><span class="app-mark" aria-hidden="true"></span>Road Texture Agent
+    <span title="Interface version" style="font-weight:400;font-size:11px;color:var(--faint);margin-left:6px">v2026.10.01-objects7</span></div>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-tab="train">Train</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="generate">Generate</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="memory">Memory</button>
+  </div>
+  <div class="engine" title="Connection to the local Python server"><i></i>Engine not connected</div>
+</header>
+
+<div class="workspace">
+
+  <!-- ===================== TRAIN TAB ===================== -->
+  <div class="tabpane" id="pane-train">
+    <aside class="left">
+      <section class="panel">
+        <div class="panel-h">Prime <small id="primeCount">0 of 3</small></div>
+        <div class="panel-b tight" id="primeList">
+          <div class="imgrow" data-prime="material">
+            <div class="thumb">+</div>
+            <div><div class="imgrow-t">Material alone</div><div class="imgrow-s">Plain surface, no paint or cracks</div></div>
+            <button class="load" type="button">Load</button>
+          </div>
+          <div class="imgrow" data-prime="line">
+            <div class="thumb">+</div>
+            <div><div class="imgrow-t">Line alone</div><div class="imgrow-s">Real photo of road paint</div></div>
+            <button class="load" type="button">Load</button>
+          </div>
+          <div class="imgrow" data-prime="noisy">
+            <div class="thumb">+</div>
+            <div><div class="imgrow-t">Material with noise</div><div class="imgrow-s">Same surface, with cracks and wear</div></div>
+            <button class="load" type="button">Load</button>
+          </div>
+          <div class="imgrow" id="swRow" title="Optional: a close-up of the sidewalk paving">
+            <div class="thumb">+</div>
+            <div><div class="imgrow-t">Sidewalk paving <span style="color:var(--faint);font-weight:400">(optional)</span></div><div class="imgrow-s">Close-up of the paving. Without it, sidewalks are light concrete</div></div>
+            <button class="load" type="button">Load</button>
+          </div>
+          <button class="btn" id="btnPrime" disabled>Run priming</button>
+          <div class="note" id="primeNote">Load all three images.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Training pairs <small id="pairCount">0 aligned</small></div>
+        <div class="panel-b">
+          <div id="pairList"></div>
+          <div class="field" style="margin-top:8px"><label for="trainScale">Scale (m per px)</label>
+            <input type="number" id="trainScale" value="0.25" step="0.05" min="0.01"></div>
+          <button class="btn secondary" id="btnAddPair">Add pair</button>
+          <button class="btn" id="btnTrain" disabled>Train on pairs</button>
+          <div class="note" id="trainNote">Run priming first, then add at least one aligned pair.</div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="viewport" id="trainVp">
+      <div class="stage"><canvas></canvas></div>
+      <div class="vp-empty">Load an image on the left.<br>It opens here at full resolution.</div>
+      <div class="vp-label" hidden></div>
+      <div class="vp-tools">
+        <button type="button" data-out aria-label="Zoom out" title="Zoom out">−</button>
+        <span class="vp-zoom mono" title="Current zoom">—</span>
+        <button type="button" data-in aria-label="Zoom in" title="Zoom in">+</button>
+        <button type="button" data-fit title="Fit the whole image">Fit</button>
+        <button type="button" data-one title="Show at real size, one image pixel per screen pixel">100%</button>
+      </div>
+      <div class="vp-enlarged" hidden>Past 100%: enlarging existing pixels. Generate at 2× or 4× for more detail.</div>
+    </div>
+
+    <aside class="right">
+      <section class="panel">
+        <div class="panel-h">Isolated noise</div>
+        <div class="panel-b">
+          <div class="preview" id="noisePrev" title="Open in the viewport"><div class="ph">Material with noise minus material alone</div></div>
+          <div class="note" id="noiseNote">Needs both material images.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Alignment <small id="alignWhich"></small></div>
+        <div class="panel-b">
+          <div class="preview" id="alignPrev" title="Open in the viewport"><div class="ph">Mask drawn over the photo</div></div>
+          <div class="slider-row">Mask <input type="range" id="overlayOpacity" min="0" max="100" value="45" aria-label="Mask opacity"></div>
+          <div class="note" id="alignNote">Select a pair to check it.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Training results <small id="trainState"></small></div>
+        <div class="panel-b" id="trainResults"><p class="empty">Train on a pair to see what each part of the road looks like.</p></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Priming results <small id="primeState"></small></div>
+        <div class="panel-b" id="primeResults"><p class="empty">Run priming to see what the three methods measured.</p></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Junctions <small id="juncState"></small></div>
+        <div class="panel-b">
+          <div class="preview" id="juncPrev" title="Open in the viewport"><div class="ph">Select a pair mask, then detect junctions</div></div>
+          <button class="btn secondary" id="btnJunctions" disabled>Detect junctions</button>
+          <div id="juncList"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Memory <small id="memState">empty</small></div>
+        <div class="panel-b">
+          <div id="memSummary"></div>
+          <div class="tree-tabs" style="margin-top:8px;">
+            <button class="chip" aria-pressed="true" data-tree="material">Material</button>
+            <button class="chip" aria-pressed="false" data-tree="noise">Noise</button>
+            <button class="chip" aria-pressed="false" data-tree="lines">Lines</button>
+          </div>
+          <div class="tree" id="treeView"></div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- ===================== GENERATE TAB ===================== -->
+  <div class="tabpane" id="pane-generate" hidden>
+    <aside class="left">
+      <section class="panel">
+        <div class="panel-h">Input</div>
+        <div class="panel-b tight">
+          <div class="imgrow" id="genMaskRow">
+            <div class="thumb">+</div>
+            <div><div class="imgrow-t">Street mask</div><div class="imgrow-s">White is road</div></div>
+            <button class="load" type="button">Load</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Objects <small id="objCount"></small></div>
+        <div class="panel-b">
+          <button class="btn secondary" id="btnImportObj">Import object (GLB, OBJ, FBX)</button>
+          <div class="note" style="color:var(--amber);margin-top:6px">Before importing: the object's front must face the +Y axis (Blender's green arrow). Use ↻ on a layer to turn an object that faces another way. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
+          <div id="objList" style="margin-top:8px"></div>
+          <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
+          <div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
+            <div class="field"><label for="gapX">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
+            <div class="field"><label for="gapY">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div class="note" id="plInfo"></div>
+            <button class="btn secondary" id="btnRemovePl">Remove this placement</button>
+          </div>
+          <div class="note">Drag a rectangle to move it, its corners to add copies (it never shrinks below one object), the round handle to rotate. Blue shows the gaps; copies on the road are crossed out and left out of the 3D model.</div>
+        </div>
+      </section>
+
+      <section class="panel" style="opacity:.55">
+        <div class="panel-h">Foliage <small>coming later</small></div>
+        <div class="panel-b">
+          <button class="btn secondary" disabled>Add foliage</button>
+          <div class="note">Not active yet.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Bridges <small id="bridgeCount"></small></div>
+        <div class="panel-b">
+          <button class="btn secondary" id="btnAddBridge" disabled>Add bridge</button>
+          <div id="bridgeList" style="margin-top:8px"></div>
+          <div class="field"><label for="brHeight">Height (m)</label><input type="number" id="brHeight" value="5" step="0.5" min="0.5"></div>
+          <div class="field"><label for="brRamp">Ramp length (m)</label><input type="number" id="brRamp" value="120" step="10" min="10"></div>
+          <div class="field"><label for="brDeck">Deck thickness (m)</label><input type="number" id="brDeck" value="1" step="0.1" min="0.1"></div>
+          <div class="note">Place the red rectangle along the road that goes over. Drag it to move, a corner to resize, the round handle to rotate. Grey shows where that road ramps up and down; the road it crosses stays on the ground.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Settings</div>
+        <div class="panel-b">
+          <div class="field"><label for="scale">Scale (m per px)</label><input type="number" id="scale" value="1.1" step="0.1" min="0.1"></div>
+          <div class="field"><label for="grainAmt">Surface grain <span id="grainVal" class="mono" style="color:var(--faint)">50</span></label><input type="range" id="grainAmt" min="0" max="100" value="50"></div>
+          <div class="note" style="margin:-2px 0 6px">0 clean, 50 as learned, 100 dirty</div>
+          <div class="field"><label for="noiseAmt">Wear amount</label><input type="range" id="noiseAmt" min="0" max="100" value="50"></div>
+          <div class="field"><label for="matchMat">Match my material colour</label><input type="checkbox" id="matchMat" style="justify-self:start;accent-color:var(--blue)"></div>
+          <div class="field"><label for="seed">Variation seed</label><input type="number" id="seed" value="7" step="1" min="1"></div>
+          <div class="field"><label for="cycleM">Dash cycle (m)</label><input type="number" id="cycleM" value="9" step="0.5" min="1"></div>
+          <div class="field"><label for="lineMode">Line width</label>
+            <select id="lineMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+              <option value="learned">Learned from training</option>
+              <option value="fixed">Fixed, in metres</option>
+            </select></div>
+          <div class="field"><label for="markW">Fixed width (m)</label><input type="number" id="markW" value="0.15" step="0.05" min="0.02" disabled></div>
+          <div class="field"><label for="quality">Quality (1 to 3)</label><input type="number" id="quality" value="1" step="1" min="1" max="3"></div>
+          <div class="field"><label for="outScale">Output size</label>
+            <select id="outScale" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+              <option value="1">1× mask size</option>
+              <option value="2">2× (about 4× slower)</option>
+              <option value="4">4× (about 16× slower)</option>
+            </select></div>
+          <div class="field"><label for="softEdges">Smooth edges</label><input type="checkbox" id="softEdges" checked style="justify-self:start;accent-color:var(--blue)"></div>
+          <button class="btn secondary" id="btnGenJunctions" disabled>Detect junctions</button>
+          <button class="btn" id="btnGenerate" disabled>Generate texture</button>
+          <div style="margin-top:14px;font-weight:600;font-size:13px">3D model</div>
+          <div class="field"><label for="meshMode">Mesh</label>
+            <select id="meshMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+              <option value="tiled">Tiled material, sharp up close</option>
+              <option value="quads">Quads, generated image baked on</option>
+              <option value="traced">Traced outline, triangles</option>
+            </select></div>
+          <div class="field"><label for="meshDetail">Mesh detail</label>
+            <select id="meshDetail" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+              <option value="full">Full: a row every 2 m</option>
+              <option value="optimised">Optimised: rows only where the road bends</option>
+            </select></div>
+          <div class="field"><label for="straight">Straightness <span id="straightVal" class="mono" style="color:var(--faint)">70</span></label><input type="range" id="straight" min="0" max="100" value="70"></div>
+          <div class="note" style="margin:-2px 0 6px">0 follows the mask, 100 one constant width per street</div>
+          <div class="field"><label for="rowSpacing">Row spacing (m)</label><input type="number" id="rowSpacing" value="2" step="0.5" min="0.5"></div>
+          <div class="field"><label for="variation">Large variation <span id="variationVal" class="mono" style="color:var(--faint)">100</span></label><input type="range" id="variation" min="0" max="150" value="100"></div>
+          <div class="note" style="margin:-2px 0 6px">Lighter and darker areas across the city, which hide the tile repeating</div>
+          <div class="field"><label for="markMode">Markings</label>
+            <select id="markMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+              <option value="strips">Separate strips on the road</option>
+              <option value="painted">Painted into the road texture</option>
+            </select></div>
+          <div class="field"><label for="swOn">Sidewalks</label><input type="checkbox" id="swOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
+          <div class="field"><label for="swHeight">Sidewalk height (cm)</label><input type="number" id="swHeight" value="10" step="1" min="0" max="40"></div>
+          <div class="field"><label for="swShare">Width, % of road</label><input type="number" id="swShare" value="30" step="5" min="5" max="100"></div>
+          <div class="field"><label for="swMin">Width, min to max (m)</label>
+            <div style="display:flex;gap:4px"><input type="number" id="swMin" value="1.5" step="0.1" min="0.5" style="width:50%;background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 6px"><input type="number" id="swMax" value="2.5" step="0.1" min="0.5" style="width:50%;background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 6px"></div></div>
+          <div class="note" style="margin:-2px 0 6px">Never more than half the space to the next road, so facing sidewalks cannot overlap</div>
+          <div class="field"><label for="blocksOn">Blocks and islands</label><input type="checkbox" id="blocksOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
+          <div class="note" style="margin:-2px 0 6px">Fills the areas between roads as flat planes at sidewalk height, with the sidewalk paving</div>
+          <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
+          <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
+          <div class="note" id="genNote">Load a street mask.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Review</div>
+        <div class="panel-b">
+          <div class="note" style="margin:0 0 8px;" id="reviewNote">Generate a result first.</div>
+          <label for="problem" style="color:var(--muted); font-size:12.5px;">What's wrong here?</label>
+          <select id="problem" class="select-full" disabled>
+            <option value="">Choose a problem</option>
+            <option value="material_too_noisy">Material is too noisy</option>
+            <option value="material_too_flat">Material looks too flat</option>
+            <option value="lines_not_aligned">Lines are not aligned with the road</option>
+            <option value="bad_quality">Image has bad quality</option>
+            <option value="wrong_library">Material looks wrong, try the next library</option>
+          </select>
+          <div class="note" id="correctionNote" style="margin:0 0 8px"></div>
+          <button class="btn red" id="btnNext" disabled>Apply and generate again</button>
+          <div class="btn-row">
+            <button class="btn green" id="btnAccept" disabled>Looks right</button>
+            <button class="btn secondary" id="btnFlag" disabled>Flag it</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="viewport inspect" id="genVp">
+      <div class="stage"><canvas></canvas><svg id="bridgeLayer" class="bridge-layer"></svg></div>
+      <div class="vp-empty">Your generated texture appears here.<br>Click any spot on it to review that route.</div>
+      <div class="vp-label" hidden>Result</div>
+      <div class="vp-tools">
+        <button type="button" data-out aria-label="Zoom out" title="Zoom out">−</button>
+        <span class="vp-zoom mono" title="Current zoom">—</span>
+        <button type="button" data-in aria-label="Zoom in" title="Zoom in">+</button>
+        <button type="button" data-fit title="Fit the whole image">Fit</button>
+        <button type="button" data-one title="Show at real size, one image pixel per screen pixel">100%</button>
+      </div>
+      <div class="vp-enlarged" hidden>Past 100%: enlarging existing pixels. Generate at 2× or 4× for more detail.</div>
+    </div>
+
+    <aside class="right">
+      <section class="panel">
+        <div class="panel-h">Mask</div>
+        <div class="panel-b"><div class="preview" id="genMaskPrev"><div class="ph">No mask loaded</div></div></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Layers</div>
+        <div class="panel-b">
+          <div class="layers">
+            <button class="layer" aria-pressed="true" data-layer="material"><div class="preview" id="lp-material"><div class="ph">—</div></div><span>Material</span></button>
+            <button class="layer" aria-pressed="true" data-layer="noise"><div class="preview" id="lp-noise"><div class="ph">—</div></div><span>Noise</span></button>
+            <button class="layer" aria-pressed="true" data-layer="markings"><div class="preview" id="lp-markings"><div class="ph">Needs engine</div></div><span>Markings</span></button>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Inspector</div>
+        <div class="panel-b" id="inspector"><p class="empty">Click a spot on the result to see which route painted it.</p></div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- ===================== MEMORY TAB ===================== -->
+  <div class="tabpane" id="pane-memory" hidden>
+    <aside class="left">
+      <section class="panel">
+        <div class="panel-h">Libraries <small id="libState"></small></div>
+        <div class="panel-b">
+          <div id="libList"><p class="empty">Train on a pair to build the libraries.</p></div>
+          <button class="btn" id="btnRecalc">Recalculate</button>
+          <div class="note">Rebuilds one library for each part of the road from the pairs listed here.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Memory</div>
+        <div class="panel-b" id="memSummary2"></div>
+      </section>
+    </aside>
+
+    <section class="panel pane-wide">
+      <div class="panel-h">Trained pairs <small id="pairsState"></small></div>
+      <div class="panel-b" id="pairsTable"><p class="empty">No pairs yet.</p></div>
+      <div class="panel-h" style="margin-top:6px">Material tiles <small id="tilesState"></small></div>
+      <div class="panel-b">
+        <div class="note" style="margin:0 0 10px">Small seamless squares of road surface that repeat along every street in 3D. Each is shown repeating, as it will be seen. Close-up detail comes from your priming close-up; each part's tone from training.</div>
+        <div id="tilesView"><p class="empty">Tiles are built after priming and training.</p></div>
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:10px">
+          <div class="field" style="grid-template-columns:1fr"><label for="tSwPhoto">Paving photo width (m)</label><input type="number" id="tSwPhoto" value="2" step="0.5" min="0.2"></div>
+          <div class="field" style="grid-template-columns:1fr"><label for="tPhoto">Priming photo width (m)</label><input type="number" id="tPhoto" value="2" step="0.5" min="0.2"></div>
+          <div class="field" style="grid-template-columns:1fr"><label for="tSize">Tile covers (m)</label><input type="number" id="tSize" value="4" step="0.5" min="0.5"></div>
+          <div class="field" style="grid-template-columns:1fr"><label for="tPx">Tile pixels</label>
+            <select id="tPx" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px"><option>512</option><option selected>1024</option><option>2048</option></select></div>
+          <div class="field" style="grid-template-columns:1fr"><label for="tVar">Variants per part</label><input type="number" id="tVar" value="3" min="1" max="6" step="1"></div>
+        </div>
+        <button class="btn secondary" id="btnTiles" style="max-width:260px">Rebuild tiles</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== SHARED BOTTOM ===================== -->
+  <div class="bottom">
+    <section class="console">
+      <div class="panel-h">Console</div>
+      <ul class="log" id="log"></ul>
+    </section>
+    <section class="panel info">
+      <div class="panel-h" id="infoTitle">Training info</div>
+      <div class="panel-b" id="info"></div>
+    </section>
+  </div>
+
+</div>
+
+<footer class="statusbar">
+  <span id="status">Ready.</span>
+  <span>Wheel: zoom &nbsp;|&nbsp; Drag: pan<span id="clickHint" hidden> &nbsp;|&nbsp; Click: inspect</span></span>
+</footer>
+
+<input type="file" id="picker" accept="image/png,image/jpeg,image/webp" hidden>
+
+<script src="app.js"></script>
+</body>
+</html>
