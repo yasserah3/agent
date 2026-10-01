@@ -110,6 +110,7 @@
   .bridge-layer .grab{ pointer-events:all; cursor:move; }
   .bridge-layer .corner{ pointer-events:all; cursor:nwse-resize; }
   .bridge-layer .spin{ pointer-events:all; cursor:grab; }
+  .bridge-layer .pt{ pointer-events:all; cursor:move; }
   .bridge-item{ display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:12.5px;
                 padding:5px 8px; border:1px solid var(--line); border-radius:4px; margin-bottom:5px; cursor:pointer; }
   .bridge-item.sel{ border-color:var(--red); }
@@ -328,12 +329,22 @@
           <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
           <div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
-            <div class="field"><label for="gapX">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
-            <div class="field"><label for="gapY">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div class="field"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
+            <div class="field"><label for="gapY" id="gapYLabel">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div id="plCurveBox" hidden>
+              <div class="field"><label for="plRows">Rows</label><input type="number" id="plRows" value="1" step="1" min="1"></div>
+              <div class="btn-row">
+                <button class="btn secondary" id="btnAddPt" title="Add a point in the middle of the longest stretch of the line">Add point</button>
+                <button class="btn secondary" id="btnFlipPl" title="Turn every copy to face the other side of the line">Flip side</button>
+              </div>
+              <button class="btn secondary" id="btnStraight">Make straight again</button>
+            </div>
+            <button class="btn secondary" id="btnCurve" title="Turn this rectangle into a line you can bend to follow a curved street">Bend into a curve</button>
             <div class="note" id="plInfo"></div>
             <button class="btn secondary" id="btnRemovePl">Remove this placement</button>
           </div>
           <div class="note">Drag a rectangle to move it, its corners to add copies (it never shrinks below one object), the round handle to rotate. Blue shows the gaps; copies on the road are crossed out and left out of the 3D model.</div>
+          <div class="note"><b>Curves:</b> select a placement and press <i>Bend into a curve</i>. Double-click the line (or press <i>Add point</i>) to add a point, drag points to bend the line, double-click a point to remove it. Copies fill the line and turn with it; drag an end point to make the line longer or shorter.</div>
         </div>
       </section>
 

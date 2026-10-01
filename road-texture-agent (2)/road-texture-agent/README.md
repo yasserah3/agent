@@ -674,6 +674,31 @@ In the Generate tab, **Objects** sits above Foliage (not active yet) and Bridges
   sidewalk height.
 - Placements are saved with their mask, like bridges.
 
+### Curved placements
+
+For copies along a curved street, select a placement and press **Bend into a
+curve**. The rectangle becomes a dashed line through its middle, with a point at
+each end, holding the same copies as before.
+
+- **Bend it**: double-click the line (or press **Add point**, which adds one in
+  the middle of the longest stretch) and drag the new point. The line always
+  passes through every point and bends smoothly between them (a centripetal
+  Catmull-Rom curve, which never loops or overshoots). Double-click a point in
+  the middle to remove it. Drag an end point to make the line longer or shorter.
+- **Copies fill the line** at the *Gap along the line*, the run centred on it,
+  so a longer line holds more copies. *Rows* adds parallel rows beside the line,
+  *Gap between rows* spaces them.
+- **Copies turn with the curve**: each copy's width runs along the line and its
+  front, its +Y, faces one side of it; the small white arrows show the fronts.
+  **Flip side** turns every copy to face the other side, for example towards the
+  street. The ↻ quarter turn of the object still applies on top.
+- Drag the blue band to move the whole curve. **Make straight again** turns it
+  back into a rectangle from its first point to its last, facing the same way.
+- What the map shows is what the 3D model gets: the map and the export use the
+  same curve steps (`ui/app.js` and `app/curves.py`). Copies on the road are left
+  out, as with rectangles. On a tight bend, copies on the inside of the curve
+  can touch; add a gap or move the line outwards.
+
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.
 ASCII FBX, rigs and animation are not read. OBJ textures need their MTL and

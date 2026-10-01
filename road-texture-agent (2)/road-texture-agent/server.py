@@ -43,7 +43,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.01-objects9"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.01-curves1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -733,10 +733,16 @@ def _placement_list(raw):
     out = []
     for p in raw or []:
         try:
-            out.append({"object": str(p["object"]), "cx": float(p["cx"]), "cy": float(p["cy"]),
-                        "angle": float(p.get("angle", 0.0)), "nx": max(1, int(p.get("nx", 1))),
-                        "ny": max(1, int(p.get("ny", 1))), "gap_x": max(0.0, float(p.get("gap_x", 0.0))),
-                        "gap_y": max(0.0, float(p.get("gap_y", 0.0)))})
+            q = {"object": str(p["object"]), "cx": float(p["cx"]), "cy": float(p["cy"]),
+                 "angle": float(p.get("angle", 0.0)), "nx": max(1, int(p.get("nx", 1))),
+                 "ny": max(1, int(p.get("ny", 1))), "gap_x": max(0.0, float(p.get("gap_x", 0.0))),
+                 "gap_y": max(0.0, float(p.get("gap_y", 0.0)))}
+            # a curved placement: copies along the smooth line through these points
+            path = [[float(x), float(y)] for x, y in (p.get("path") or [])]
+            if len(path) >= 2:
+                q["path"] = path
+                q["flip"] = bool(p.get("flip", False))
+            out.append(q)
         except (KeyError, TypeError, ValueError):
             continue
     return out

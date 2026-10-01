@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.01-curves1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1044,6 +1044,71 @@ const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
     return (o.turn || 0) % 2 ? [d, w, o.height_m * k] : [w, d, o.height_m * k];   // a quarter turn swaps them
   }
 
+  // A curved placement: copies along a smooth line through its points. These
+  // are the same steps as app/curves.py (keep the two alike), so the map shows
+  // exactly what the 3D model gets. Between points the line is a centripetal
+  // Catmull-Rom curve: it passes through every point and never loops.
+  const CURVE_STEPS = 24;                                   // samples per span between two points
+  function curveSamples(P){
+    if(P.length < 2) return P.map(q => q.slice());
+    const n = P.length;
+    const ext = [[2*P[0][0] - P[1][0], 2*P[0][1] - P[1][1]], ...P,
+                 [2*P[n-1][0] - P[n-2][0], 2*P[n-1][1] - P[n-2][1]]];
+    const mix = (a, wa, b, wb, den) => [(wa*a[0] + wb*b[0]) / den, (wa*a[1] + wb*b[1]) / den];
+    const out = [];
+    for(let i = 1; i < ext.length - 2; i++){
+      const p0 = ext[i-1], p1 = ext[i], p2 = ext[i+1], p3 = ext[i+2];
+      const t0 = 0;
+      const t1 = t0 + Math.max(Math.sqrt(Math.hypot(p1[0]-p0[0], p1[1]-p0[1])), 1e-6);
+      const t2 = t1 + Math.max(Math.sqrt(Math.hypot(p2[0]-p1[0], p2[1]-p1[1])), 1e-6);
+      const t3 = t2 + Math.max(Math.sqrt(Math.hypot(p3[0]-p2[0], p3[1]-p2[1])), 1e-6);
+      for(let k = 0; k < CURVE_STEPS; k++){
+        const t = t1 + (t2 - t1) * k / CURVE_STEPS;
+        const a1 = mix(p0, t1 - t, p1, t - t0, t1 - t0);
+        const a2 = mix(p1, t2 - t, p2, t - t1, t2 - t1);
+        const a3 = mix(p2, t3 - t, p3, t - t2, t3 - t2);
+        const b1 = mix(a1, t2 - t, a2, t - t0, t2 - t0);
+        const b2 = mix(a2, t3 - t, a3, t - t1, t3 - t1);
+        out.push(mix(b1, t2 - t, b2, t - t1, t2 - t1));
+      }
+    }
+    out.push(P[n-1].slice());
+    return out;
+  }
+  // copies fill the line at the gap, centred on it; each turns with the curve:
+  // its X along the line, its front (+Y) to the left of the line's direction,
+  // or the right when flipped. Returns [x, y, angle] per copy (angle: its X).
+  function curveCopies(P, w, d, gx, gy, ny, flip){
+    const S = curveSamples(P), seg = [], s = [0];
+    for(let k = 0; k + 1 < S.length; k++){ seg.push(Math.hypot(S[k+1][0]-S[k][0], S[k+1][1]-S[k][1])); s.push(s[k] + seg[k]); }
+    const L = s[s.length - 1], step = Math.max(w + gx, 1e-9);
+    const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
+    const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2, Ly = ny*d + (ny - 1)*gy;
+    const spots = [];
+    for(let i = 0; i < n; i++){
+      const at = Math.min(Math.max(first + i*step, 0), L);
+      let pos = S.length ? S[0].slice() : [0, 0], ang = 0;
+      if(seg.length && L > 0){
+        let k = 0;
+        while(k + 1 < s.length && s[k+1] <= at) k++;
+        k = Math.min(Math.max(k, 0), seg.length - 1);
+        const t = seg[k] > 0 ? (at - s[k]) / seg[k] : 0;
+        pos = [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t];
+        let j = k;                                          // the direction of the nearest span with length
+        while(j < seg.length - 1 && seg[j] <= 1e-12) j++;
+        while(j > 0 && seg[j] <= 1e-12) j--;
+        ang = Math.atan2(S[j+1][1] - S[j][1], S[j+1][0] - S[j][0]);
+      }
+      if(flip) ang += Math.PI;
+      const v = [-Math.sin(ang), Math.cos(ang)];            // across the line, towards the copy's back
+      for(let r = 0; r < ny; r++){
+        const off = -Ly/2 + d/2 + r*(d + gy);
+        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
+      }
+    }
+    return { spots, n, L, samples: S };
+  }
+
   function roadAt(x, y){
     // the mask itself: white is road. Read once per mask
     if(!S.gen.mask || !S.gen.mask.img) return false;
@@ -1057,22 +1122,91 @@ const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
     return maskPixels.d[(yi * maskPixels.w + xi) * 4] > 127;
   }
 
+  const isCurve = p => Array.isArray(p.path) && p.path.length >= 2;
+
   function placementGeom(p){
     const o = objById(p.object); if(!o) return null;
     const m = mppMask(), [w, d] = objSize(o);
+    // one copy: its footprint in mask pixels, turned so its X points along a
+    const copyAt = (cx, cy, a) => {
+      const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], hw = w / m / 2, hd = d / m / 2;
+      const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
+      const onRoad = pts.concat([[cx, cy]]).some(q => roadAt(q[0], q[1]));
+      return { cx, cy, a, u, v, pts, onRoad };
+    };
+    if(isCurve(p)){
+      // worked out in metres, as the 3D export does, then back to mask pixels
+      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip);
+      const line = r.samples.map(q => [q[0]/m, q[1]/m]);
+      const half = (p.ny * d + (p.ny - 1) * p.gap_y) / m / 2;
+      // the band the rows cover, either side of the line: blue between copies is the gap
+      const left = [], right = [];
+      line.forEach((q, k) => {
+        const a = line[Math.max(k - 1, 0)], b = line[Math.min(k + 1, line.length - 1)];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+        left.push([q[0] + nx*half, q[1] + ny*half]); right.push([q[0] - nx*half, q[1] - ny*half]);
+      });
+      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a)), line,
+               outer: left.concat(right.reverse()), along: r.n, length_m: r.L, w: w/m, d: d/m };
+    }
     const a = p.angle * Math.PI / 180, u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
     const Lx = (p.nx * w + (p.nx - 1) * p.gap_x) / m, Ly = (p.ny * d + (p.ny - 1) * p.gap_y) / m;
     const copies = [];
     for(let i = 0; i < p.nx; i++) for(let k = 0; k < p.ny; k++){
       const ox = (-Lx/2 + (w/2 + i*(w + p.gap_x)) / m), oy = (-Ly/2 + (d/2 + k*(d + p.gap_y)) / m);
-      const cx = p.cx + u[0]*ox + v[0]*oy, cy = p.cy + u[1]*ox + v[1]*oy;
-      const hw = w / m / 2, hd = d / m / 2;
-      const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
-      const onRoad = pts.concat([[cx, cy]]).some(q => roadAt(q[0], q[1]));
-      copies.push({ cx, cy, pts, onRoad });
+      copies.push(copyAt(p.cx + u[0]*ox + v[0]*oy, p.cy + u[1]*ox + v[1]*oy, a));
     }
     const outer = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [p.cx + u[0]*sx*Lx/2 + v[0]*sy*Ly/2, p.cy + u[1]*sx*Lx/2 + v[1]*sy*Ly/2]);
     return { u, v, Lx, Ly, w: w/m, d: d/m, copies, outer };
+  }
+
+  // editing a curve: points are kept in mask pixels, like the rectangles
+  function curveCentre(p){
+    // cx, cy stay meaningful (the middle of the points) for anything that reads them
+    p.cx = p.path.reduce((s, q) => s + q[0], 0) / p.path.length;
+    p.cy = p.path.reduce((s, q) => s + q[1], 0) / p.path.length;
+  }
+  function curveLine(p){
+    // the line's samples in mask pixels: CURVE_STEPS per span between two points
+    const m = mppMask();
+    return curveSamples(p.path.map(q => [q[0]*m, q[1]*m])).map(q => [q[0]/m, q[1]/m]);
+  }
+  function addCurvePointNear(p, q){
+    // the nearest spot on the line goes in between the two points of its span,
+    // so the line keeps its shape until the new point is dragged
+    const S = curveLine(p);
+    let best = null;
+    for(let k = 0; k + 1 < S.length; k++){
+      const a = S[k], b = S[k+1], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx*dx + dy*dy;
+      const t = l2 > 0 ? Math.min(Math.max(((q[0] - a[0])*dx + (q[1] - a[1])*dy) / l2, 0), 1) : 0;
+      const c = [a[0] + dx*t, a[1] + dy*t], dd = Math.hypot(c[0] - q[0], c[1] - q[1]);
+      if(!best || dd < best.dd) best = { dd, c, span: Math.min(Math.floor(k / CURVE_STEPS), p.path.length - 2) };
+    }
+    if(!best) return false;
+    const near = i => Math.hypot(p.path[i][0] - best.c[0], p.path[i][1] - best.c[1]) < 1.5;
+    if(near(best.span) || near(best.span + 1)) return false;             // already a point there
+    p.path.splice(best.span + 1, 0, best.c);
+    return true;
+  }
+  function addCurvePointMiddle(p){
+    // in the middle of the longest stretch between two points
+    const S = curveLine(p);
+    let bestSpan = 0, bestLen = -1;
+    for(let i = 0; i + 1 < p.path.length; i++){
+      let len = 0;
+      for(let k = i*CURVE_STEPS; k < (i + 1)*CURVE_STEPS; k++) len += Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]);
+      if(len > bestLen){ bestLen = len; bestSpan = i; }
+    }
+    let run = 0;
+    for(let k = bestSpan*CURVE_STEPS; k < (bestSpan + 1)*CURVE_STEPS; k++){
+      const l = Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]);
+      if(run + l >= bestLen / 2){
+        const t = l > 0 ? (bestLen / 2 - run) / l : 0;
+        p.path.splice(bestSpan + 1, 0, [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t]);
+        return;
+      }
+      run += l;
+    }
   }
 
   function drawScatter(f, hr){
@@ -1093,8 +1227,30 @@ const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
           el('line', { x1:c.pts[1][0]*f, y1:c.pts[1][1]*f, x2:c.pts[3][0]*f, y2:c.pts[3][1]*f, stroke:'#ddd', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
         }
       });
+      const ob = objById(p.object), turn = (ob && ob.turn) || 0;
+      if(g0.curve){
+        p.nx = g0.along;                                     // copies along the line, for the panel and the file
+        // the line itself, then a small arrow on each copy's front: Blender's +Y, turned with the curve
+        el('polyline', { points: g0.line.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
+          'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g);
+        g0.copies.forEach(c => {
+          const th = c.a + turn * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
+          const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * g0.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * g0.d/2;
+          const fx = c.cx + fd[0]*reach, fy = c.cy + fd[1]*reach, s = Math.min(hr*1.4/f, Math.min(g0.w, g0.d) / 3);
+          el('polygon', { points: [[fx + fd[0]*s*1.4, fy + fd[1]*s*1.4], [fx - sd[0]*s, fy - sd[1]*s], [fx + sd[0]*s, fy + sd[1]*s]].map(P).join(' '),
+            fill:'#fff', 'pointer-events':'none' }, g);
+        });
+        // the points: drag to bend, double-click one in the middle to remove it
+        p.path.forEach((q, k) => {
+          const end = k === 0 || k === p.path.length - 1;
+          const c = el('circle', { cx:q[0]*f, cy:q[1]*f, r: end ? hr : hr*0.85, class:'pt',
+            fill: end ? '#fff' : '#4682DC', stroke: end ? '#4682DC' : '#fff', 'stroke-width': hr*0.35 }, g);
+          c.addEventListener('pointerdown', e => startScatterDrag(e, i, 'point', k));
+        });
+        return;
+      }
       // the front: Blender's +Y, the top edge at rotation 0, turned with the object
-      const ob = objById(p.object), th = (p.angle + 90 * ((ob && ob.turn) || 0)) * Math.PI / 180;
+      const th = (p.angle + 90 * turn) * Math.PI / 180;
       const fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
       const reach = Math.abs(fd[0]*g0.u[0] + fd[1]*g0.u[1]) * g0.Lx/2 + Math.abs(fd[0]*g0.v[0] + fd[1]*g0.v[1]) * g0.Ly/2;
       const fx = p.cx + fd[0]*reach, fy = p.cy + fd[1]*reach;
@@ -1114,16 +1270,41 @@ const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
   }
 
   let sdrag = null;
-  function startScatterDrag(e, i, mode){
+  // double-clicks are told apart here: the map is redrawn on every press, so
+  // the browser's own dblclick never reaches the same element twice
+  let lastPress = null;
+  function isDoublePress(i, what, q){
+    const now = performance.now(), prev = lastPress;
+    lastPress = { t: now, i, what, q };
+    const dbl = prev && now - prev.t < 400 && prev.i === i && prev.what === what
+      && Math.hypot(q[0] - prev.q[0], q[1] - prev.q[1]) * shown() < 8;
+    if(dbl) lastPress = null;
+    return dbl;
+  }
+  function startScatterDrag(e, i, mode, k){
     e.stopPropagation(); e.preventDefault();
     S.gen.plSel = i;
-    sdrag = { i, mode, start: toMask(e), orig: { ...S.gen.placements[i] } };
+    const p = S.gen.placements[i], q = toMask(e);
+    if(isCurve(p) && isDoublePress(i, mode + (k ?? ''), q)){
+      if(mode === 'point' && k > 0 && k < p.path.length - 1){
+        p.path.splice(k, 1); curveCentre(p); log('Point removed.'); saveScatter(); return;
+      }
+      if(mode === 'move' && addCurvePointNear(p, q)){
+        curveCentre(p); log('Point added: drag it to bend the line.'); saveScatter(); return;
+      }
+    }
+    sdrag = { i, mode, k, start: q, orig: { ...p, path: isCurve(p) ? p.path.map(r => r.slice()) : undefined } };
     drawBridges();
   }
   addEventListener('pointermove', e => {
     if(!sdrag) return;
     const p = S.gen.placements[sdrag.i], o = sdrag.orig, q = toMask(e);
-    if(sdrag.mode === 'move'){
+    if(sdrag.mode === 'move' && o.path){
+      const dx = q[0] - sdrag.start[0], dy = q[1] - sdrag.start[1];
+      p.path = o.path.map(r => [r[0] + dx, r[1] + dy]); curveCentre(p);
+    } else if(sdrag.mode === 'point'){
+      p.path[sdrag.k] = [q[0], q[1]]; curveCentre(p);
+    } else if(sdrag.mode === 'move'){
       p.cx = o.cx + q[0] - sdrag.start[0]; p.cy = o.cy + q[1] - sdrag.start[1];
     } else if(sdrag.mode === 'size'){
       // stretch adds whole copies; the rectangle never goes below one object
@@ -1155,12 +1336,54 @@ const UI_VERSION = '2026.10.01-objects9';   // must match VERSION in server.py
     const o = objById(p.object);
     const g0 = placementGeom(p);
     const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
-    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: ${o ? o.name : 'missing object'}`;
+    const curve = isCurve(p);
+    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: ${o ? o.name : 'missing object'}` + (curve ? ', curved' : '');
+    $('#gapXLabel').textContent = curve ? 'Gap along the line (m)' : 'Gap along X (m)';
+    $('#gapYLabel').textContent = curve ? 'Gap between rows (m)' : 'Gap along Y (m)';
+    $('#plCurveBox').hidden = !curve; $('#btnCurve').hidden = curve;
     if(document.activeElement !== $('#gapX')) $('#gapX').value = p.gap_x;
     if(document.activeElement !== $('#gapY')) $('#gapY').value = p.gap_y;
-    $('#plInfo').textContent = `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies` + (onRoad ? `, ${onRoad} on the road (left out)` : '')
-      + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '');
+    if(document.activeElement !== $('#plRows')) $('#plRows').value = p.ny;
+    const road = onRoad ? `, ${onRoad} on the road (left out)` : '';
+    $('#plInfo').textContent = curve && g0
+      ? `${g0.along} along the line × ${p.ny} row${p.ny > 1 ? 's' : ''} = ${g0.copies.length} copies${road}, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
+      : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
+        + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '');
   }
+  $('#plRows').addEventListener('input', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    p.ny = Math.max(1, Math.round(+$('#plRows').value || 1));
+    drawBridges(); clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);
+  });
+  $('#btnCurve').addEventListener('click', () => {
+    // the rectangle's middle line, end to end: the same copies, now on a line that can bend
+    const p = S.gen.placements[S.gen.plSel]; if(!p || isCurve(p)) return;
+    const g0 = placementGeom(p); if(!g0) return;
+    const hx = g0.u[0] * g0.Lx / 2, hy = g0.u[1] * g0.Lx / 2;
+    p.path = [[p.cx - hx, p.cy - hy], [p.cx + hx, p.cy + hy]]; p.flip = false;
+    log('Curve: double-click the line (or press Add point) to add a point, drag points to bend it, '
+      + 'double-click a point to remove it. Drag an end to make the line longer or shorter.');
+    saveScatter();
+  });
+  $('#btnAddPt').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    addCurvePointMiddle(p); curveCentre(p); log('Point added: drag it to bend the line.'); saveScatter();
+  });
+  $('#btnFlipPl').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    p.flip = !p.flip; log(`Copies now face the ${p.flip ? 'other' : 'first'} side of the line.`); saveScatter();
+  });
+  $('#btnStraight').addEventListener('click', () => {
+    // back to a rectangle along the line from its first point to its last, facing the same way
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    const o = objById(p.object), A = p.path[0], B = p.path[p.path.length - 1];
+    const m = mppMask(), w = o ? objSize(o)[0] : 1, len = Math.hypot(B[0] - A[0], B[1] - A[1]) * m;
+    p.cx = (A[0] + B[0]) / 2; p.cy = (A[1] + B[1]) / 2;
+    p.angle = Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI + (p.flip ? 180 : 0);
+    p.nx = Math.max(1, Math.floor((len + p.gap_x) / Math.max(w + p.gap_x, 1e-9) + 1e-6));
+    delete p.path; delete p.flip;
+    log('Placement is a straight rectangle again.'); saveScatter();
+  });
   ['#gapX', '#gapY'].forEach((id, k) => $(id).addEventListener('input', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     const val = Math.max(0, +$(id).value || 0);

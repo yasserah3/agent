@@ -25,6 +25,7 @@ from shapely.geometry import Polygon
 
 from app.generation import prepare_mask
 from app import quadmesh as QM
+from app import curves as CV
 from scipy import ndimage as ndi
 
 MAX_TEXTURE = 8192          # the largest texture Unreal accepts without extra settings
@@ -1315,10 +1316,12 @@ def _sidewalk_union(mesh):
 def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, images, materials, meshes):
     """
     Each placement is a grid of copies of one object: nx along the rectangle's
-    width, ny along its depth, with the gaps between them. Each copy is an
-    instance of the object, standing on the block or sidewalk. Copies whose
-    footprint lies on the road are left out: objects stand only on blocks and
-    sidewalks.
+    width, ny along its depth, with the gaps between them. A curved placement
+    has a path instead: its copies fill the smooth line through the path's
+    points, each turned with the curve, in ny rows (app/curves.py). Each copy
+    is an instance of the object, standing on the block or sidewalk. Copies
+    whose footprint lies on the road are left out: objects stand only on
+    blocks and sidewalks.
     """
     from shapely.geometry import Polygon
     from shapely import make_valid
@@ -1337,29 +1340,37 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
         w, d = meta["width_m"] * k, meta["depth_m"] * k
         if turn % 2:
             w, d = d, w                                         # a quarter turn swaps width and depth
-        a = math.radians(p["angle"])
-        u = np.array([math.cos(a), math.sin(a)])                 # along the width, in image axes
-        v = np.array([-u[1], u[0]])                               # along the depth
-        Lx = p["nx"] * w + (p["nx"] - 1) * p["gap_x"]
-        Ly = p["ny"] * d + (p["ny"] - 1) * p["gap_y"]
-        c = np.array([p["cx"], p["cy"]]) * mpp_mask              # metres, image axes
-        for i in range(p["nx"]):
-            for j in range(p["ny"]):
-                cc = c + u * (-Lx / 2 + w / 2 + i * (w + p["gap_x"])) + v * (-Ly / 2 + d / 2 + j * (d + p["gap_y"]))
-                corners = [cc + u * sx * w / 2 + v * sy * d / 2 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
-                fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in corners])
-                if road.intersection(fp).area > 0.02 * fp.area:
-                    skipped += 1
-                    continue
-                # image x right, image y down = world +X, +Z; rotation about the up axis
-                tr = (cc[0] - W * mpp_out / 2, stand_m, cc[1] - H * mpp_out / 2)
-                # the object keeps the orientation it was modelled in: at rotation 0
-                # its front (Blender's +Y) faces the top of the map. Each turn adds a
-                # quarter turn clockwise, seen from above
-                phi = -(a + turn * math.pi / 2)
-                q = (0.0, math.sin(phi / 2), 0.0, math.cos(phi / 2))
-                by_obj.setdefault(p["object"], []).append((tr, q, k))
-                placed += 1
+        # every copy: its centre in metres (image axes) and the direction of its X
+        if p.get("path"):
+            spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
+                                    p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False))
+            spots = [(np.array([x, y]), ang) for x, y, ang in spots]
+        else:
+            a = math.radians(p["angle"])
+            u = np.array([math.cos(a), math.sin(a)])             # along the width, in image axes
+            v = np.array([-u[1], u[0]])                           # along the depth
+            Lx = p["nx"] * w + (p["nx"] - 1) * p["gap_x"]
+            Ly = p["ny"] * d + (p["ny"] - 1) * p["gap_y"]
+            c = np.array([p["cx"], p["cy"]]) * mpp_mask          # metres, image axes
+            spots = [(c + u * (-Lx / 2 + w / 2 + i * (w + p["gap_x"])) + v * (-Ly / 2 + d / 2 + j * (d + p["gap_y"])), a)
+                     for i in range(p["nx"]) for j in range(p["ny"])]
+        for cc, a in spots:
+            u = np.array([math.cos(a), math.sin(a)])
+            v = np.array([-u[1], u[0]])
+            corners = [cc + u * sx * w / 2 + v * sy * d / 2 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in corners])
+            if road.intersection(fp).area > 0.02 * fp.area:
+                skipped += 1
+                continue
+            # image x right, image y down = world +X, +Z; rotation about the up axis
+            tr = (cc[0] - W * mpp_out / 2, stand_m, cc[1] - H * mpp_out / 2)
+            # the object keeps the orientation it was modelled in: at rotation 0
+            # its front (Blender's +Y) faces the top of the map. Each turn adds a
+            # quarter turn clockwise, seen from above
+            phi = -(a + turn * math.pi / 2)
+            q = (0.0, math.sin(phi / 2), 0.0, math.cos(phi / 2))
+            by_obj.setdefault(p["object"], []).append((tr, q, k))
+            placed += 1
       except Exception as e:
         problems.append("%s: %s" % (scatter["objects"].get(p["object"], {}).get("meta", {}).get("name", "object"), e))
     for oid, inst in list(by_obj.items()):
