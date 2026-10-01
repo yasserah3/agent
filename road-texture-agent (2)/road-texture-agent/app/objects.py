@@ -78,12 +78,14 @@ def _from_trimesh(path):
             continue
         uv, image, colour = None, None, None
         vis = m.visual
-        if getattr(vis, "kind", None) == "texture" and getattr(vis, "uv", None) is not None:
-            uv = np.array(vis.uv, float)
+        if getattr(vis, "kind", None) == "texture":
+            # a material: its texture needs texture coordinates, its plain colour does not
             mat = getattr(vis, "material", None)
-            img = getattr(mat, "baseColorTexture", None) or getattr(mat, "image", None)
-            if img is not None:
-                image = img.convert("RGB")
+            if getattr(vis, "uv", None) is not None:
+                uv = np.array(vis.uv, float)
+                img = getattr(mat, "baseColorTexture", None) or getattr(mat, "image", None)
+                if img is not None:
+                    image = img.convert("RGB")
             fac = getattr(mat, "baseColorFactor", None)
             if fac is not None:
                 colour = tuple(np.asarray(fac, float).ravel()[:4] / (255.0 if np.max(fac) > 1 else 1.0))
