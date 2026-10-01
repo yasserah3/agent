@@ -641,23 +641,25 @@ next to `server.py`, or set the `RTA_WORKSPACE` environment variable.
 In the Generate tab, **Objects** sits above Foliage (not active yet) and Bridges.
 
 - **Import** a GLB, OBJ or FBX. Model it with its **front facing +Y** (Blender's
-  green arrow). Objects keep their modelled orientation: at rotation 0 the front
-  faces the top of the map, and the white arrow on the rectangle marks it. The
-  **↻** button on a layer turns an object a quarter turn within its rectangle,
-  for objects modelled facing another way.
-- Objects are imported in **their own frame**: if the object was rotated or
-  moved in the scene it came from, that is undone, so its own +Y stays its front
-  (its scale is kept). When the file holds several separate objects (walls,
-  windows and so on as separate objects), the axes of the main one, the one
-  with the most geometry, are used, and every other part keeps its place
-  relative to it. The console says which frame was used after each import.
-- Objects are then **straightened by their own shape**: the tightest rectangle
-  around the footprint is found and the object turned (never more than 45
-  degrees) so it lines up with the axes. This removes a tilt however it got into
-  the file, including geometry modelled at an angle. The console reports the
-  correction; use the turn button if the wrong side ends up at the front. Each object is brought to metres, Y up, its
-  footprint centred and its base at height 0, and becomes a layer showing its
-  real size. FBX files write units inconsistently between programs (a test file
+  green arrow). The **↻** button on a layer turns an object a quarter turn
+  within its rectangle, for objects modelled facing another way.
+- Objects keep **their own axes**, the ones Blender shows on the object
+  (Transform orientation: Local), whatever the object was rotated to in its
+  scene. The white arrow on the map points to the object's own +Y, and at
+  rotation 0 that is the top of the map. Only the object's turn about the up
+  axis is undone, so it still stands as it did: a model carrying Blender's
+  rotation X 90 is not laid down. When the file holds several separate objects
+  (walls, windows and so on), the axes of the main one, the one with the most
+  geometry, are used, and every other part keeps its place relative to it. The
+  console says which axes were used after each import. OBJ files store no
+  object axes, so an OBJ keeps the axes of the scene it was exported from: use
+  GLB or FBX to keep an object's own axes.
+- Nothing turns an object away from its axes: the earlier squaring-up by the
+  tightest rectangle around the footprint (up to 45 degrees) is gone, and so is
+  a bug that laid FBX files from Blender on their side. Objects imported
+  before this change keep their old orientation: import them again.
+- Each object is brought to metres, Y up, its footprint centred and its base at
+  height 0, and becomes a layer showing its real size. FBX files write units inconsistently between programs (a test file
   came in at 150 m), so each layer has a **scale** to correct it; a size over
   60 m is flagged.
 - **Add selected object to the map** places a rectangle at the object's real
