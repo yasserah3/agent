@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.01-objects7';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.01-objects8';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1244,7 +1244,7 @@ const UI_VERSION = '2026.10.01-objects7';   // must match VERSION in server.py
         if(!r.ok) throw new Error(res.detail || 'import failed');
         S.gen.objects.push(res); S.gen.objSel = res.id;
         log(`Imported ${res.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m, ${res.triangles.toLocaleString()} triangles.`, 'ok');
-        if(res.frame) log(`  Oriented by ${res.frame}: at rotation 0 its +Y faces the top of the map.`);
+        if(res.frame) log(`  Kept ${res.frame}: at rotation 0 its +Y faces the top of the map.`);
         if(res.straightened_deg) log(`  Straightened by ${res.straightened_deg}° so its footprint lines up with the axes. If the wrong side is now the front, use ↻.`);
         if(Math.max(res.width_m, res.depth_m, res.height_m) > 60)
           log('  That is very large for an object: the file\'s units were probably off. Set its scale (for example 0.01).', 'bad');

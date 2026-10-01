@@ -6,11 +6,12 @@ metres, Y up, its footprint centred on the origin and its lowest point at
 height 0. Its footprint (width along X, depth along Z) is then exactly the size
 of the rectangle shown on the map.
 
-Front: the object keeps the orientation it was modelled in. Its front is the
-direction of Blender's +Y axis (the green arrow), which arrives here as -Z: the
-top of the map at rotation 0. Every conversion on the way is a rotation, never
-a mirror, so nothing is flipped. A layer's quarter-turn setting handles objects
-modelled facing another way.
+Front: the object keeps the orientation it has in its file, the way it looks in
+the program it came from, including any rotation on its objects. Its front is
+the direction of Blender's +Y axis (the green arrow), which arrives here as -Z:
+the top of the map at rotation 0. Every conversion on the way is a rotation,
+never a mirror, so nothing is flipped. A layer's quarter-turn setting handles
+objects modelled facing another way.
 
 GLB and OBJ are read with trimesh. FBX has no ready-made Python reader, so a
 small reader for binary FBX is included: meshes, UVs, model transforms, unit
@@ -36,16 +37,17 @@ def _part(pos, faces, uv=None, image=None, colour=None, name="part"):
             "name": name}
 
 
+# how every import is oriented, for the console
+SCENE_FRAME = "the orientation it has in its file"
+
+
 def _from_trimesh(path):
     import trimesh
     scene = trimesh.load(path, force="scene", process=False)
-    _gltf_object_frame.note = None
-    frame = _gltf_object_frame(scene)
     parts = []
+    # every mesh where the scene puts it, rotations included: the object looks
+    # as it did in the program it came from
     meshes = scene.dump(concatenate=False)
-    if frame is not None:
-        for m in meshes:
-            m.apply_transform(frame)
     for m in meshes:
         if not hasattr(m, "faces") or len(m.faces) == 0:
             continue
@@ -70,40 +72,8 @@ def _from_trimesh(path):
             colour = tuple(c)
         parts.append(_part(m.vertices, m.faces, uv, image, colour, name=str(getattr(m, "metadata", {}).get("name", "part"))))
     for q in parts:
-        q["frame"] = _gltf_object_frame.note or "the scene's axes"
+        q["frame"] = SCENE_FRAME
     return parts
-
-
-def _gltf_object_frame(scene):
-    """
-    When all geometry hangs under one top-level node, the transform that undoes
-    that node's position and rotation (keeping its scale), so the object keeps
-    its own axes. None when there are several top-level objects.
-    """
-    g = scene.graph
-    base = g.base_frame
-    parents = g.transforms.parents
-    tops, weight = set(), {}
-    for node in g.nodes_geometry:
-        cur = node
-        while parents.get(cur) not in (None, base):
-            cur = parents[cur]
-        tops.add(cur)
-        geom = scene.geometry.get(g[node][1]) if g[node][1] is not None else None
-        weight[cur] = weight.get(cur, 0) + (len(geom.faces) if geom is not None and hasattr(geom, "faces") else 0)
-    if not tops:
-        return None
-    # one top-level object: its frame; several: the main one's, the one with the most geometry
-    top = max(tops, key=lambda k: weight.get(k, 0))
-    _gltf_object_frame.note = ("its own axes" if len(tops) == 1 else
-                               "the axes of its main part '%s' (%d separate objects in the file)" % (top, len(tops)))
-    T = g.get(top)[0]
-    # split the top node's transform into position, rotation and scale
-    Mlin = T[:3, :3]
-    sc = np.linalg.norm(Mlin, axis=0)
-    R = Mlin / np.where(sc > 1e-12, sc, 1.0)
-    keep = np.eye(4); keep[:3, :3] = R; keep[:3, 3] = T[:3, 3]
-    return np.linalg.inv(keep)
 
 
 # ----------------------------------------------------------------- binary FBX
@@ -243,50 +213,11 @@ def _from_fbx(path):
             cur = nxt[0] if nxt else None
         return M
 
-    def root_of(model_id):
-        cur, seen = model_id, set()
-        while cur not in seen:
-            seen.add(cur)
-            ups = [q for q in parent_of.get(cur, []) if q in by_id and by_id[q][0] == "Model"]
-            if not ups:
-                return cur
-            cur = ups[0]
-        return cur
-
-    # the object's own frame: when every mesh belongs to one root object, the
-    # geometry is taken relative to that object, so the object keeps its own
-    # axes (its +Y stays its front) whatever it was rotated to in the scene it
-    # came from. Its scale is kept; its rotation and position are not.
-    geo_models = {}
-    for gid, g in by_id.items():
-        if g[0] == "Geometry":
-            ms = [q for q in parent_of.get(gid, []) if q in by_id and by_id[q][0] == "Model"]
-            if ms:
-                geo_models[gid] = ms[0]
-    roots = {root_of(mid) for mid in geo_models.values()}
-    local_frame = None
-    frame_note = None
-    if roots:
-        # one top-level object: its own frame. Several (walls, windows... as
-        # separate objects): the frame of the main one, the one with the most
-        # geometry, with every other part placed relative to it
-        weight = {}
-        for gid, mid in geo_models.items():
-            pv = _kid(by_id[gid], "PolygonVertexIndex")
-            weight[root_of(mid)] = weight.get(root_of(mid), 0) + (len(pv[1][0]) if pv else 0)
-        r = max(roots, key=lambda k: weight.get(k, 0))
-        rname = by_id[r][1][1].split("\x00")[0] if isinstance(by_id[r][1][1], str) else "object"
-        frame_note = ("its own axes" if len(roots) == 1 else
-                      "the axes of its main part '%s' (%d separate objects in the file)" % (rname, len(roots)))
-        pr = _props70(by_id[r])
-        Rr = np.eye(4); Rr[:3, :3] = _euler_xyz(pr.get("Lcl Rotation", [0, 0, 0])[:3])
-        Tr = np.eye(4); Tr[:3, 3] = pr.get("Lcl Translation", [0, 0, 0])[:3]
-        local_frame = np.linalg.inv(Tr @ Rr)                         # undo position and rotation only
-    # the object's own up axis: Blender and 3ds Max model with Z up and say so in
-    # OriginalUpAxis; their local geometry is turned to Y up here
-    src_up = int((gs.get("OriginalUpAxis") or gs.get("UpAxis") or [1])[0])
-    z_up_local = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], float)   # (x, y, z) -> (x, z, -y)
-
+    # every mesh is placed where the scene puts it, rotations included, then
+    # turned from the file's axes to Y up: the object looks as it did in the
+    # program it came from. (Undoing the objects' own rotations instead turned
+    # any object whose rotation was not zero, and Blender writes no usable
+    # OriginalUpAxis, so its buildings came in lying on their side.)
     parts = []
     for gid, g in by_id.items():
         if g[0] != "Geometry" or len(g[1]) < 3 or g[1][2] != "Mesh":
@@ -333,15 +264,8 @@ def _from_fbx(path):
         P = np.array(P, float)
         models = [q for q in parent_of.get(gid, []) if q in by_id and by_id[q][0] == "Model"]
         M = world(models[0]) if models else np.eye(4)
-        if local_frame is not None:
-            L = local_frame @ M
-            P = (L[:3, :3] @ P.T).T + L[:3, 3]
-            if src_up == 2:
-                P = (z_up_local @ P.T).T
-            P = P * unit / 100.0                                        # metres, Y up, front -Z
-        else:
-            P = (M[:3, :3] @ P.T).T + M[:3, 3]
-            P = (axis @ P.T).T * unit / 100.0                           # metres, Y up, Z front
+        P = (M[:3, :3] @ P.T).T + M[:3, 3]
+        P = (axis @ P.T).T * unit / 100.0                               # metres, Y up, front -Z
         # material colour and texture, if any
         colour, image = None, None
         mats = [c for c, kind, _ in children.get(models[0], [])
@@ -369,7 +293,7 @@ def _from_fbx(path):
     if not parts:
         raise ValueError("no meshes found in this FBX")
     for q in parts:
-        q["frame"] = frame_note or "the scene's axes"
+        q["frame"] = SCENE_FRAME
     return parts
 
 

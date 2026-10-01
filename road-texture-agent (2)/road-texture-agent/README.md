@@ -645,12 +645,15 @@ In the Generate tab, **Objects** sits above Foliage (not active yet) and Bridges
   faces the top of the map, and the white arrow on the rectangle marks it. The
   **↻** button on a layer turns an object a quarter turn within its rectangle,
   for objects modelled facing another way.
-- Objects are imported in **their own frame**: if the object was rotated or
-  moved in the scene it came from, that is undone, so its own +Y stays its front
-  (its scale is kept). When the file holds several separate objects (walls,
-  windows and so on as separate objects), the axes of the main one, the one
-  with the most geometry, are used, and every other part keeps its place
-  relative to it. The console says which frame was used after each import.
+- Objects are imported **as they look in the program they came from**: any
+  rotation on the object (or on a parent) in that scene is kept, so +Y in the
+  viewport is the front. When the file holds several separate objects (walls,
+  windows and so on), every part keeps its place. Earlier versions undid the
+  object's own rotation instead, which turned any object whose rotation was not
+  zero (a building rotated 90 degrees in Blender came in turned back 90
+  degrees), and laid buildings exported as FBX from Blender on their side.
+  Objects imported before this change keep their old orientation: import them
+  again.
 - Objects are then **straightened by their own shape**: the tightest rectangle
   around the footprint is found and the object turned (never more than 45
   degrees) so it lines up with the axes. This removes a tilt however it got into
