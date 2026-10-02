@@ -246,7 +246,14 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         # which have no centre line; and a piece with room for only one dash
         # would carry a lonely dash, so it needs room for at least two
         narrow_ramp = (grp is not None and 2 * float(np.median(hw_final)) * mpp < 0.8 * road_w_m)
-        if dashes and not narrow_ramp:
+        # an inner street drawn without markings (app/streets.py) gets none
+        nomark = dashes.get("nomark") if dashes else None
+        unmarked = False
+        if nomark is not None and len(pts):
+            iy = np.clip(pts[:, 1].astype(int), 0, nomark.shape[0] - 1)
+            ix = np.clip(pts[:, 0].astype(int), 0, nomark.shape[1] - 1)
+            unmarked = nomark[iy, ix].mean() > 0.5
+        if dashes and not narrow_ramp and not unmarked:
             n0 = len(mesh.dashes)
             cfg_d = dict(dashes, min_cycles=2) if grp is not None else dashes
             layout = _dash_strips(mesh, pts, side, arc, hw_final, mpp, scale, cfg_d)

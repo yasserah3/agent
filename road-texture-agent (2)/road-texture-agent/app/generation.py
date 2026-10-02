@@ -204,7 +204,7 @@ def _stroke(cover, line, half_w):
 
 
 def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m, rng,
-                 align=False, width_ratio=None):
+                 align=False, width_ratio=None, nomark=None):
     """
     Lay dashes along every street, stopping short of each junction.
 
@@ -227,6 +227,8 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
         coords = np.argwhere(seg_lab == s)
         if len(coords) < 4:
             continue
+        if nomark is not None and nomark[coords[:, 0], coords[:, 1]].mean() > 0.5:
+            continue                       # an inner street drawn without markings
         if width_ratio:
             # this street's own width, measured along its centreline, so the line
             # keeps the learned proportion on wide and narrow roads alike, and at
@@ -368,6 +370,17 @@ def scale_patches(patches: np.ndarray, scale: float, masks: np.ndarray = None):
     return out, mout
 
 
+def _at_size(m, scale, shape):
+    """A mask-sized bool map at the output size (or None)."""
+    if m is None:
+        return None
+    big = np.repeat(np.repeat(np.asarray(m, bool), scale, 0), scale, 1)
+    out = np.zeros(shape, bool)
+    h, w = min(shape[0], big.shape[0]), min(shape[1], big.shape[1])
+    out[:h, :w] = big[:h, :w]
+    return out
+
+
 def generate(mask_path, libraries, params, out_paths, map_path=None):
     """
     libraries: {"material": {group: npz path}, "wear": {group: npz path}}
@@ -460,7 +473,8 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         dash_share=float(params.get("dash_share", 0.6)),
         width_m=float(params.get("width_m", 0.15)),
         setback_m=float(params.get("setback_m", 2.0)),
-        rng=rng, align=align_lines, width_ratio=params.get("width_ratio"))
+        rng=rng, align=align_lines, width_ratio=params.get("width_ratio"),
+        nomark=_at_size(params.get("nomark"), scale, road.shape))
 
     result = worn.copy()
     if paint.any():

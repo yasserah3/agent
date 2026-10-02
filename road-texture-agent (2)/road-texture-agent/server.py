@@ -38,13 +38,14 @@ from app import tiles as TL
 from app import objects as OB
 from app import quadmesh as QMB
 from app import bridges as BRG
+from app import streets as ST
 from app.generation import prepare_mask as _prep
 from app import routing as R
 from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.02-spaces1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.02-streets1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -819,7 +820,7 @@ def delete_package(pid: str):
     return {"ok": True}
 
 
-def _scatter_for_export(raw):
+def _scatter_for_export(raw, parts=True):
     pl = _placement_list(raw)
     if not pl:
         return None
@@ -829,7 +830,9 @@ def _scatter_for_export(raw):
         if oid not in objs:
             m = _object_meta(oid)
             if m:
-                objs[oid] = {"meta": m, "parts": OB.load_saved(OBJECTS / oid)}
+                objs[oid] = {"meta": m}
+                if parts:
+                    objs[oid]["parts"] = OB.load_saved(OBJECTS / oid)
         return oid in objs
     for p in pl:
         if "package" in p:
@@ -864,6 +867,20 @@ def _placement_list(raw):
                                "x": [max(0.0, float(x0)), max(0.0, float(x1))],
                                "y": [max(0.0, float(y0)), max(0.0, float(y1))],
                                "seed": int(sp.get("seed", 1)) & 0xFFFFFFFF}
+            # single objects turned on their own, by id ("row-column"): degrees, clockwise
+            turns = {str(k): float(v) % 360.0 for k, v in (p.get("turns") or {}).items()
+                     if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))}
+            if turns:
+                q["turns"] = {k: v for k, v in turns.items() if v}
+            # inner streets: the space cells drawn as streets (app/curves.py cells),
+            # with the sidewalk width and corner radius, and whether they get markings
+            st = p.get("streets")
+            if isinstance(st, dict):
+                q["streets"] = {"cells": [c for c in map(str, st.get("cells") or [])
+                                          if re.fullmatch(r"[xyj]\d{1,4}-\d{1,4}", c)][:5000],
+                                "sidewalk_m": min(10.0, max(0.5, float(st.get("sidewalk_m", 2.0)))),
+                                "corner_m": min(30.0, max(0.0, float(st.get("corner_m", 4.0)))),
+                                "markings": bool(st.get("markings", True))}
             # a curved placement: copies along the smooth line through these points
             path = [[float(x), float(y)] for x, y in (p.get("path") or [])]
             if len(path) >= 2:
@@ -1044,10 +1061,17 @@ def generate(payload: dict):
     dash_share = (dash_px / (dash_px + gap_px)) if dash_px and gap_px else 0.6
 
     gid = uuid.uuid4().hex[:12]
+    # inner streets drawn between objects become streets in a copy of the mask,
+    # which everything from here on uses: texture, junctions, the 3D model
+    base = rec
+    streets = _inner_streets(rec, float(payload.get("scale", 0.25)))
+    if streets["mask"]:
+        rec = streets["mask"]
     outs = {k: ARTIFACTS / f"gen_{gid}_{k}.png"
             for k in ("result", "material", "wear", "markings")}
     map_path = ARTIFACTS / f"gen_{gid}_map.npz"
     res = G.generate(rec["path"], libraries, {
+        "nomark": streets["nomark"],
         "metres_per_pixel": float(payload.get("scale", 0.25)),
         "wear": float(payload.get("wear", 50)) / 100.0,
         "seed": int(payload.get("seed", 7)),
@@ -1074,7 +1098,8 @@ def generate(payload: dict):
     for part in ("open", "edge", "junction"):
         mem.tick_cooldowns(part)
     mem.add_artifact(f"{gid}_map", "generation_map", map_path,
-                     {"mask": rec["id"], "scale": float(payload.get("scale", 0.25)),
+                     {"mask": rec["id"], "base_mask": base["id"], "streets_sig": streets["sig"],
+                      "nomark": streets["nomark_path"], "scale": float(payload.get("scale", 0.25)),
                       "output_scale": int(res.get("output_scale", 1)),
                       "dashes": {"cycle_m": float(payload.get("cycle_m", 9.0)),
                                  "dash_share": dash_share,
@@ -1088,8 +1113,44 @@ def generate(payload: dict):
                 "decisions": decisions})
 
     return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions,
-            "routes": routes,
+            "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3)}
+
+
+def _inner_streets(rec, mpp):
+    """
+    The mask with the inner streets of its saved placements added (app/streets.py):
+    {"mask": the new mask's image record or None, "nomark": where they carry no
+    markings, its file, a signature of what was added, and a report}.
+    """
+    out = {"mask": None, "nomark": None, "nomark_path": None, "sig": None, "report": []}
+    f = ARTIFACTS / f"scatter_{rec['id']}.json"
+    if not f.exists():
+        return out
+    sc = _scatter_for_export(json.loads(f.read_text()), parts=False)
+    if not sc or not any((p.get("streets") or {}).get("cells") for p in sc["placements"]):
+        return out
+    import hashlib
+    gray = np.array(Image.open(rec["path"]).convert("L"))
+    add, nomark, out["report"] = ST.inner_streets(gray > 127, mpp, sc["placements"], sc["objects"], sc["packages"])
+    if not add.any():
+        return out
+    out["sig"] = hashlib.sha1(np.packbits(add).tobytes()).hexdigest()
+    sid = "st" + out["sig"][:10]
+    path = UPLOADS / f"{sid}.png"
+    if not path.exists():
+        g2 = gray.copy()
+        g2[add] = 255
+        Image.fromarray(g2).save(path)
+    if not mem.image(sid):
+        mem.add_image(sid, "gen_mask_streets", f"{rec['name']} + inner streets", path, gray.shape[1], gray.shape[0],
+                      I.sha256_file(path), {"base": rec["id"]})
+    out["mask"] = mem.image(sid)
+    if nomark.any():
+        out["nomark"] = nomark
+        out["nomark_path"] = str(ARTIFACTS / f"nomark_{sid}.png")
+        Image.fromarray((nomark * 255).astype(np.uint8)).save(out["nomark_path"])
+    return out
 
 
 # What each answer to "what is wrong?" does. These change settings rather than
@@ -1204,6 +1265,16 @@ def export3d(payload: dict):
         raise HTTPException(400, "the mask for this generation is missing")
     out = ARTIFACTS / f"gen_{gid}.glb"
     mode = payload.get("mesh", "tiled")
+    dash_cfg = dict(art["meta"].get("dashes") or {})
+    if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
+        dash_cfg["nomark"] = np.array(Image.open(art["meta"]["nomark"]).convert("L")) > 127
+    stale = None
+    base = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
+    if base:
+        now = _inner_streets(base, float(art["meta"]["scale"]))["sig"]
+        if now != art["meta"].get("streets_sig"):
+            stale = ("the inner streets have changed since this was generated: press Generate again "
+                     "to build them into the streets")
     try:
         if mode == "tiled":
             row = mem.latest_artifact("tileset")
@@ -1221,7 +1292,7 @@ def export3d(payload: dict):
                 spacing_m=float(payload.get("spacing_m", 2.0)),
                 variation=float(payload.get("variation", 100)) / 100.0,
                 seed=int(payload.get("seed", 7)),
-                dash_cfg=art["meta"].get("dashes") or {},
+                dash_cfg=dash_cfg,
                 sidewalk=({"share": float(payload.get("sw_share", 30)) / 100.0,
                            "min_m": float(payload.get("sw_min_m", 1.5)),
                            "max_m": float(payload.get("sw_max_m", 2.5)),
@@ -1261,7 +1332,7 @@ def export3d(payload: dict):
     mem.record("export3d", f"exported road model: {count}, {info['size_m'][0]} x {info['size_m'][1]} m",
                {"generation": gid, **info})
     stem = Path(rec["name"]).stem
-    return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info}
+    return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info, "streets_warning": stale}
 
 
 @app.get("/api/download/{artifact_id}")

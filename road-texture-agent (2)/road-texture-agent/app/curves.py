@@ -74,7 +74,7 @@ def _at(line, at):
     return pos, math.atan2(t[1], t[0])
 
 
-def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None):
+def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None):
     """
     Where the copies go along the line through the points.
 
@@ -82,16 +82,20 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None):
     w is a copy's size along the line, d across it. With random spaces (see
     spacer) each row has its own gaps, so its own number of copies. Returns
     the copies as (x, y, angle), the angle in radians being the direction of
-    the copy's own X; the copies in each row; and the line's length.
+    the copy's own X; the copies in each row; and the line's length. A
+    layout dict, if given, is filled in (see new_layout).
     """
     line = _line(points)
     L = line[3]
     fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
+    lay = new_layout(layout, points, flip, fronts, d)
     out, counts = [], []
     if not spaces:
         step = max(w + gap_x, 1e-9)
         n = max(1, int(math.floor((L + gap_x) / step + 1e-6)))
         first = (L - (n * w + (n - 1) * gap_x)) / 2 + w / 2
+        for r in range(ny):
+            lay["rows"][r]["items"] = [[first + i * step - w / 2, first + i * step + w / 2] for i in range(n)]
         for i in range(n):
             pos, ang = _at(line, min(max(first + i * step, 0.0), L))
             if flip:
@@ -100,6 +104,7 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None):
             for r in range(ny):
                 c = pos + v * (fronts[r] + d / 2)
                 out.append((float(c[0]), float(c[1]), ang))
+                lay["ids"].append("%d-%d" % (r + 1, i + 1))
         return out, [n] * ny, L
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
@@ -115,16 +120,18 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None):
         for i, g in enumerate(gaps):
             at += g
             pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
+            lay["rows"][r]["items"].append([at, at + max(w, 1e-6)])
             at += max(w, 1e-6)
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
             c = pos + v * (fronts[r] + d / 2)
             out.append((float(c[0]), float(c[1]), ang))
+            lay["ids"].append("%d-%d" % (r + 1, i + 1))
     return out, counts, L
 
 
-def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None):
+def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, layout=None):
     """
     A rectangle of copies: nx along its width in each of ny rows, centred on
     centre, the rows running along angle (radians, image axes). With random
@@ -135,7 +142,7 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None):
     v = np.array([-u[1], u[0]])
     c0 = np.asarray(centre, float)
     fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
-    out, lengths = [], []
+    out, lengths, starts = [], [], []
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
         gaps = [0.0] + [gap() for _ in range(nx - 1)]
@@ -144,11 +151,22 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None):
             Lr += g                                     # summed in the same order as ui/app.js
         lengths.append(Lr)
         at = -Lr / 2
+        row = []
         for g in gaps:
             at += g
             c = c0 + u * (at + w / 2) + v * (fronts[r] + d / 2)
+            row.append(at)
             at += w
             out.append((float(c[0]), float(c[1]), angle))
+        starts.append(row)
+    if layout is not None:
+        # the rectangle's middle line, as long as its longest row: distances along
+        # it start at its left end
+        half = max(lengths) / 2
+        lay = new_layout(layout, [c0 - u * half, c0 + u * half], False, fronts, d)
+        for r in range(ny):
+            lay["rows"][r]["items"] = [[a + half, a + half + w] for a in starts[r]]
+            lay["ids"] += ["%d-%d" % (r + 1, i + 1) for i in range(nx)]
     return out, lengths, Ly
 
 
@@ -237,7 +255,7 @@ def row_fronts(depth, ny, gaps):
     return fronts, Ly
 
 
-def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None):
+def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None, layout=None):
     """
     A package along the line through the points. slots: (w, d, weight) per
     object, w along the line and d across, in the points' unit. Returns the
@@ -250,6 +268,7 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
         weights = [1.0] * len(slots)
     D = max(d for _, d, _ in slots)                     # rows are as deep as the deepest object
     fronts, Ly = row_fronts(D, ny, row_gaps(spaces, ny - 1, gap_y))
+    lay = new_layout(layout, points, flip, fronts, D)
     out, counts = [], []
     for r in range(ny):
         rnd, gap = _rng(row_seed(seed, r)), spacer(spaces, r, gap_x)
@@ -266,10 +285,12 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
             prev = k
         counts.append(len(picks))
         at = (L - used) / 2
-        for k, g in zip(picks, gaps):
+        for i, (k, g) in enumerate(zip(picks, gaps)):
             w, d, _ = slots[k]
             at += g
             pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
+            lay["rows"][r]["items"].append([at, at + max(w, 1e-6)])
+            lay["ids"].append("%d-%d" % (r + 1, i + 1))
             at += max(w, 1e-6)
             if flip:
                 ang += math.pi
@@ -277,3 +298,82 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
             c = pos + v * (fronts[r] + d / 2)           # fronts in line on the row's front edge
             out.append((float(c[0]), float(c[1]), ang, k))
     return out, counts, L
+
+
+# ----------------------------------------------------------------- layout and cells
+# Every placement is rows of objects along a line (a rectangle's is its middle
+# line). Its layout says where: the line (points), whether flipped, and per row
+# its front edge and depth across the line and each object's stretch along it
+# (distances from the line's start). Objects have ids "row-column", counted
+# from the top left: row 1 is the front row, column 1 the first along the line.
+#
+# The spaces between objects split into cells, for drawing inner streets:
+#   x  the space between two neighbours in a row      ("x1-2": row 1, after column 2)
+#   y  the space between two rows, beside the objects  ("y1-1": rows 1 and 2, first)
+#   j  a junction: where an x space of either row meets the space between rows
+
+def new_layout(layout, points, flip, fronts, depth):
+    """Start a layout in the given dict (or a throwaway one)."""
+    lay = layout if layout is not None else {}
+    lay.update({"line": [[float(p[0]), float(p[1])] for p in points], "flip": bool(flip),
+                "rows": [{"front": float(f), "depth": float(depth), "items": []} for f in fronts], "ids": []})
+    return lay
+
+
+def cells(layout, min_m=0.05):
+    """The cells of a layout's spaces: id, kind, along [s0, s1] and across [o0, o1]."""
+    rows, out = layout["rows"], []
+    for r, row in enumerate(rows):
+        it = row["items"]
+        for i in range(len(it) - 1):
+            if it[i + 1][0] - it[i][1] > min_m:
+                out.append({"id": "x%d-%d" % (r + 1, i + 1), "kind": "x", "s": [it[i][1], it[i + 1][0]],
+                            "o": [row["front"], row["front"] + row["depth"]]})
+    for r in range(len(rows) - 1):
+        a, b = rows[r], rows[r + 1]
+        o0, o1 = a["front"] + a["depth"], b["front"]
+        if o1 - o0 <= min_m or not a["items"] or not b["items"]:
+            continue
+        lo = min(a["items"][0][0], b["items"][0][0])
+        hi = max(a["items"][-1][1], b["items"][-1][1])
+        # where either row's x spaces meet the space between the rows: junctions
+        gaps = sorted([it[i][1], it[i + 1][0]] for it in (a["items"], b["items"])
+                      for i in range(len(it) - 1) if it[i + 1][0] - it[i][1] > min_m)
+        merged = []
+        for g in gaps:
+            if merged and g[0] <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], g[1])
+            else:
+                merged.append(list(g))
+        cur, ky, kj = lo, 0, 0
+        for g0, g1 in merged:
+            g0, g1 = max(g0, lo), min(g1, hi)
+            if g0 - cur > min_m:
+                ky += 1
+                out.append({"id": "y%d-%d" % (r + 1, ky), "kind": "y", "s": [cur, g0], "o": [o0, o1]})
+            kj += 1
+            out.append({"id": "j%d-%d" % (r + 1, kj), "kind": "j", "s": [g0, g1], "o": [o0, o1]})
+            cur = g1
+        if hi - cur > min_m:
+            ky += 1
+            out.append({"id": "y%d-%d" % (r + 1, ky), "kind": "y", "s": [cur, hi], "o": [o0, o1]})
+    return out
+
+
+def strip_polygon(layout, s0, s1, o0, o1, step=1.0, line=None):
+    """The area between distances s0..s1 along the layout's line and o0..o1 across it."""
+    line = line or _line(layout["line"])
+    L = line[3]
+    n = max(1, int(math.ceil((s1 - s0) / step - 1e-9)))
+    sign = -1.0 if layout["flip"] else 1.0
+    near, far = [], []
+    for k in range(n + 1):
+        pos, ang = _at(line, min(max(s0 + (s1 - s0) * k / n, 0.0), L))
+        v = np.array([-math.sin(ang), math.cos(ang)]) * sign
+        near.append((float(pos[0] + v[0] * o0), float(pos[1] + v[1] * o0)))
+        far.append((float(pos[0] + v[0] * o1), float(pos[1] + v[1] * o1)))
+    return near + far[::-1]
+
+
+def cell_polygon(layout, cell, step=1.0, line=None):
+    return strip_polygon(layout, cell["s"][0], cell["s"][1], cell["o"][0], cell["o"][1], step, line)

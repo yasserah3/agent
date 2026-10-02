@@ -1,0 +1,73 @@
+"""
+Where the copies of a placement go, in one place for everything that needs it:
+the 3D export, and the inner streets drawn between them.
+
+A placement is one object or a package, as a rectangle (rows along its middle
+line) or a curve, with even or random spaces (app/curves.py). Each copy has an
+id, "row-column" from the top left, and can be given its own extra rotation in
+the placement's "turns": {id: degrees, clockwise on the map}.
+"""
+
+import math
+
+import numpy as np
+
+from app import curves as CV
+
+
+def sized(meta):
+    """An object's scale, quarter turn, and footprint: w along its row, d across."""
+    k = float(meta.get("scale", 1.0))
+    turn = int(meta.get("turn", 0)) % 4
+    w, d = meta["width_m"] * k, meta["depth_m"] * k
+    return (k, turn) + ((d, w) if turn % 2 else (w, d))    # a quarter turn swaps width and depth
+
+
+def spaces_of(p):
+    return p["spaces"] if (p.get("spaces") or {}).get("on") else None
+
+
+def copies_of(p, objects, packages, mpp_mask):
+    """
+    A placement's copies and layout, in metres in image axes (x right, y down).
+
+    objects: {id: {"meta": ...}}, packages: {id: package}. Returns a list of
+    (object id, centre, angle, copy id), the angle (radians) being the
+    direction of the copy's own X with its extra rotation, and the layout
+    (app/curves.py), whose distances and offsets are in metres too.
+    """
+    layout, spaces = {}, spaces_of(p)
+    if "package" in p:
+        pk = packages[p["package"]]
+        slots = [sl for sl in pk["slots"] if sl["object"] in objects]
+        sizes = [sized(objects[sl["object"]]["meta"]) for sl in slots]
+        if p.get("path"):
+            pts = np.asarray(p["path"], float) * mpp_mask
+        else:
+            a = math.radians(p["angle"])
+            u = np.array([math.cos(a), math.sin(a)])
+            c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
+            pts = np.array([c - u * half, c + u * half])        # a rectangle is a straight line
+        spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
+                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces, layout)
+        spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
+    else:
+        k, turn, w, d = sized(objects[p["object"]]["meta"])
+        if p.get("path"):
+            spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
+                                    p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces, layout)
+        else:
+            spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
+                                         p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout)
+        spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
+    turns = p.get("turns") or {}
+    out = [(oid, cc, a + math.radians(float(turns.get(cid, 0.0))), cid)
+           for (oid, cc, a), cid in zip(spots, layout["ids"])]
+    return out, layout
+
+
+def footprint(cc, angle, w, d):
+    """A copy's four corners, turned with it."""
+    u = np.array([math.cos(angle), math.sin(angle)])
+    v = np.array([-u[1], u[0]])
+    return [cc + u * sx * w / 2 + v * sy * d / 2 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]

@@ -25,7 +25,7 @@ from shapely.geometry import Polygon
 
 from app.generation import prepare_mask
 from app import quadmesh as QM
-from app import curves as CV
+from app import placements as PL
 from scipy import ndimage as ndi
 
 MAX_TEXTURE = 8192          # the largest texture Unreal accepts without extra settings
@@ -1333,51 +1333,17 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
     road = make_valid(road)                    # a repaired shape: intersections cannot fail on it
     placed, skipped, by_obj = 0, 0, {}
     problems = []
-    def sized(oid):
-        """An object's scale, quarter turn, and footprint: w along its row, d across."""
-        meta = scatter["objects"][oid]["meta"]
-        k = float(meta.get("scale", 1.0))
-        turn = int(meta.get("turn", 0)) % 4
-        w, d = meta["width_m"] * k, meta["depth_m"] * k
-        return (k, turn) + ((d, w) if turn % 2 else (w, d))   # a quarter turn swaps width and depth
-
+    sized = lambda oid: PL.sized(scatter["objects"][oid]["meta"])
     for p in scatter["placements"]:
-      label = p.get("object") or "package"
-      spaces = p["spaces"] if (p.get("spaces") or {}).get("on") else None    # random spaces, app/curves.py
+      label = (scatter["objects"].get(p.get("object"), {}).get("meta", {}).get("name") or
+               "package %s" % scatter.get("packages", {}).get(p.get("package"), {}).get("name", ""))
       try:
-        # every copy: its object, centre in metres (image axes) and the direction of its X
-        if "package" in p:
-            pk = scatter["packages"][p["package"]]
-            label = "package %s" % pk["name"]
-            slots = [sl for sl in pk["slots"] if sl["object"] in scatter["objects"]]
-            sizes = [sized(sl["object"]) for sl in slots]
-            if p.get("path"):
-                pts = np.asarray(p["path"], float) * mpp_mask
-            else:
-                a = math.radians(p["angle"])
-                u = np.array([math.cos(a), math.sin(a)])
-                c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
-                pts = np.array([c - u * half, c + u * half])     # a rectangle is a straight line
-            spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
-                                            p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces)
-            spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
-        else:
-            label = scatter["objects"][p["object"]]["meta"].get("name", "object")
-            k, turn, w, d = sized(p["object"])
-            if p.get("path"):
-                spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
-                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces)
-                spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
-            else:
-                spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
-                                             p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces)
-                spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
-        for oid, cc, a in spots:
+        # every copy: its object, centre in metres (image axes), the direction of
+        # its X (with its own extra rotation) and its id (app/placements.py)
+        spots, _ = PL.copies_of(p, scatter["objects"], scatter.get("packages", {}), mpp_mask)
+        for oid, cc, a, cid in spots:
             k, turn, w, d = sized(oid)
-            u = np.array([math.cos(a), math.sin(a)])
-            v = np.array([-u[1], u[0]])
-            corners = [cc + u * sx * w / 2 + v * sy * d / 2 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
-            fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in corners])
+            fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in PL.footprint(cc, a, w, d)])
             if road.intersection(fp).area > 0.02 * fp.area:
                 skipped += 1
                 continue

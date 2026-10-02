@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.02-streets1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -609,6 +609,12 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
           : ' (fixed width)'}.`);
       if($('#lineMode').value === 'learned' && s.markings.width_mode !== 'learned')
         log('  No line width has been learned yet: train on pairs whose photos show painted lines. Using the fixed width.', 'bad');
+      (res.inner_streets || []).forEach(r => {
+        if(r.problem){ log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.problem}.`, 'bad'); return; }
+        log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.cells} space(s), ${r.road_m2} m² of road`
+          + (r.connected ? `, ${r.connected} joined to a street` : '') + (r.dead_ends ? `, ${r.dead_ends} edge(s) with no street within 50 m` : '') + '.');
+        if(r.too_narrow) log(`    ${r.too_narrow} space(s) are too narrow for a road between two sidewalks: widen the gap, or make the sidewalks narrower.`, 'bad');
+      });
       log('Done. Use the layer buttons to see each part on its own.', 'ok');
       S.review = null;
       S.defaultTarget = res.decisions && res.decisions.open
@@ -661,6 +667,7 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
         if(res.scatter) log(`  Objects: ${res.scatter.copies} copies placed as instances`
           + (res.scatter.skipped_on_road ? `, ${res.scatter.skipped_on_road} left out because they were on the road` : '') + '.', 'ok');
         (res.scatter && res.scatter.problems || []).forEach(p => log('  Object left out: ' + p, 'bad'));
+        if(res.streets_warning) log('  Note: ' + res.streets_warning + '.', 'bad');
         if(res.blocks && res.blocks.blocks)
           log(`  Blocks and islands: ${res.blocks.blocks} filled at ${Math.round(res.blocks.height_m*1000)/10} cm, a grid of ${res.blocks.cell_m} m quads (${(res.blocks.quads||0).toLocaleString()} quads)`
             + (res.blocks.kerb_faces ? `, with their own kerb faces (${res.blocks.kerb_faces.toLocaleString()})` : ', edges under the sidewalks') + '.');
@@ -1114,13 +1121,16 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
   // its X along the line, its front (+Y) to the left of the line's direction,
   // or the right when flipped. With random spaces each row has its own gaps.
   // Returns [x, y, angle] per copy (angle: its X) and the copies in each row.
-  function curveCopies(P, w, d, gx, gy, ny, flip, spaces){
+  function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout){
     const ln = lineOf(P), L = ln.L, { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
+    const lay = newLayout(layout, P, flip, fronts, d);
     const spots = [], counts = [];
     if(!spaces){
       const step = Math.max(w + gx, 1e-9);
       const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
       const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2;
+      for(let r = 0; r < ny; r++)
+        for(let i = 0; i < n; i++) lay.rows[r].items.push([first + i*step - w/2, first + i*step + w/2]);
       for(let i = 0; i < n; i++){
         let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
         if(flip) ang += Math.PI;
@@ -1128,9 +1138,10 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
         for(let r = 0; r < ny; r++){
           const off = fronts[r] + d/2;
           spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
+          lay.ids.push(`${r + 1}-${i + 1}`);
         }
       }
-      return { spots, counts: Array(ny).fill(n), n, L, Ly, samples: ln.S };
+      return { spots, counts: Array(ny).fill(n), n, L, Ly, samples: ln.S, layout: lay };
     }
     for(let r = 0; r < ny; r++){
       const gap = spacer(spaces, r, gx), gaps = [0];
@@ -1142,23 +1153,25 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
       }
       counts.push(gaps.length);
       let at = (L - used) / 2;
-      for(const g of gaps){
+      gaps.forEach((g, i) => {
         at += g;
         let [pos, ang] = lineAt(ln, Math.min(Math.max(at + w/2, 0), L));
+        lay.rows[r].items.push([at, at + Math.max(w, 1e-6)]);
         at += Math.max(w, 1e-6);
         if(flip) ang += Math.PI;
         const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + d/2;
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
-      }
+        lay.ids.push(`${r + 1}-${i + 1}`);
+      });
     }
-    return { spots, counts, n: Math.max(...counts), L, Ly, samples: ln.S };
+    return { spots, counts, n: Math.max(...counts), L, Ly, samples: ln.S, layout: lay };
   }
   // a rectangle of copies: nx along its width in each of ny rows, centred on c,
   // rows along angle a. With random spaces each row has its own gaps and length
-  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces){
+  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout){
     const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
     const { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
-    const spots = [], lengths = [];
+    const spots = [], lengths = [], starts = [];
     for(let r = 0; r < ny; r++){
       const gap = spacer(spaces, r, gx), gaps = [0];
       for(let i = 1; i < nx; i++) gaps.push(gap());
@@ -1166,14 +1179,24 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
       for(const g of gaps) Lr += g;
       lengths.push(Lr);
       let at = -Lr / 2;
+      const row = [];
       for(const g of gaps){
         at += g;
         const o1 = at + w/2, o2 = fronts[r] + d/2;
         spots.push([c[0] + u[0]*o1 + v[0]*o2, c[1] + u[1]*o1 + v[1]*o2, a]);
+        row.push(at);
         at += w;
       }
+      starts.push(row);
     }
-    return { spots, lengths, Ly };
+    // the rectangle's middle line, as long as its longest row
+    const half = Math.max(...lengths) / 2;
+    const lay = newLayout(layout, [[c[0] - u[0]*half, c[1] - u[1]*half], [c[0] + u[0]*half, c[1] + u[1]*half]], false, fronts, d);
+    for(let r = 0; r < ny; r++){
+      lay.rows[r].items = starts[r].map(x => [x + half, x + half + w]);
+      for(let i = 0; i < nx; i++) lay.ids.push(`${r + 1}-${i + 1}`);
+    }
+    return { spots, lengths, Ly, layout: lay };
   }
 
   // A package mixes several objects in one placement: each row is filled with
@@ -1228,11 +1251,12 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
     return { fronts, Ly };
   }
   // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
-  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces){
+  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout){
     const ln = lineOf(P), L = ln.L;
     let weights = slots.map(q => Math.max(0, +q[2] || 0));
     if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
     const D = Math.max(...slots.map(q => q[1])), { fronts, Ly } = rowFronts(D, ny, rowGaps(spaces, ny - 1, gy));
+    const lay = newLayout(layout, P, flip, fronts, D);
     const spots = [], counts = [];
     for(let r = 0; r < ny; r++){
       const rnd = rng(rowSeed(seed, r)), gap = spacer(spaces, r, gx), picks = [], gaps = [];
@@ -1250,14 +1274,70 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
         const [w, d] = slots[k];
         at += gaps[i];
         let [pos, ang] = lineAt(ln, Math.min(Math.max(at + w/2, 0), L));
+        lay.rows[r].items.push([at, at + Math.max(w, 1e-6)]);
+        lay.ids.push(`${r + 1}-${i + 1}`);
         at += Math.max(w, 1e-6);
         if(flip) ang += Math.PI;
         const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + d/2;   // fronts in line on the row's front edge
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang, k]);
       });
     }
-    return { spots, counts, L, D, Ly, samples: ln.S };
+    return { spots, counts, L, D, Ly, samples: ln.S, layout: lay };
   }
+
+  // Layout and cells, as in app/curves.py: every placement is rows of objects
+  // along a line; objects have ids "row-column" from the top left. The spaces
+  // split into cells for inner streets: x between neighbours in a row, y between
+  // two rows beside the objects, j junctions where an x space meets a y space.
+  function newLayout(layout, points, flip, fronts, depth){
+    const lay = layout || {};
+    Object.assign(lay, { line: points.map(q => [+q[0], +q[1]]), flip: !!flip,
+                         rows: fronts.map(f => ({ front: f, depth, items: [] })), ids: [] });
+    return lay;
+  }
+  function cellsOf(lay, minM = 0.05){
+    const rows = lay.rows, out = [];
+    rows.forEach((row, r) => {
+      const it = row.items;
+      for(let i = 0; i + 1 < it.length; i++)
+        if(it[i+1][0] - it[i][1] > minM)
+          out.push({ id: `x${r + 1}-${i + 1}`, kind: 'x', s: [it[i][1], it[i+1][0]], o: [row.front, row.front + row.depth] });
+    });
+    for(let r = 0; r + 1 < rows.length; r++){
+      const a = rows[r], b = rows[r + 1], o0 = a.front + a.depth, o1 = b.front;
+      if(o1 - o0 <= minM || !a.items.length || !b.items.length) continue;
+      const lo = Math.min(a.items[0][0], b.items[0][0]), hi = Math.max(a.items[a.items.length - 1][1], b.items[b.items.length - 1][1]);
+      const gaps = [];
+      for(const it of [a.items, b.items])
+        for(let i = 0; i + 1 < it.length; i++) if(it[i+1][0] - it[i][1] > minM) gaps.push([it[i][1], it[i+1][0]]);
+      gaps.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+      const merged = [];
+      for(const g of gaps){
+        if(merged.length && g[0] <= merged[merged.length - 1][1]) merged[merged.length - 1][1] = Math.max(merged[merged.length - 1][1], g[1]);
+        else merged.push(g.slice());
+      }
+      let cur = lo, ky = 0, kj = 0;
+      for(let [g0, g1] of merged){
+        g0 = Math.max(g0, lo); g1 = Math.min(g1, hi);
+        if(g0 - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', s: [cur, g0], o: [o0, o1] }); }
+        kj++; out.push({ id: `j${r + 1}-${kj}`, kind: 'j', s: [g0, g1], o: [o0, o1] });
+        cur = g1;
+      }
+      if(hi - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', s: [cur, hi], o: [o0, o1] }); }
+    }
+    return out;
+  }
+  function stripPolygon(lay, s0, s1, o0, o1, step = 1.0, ln = null){
+    ln = ln || lineOf(lay.line);
+    const n = Math.max(1, Math.ceil((s1 - s0) / step - 1e-9)), sign = lay.flip ? -1 : 1, near = [], far = [];
+    for(let k = 0; k <= n; k++){
+      const [pos, ang] = lineAt(ln, Math.min(Math.max(s0 + (s1 - s0) * k / n, 0), ln.L));
+      const v = [-Math.sin(ang) * sign, Math.cos(ang) * sign];
+      near.push([pos[0] + v[0]*o0, pos[1] + v[1]*o0]); far.push([pos[0] + v[0]*o1, pos[1] + v[1]*o1]);
+    }
+    return near.concat(far.reverse());
+  }
+  const cellPolygon = (lay, c, step, ln) => stripPolygon(lay, c.s[0], c.s[1], c.o[0], c.o[1], step, ln);
 
   function roadAt(x, y){
     // the mask itself: white is road. Read once per mask
@@ -1277,11 +1357,12 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
   function placementGeom(p){
     const m = mppMask();
     // one copy: its footprint in mask pixels (w, d in metres), turned so its X points along a
-    const copyAt = (cx, cy, a, w, d, slot) => {
+    const copyAt = (cx, cy, a, w, d, slot, id) => {
+      a += turnOf(p, id);                                   // a single object turned on its own
       const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], hw = w / m / 2, hd = d / m / 2;
       const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
       const onRoad = pts.concat([[cx, cy]]).some(q => roadAt(q[0], q[1]));
-      return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null };
+      return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null, id };
     };
     // the band the rows cover, either side of a curve: blue between copies is the gap
     const band = (line, half) => {
@@ -1306,9 +1387,9 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
       const P = curve ? p.path : [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]];
       const r = packageCopies(P.map(q => [q[0]*m, q[1]*m]), slots.map(s => [s.w, s.d, s.weight]),
                               p.gap_x, p.gap_y, p.ny, curve && !!p.flip, p.seed >>> 0, spacesOf(p));
-      const copies = r.spots.map(([x, y, ang, k]) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k]));
+      const copies = r.spots.map(([x, y, ang, k], n) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k], r.layout.ids[n]));
       const Ly = r.Ly / m;
-      const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L };
+      const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L, layout: r.layout };
       if(curve){
         const line = r.samples.map(q => [q[0]/m, q[1]/m]);
         return { ...base, curve: true, line, outer: band(line, Ly / 2) };
@@ -1321,15 +1402,23 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
       // worked out in metres, as the 3D export does, then back to mask pixels
       const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p));
       const line = r.samples.map(q => [q[0]/m, q[1]/m]);
-      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a, w, d)), line, counts: r.counts,
-               outer: band(line, r.Ly / m / 2), along: r.n, length_m: r.L, w: w/m, d: d/m };
+      return { curve: true, copies: r.spots.map(([x, y, a], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n])), line,
+               counts: r.counts, outer: band(line, r.Ly / m / 2), along: r.n, length_m: r.L, w: w/m, d: d/m, layout: r.layout };
     }
     // a rectangle of copies, in metres as the 3D export does; with random spaces
     // each row has its own length, and the rectangle is as long as the longest
     const a = p.angle * Math.PI / 180;
     const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p));
-    const copies = r.spots.map(([x, y]) => copyAt(x / m, y / m, a, w, d));
-    return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m), w: w/m, d: d/m, copies };
+    const copies = r.spots.map(([x, y], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n]));
+    return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m), w: w/m, d: d/m, copies, layout: r.layout };
+  }
+  const turnOf = (p, id) => ((p.turns || {})[id] || 0) * Math.PI / 180;
+
+  // the cells of a placement's spaces, as polygons in mask pixels
+  function spaceCells(p, g0){
+    if(!g0 || !g0.layout) return [];
+    const m = mppMask(), ln = lineOf(g0.layout.line);
+    return cellsOf(g0.layout).map(c => ({ ...c, poly: cellPolygon(g0.layout, c, 1.0, ln).map(q => [q[0] / m, q[1] / m]) }));
   }
 
   // editing a curve: points are kept in mask pixels, like the rectangles
@@ -1385,17 +1474,23 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
     S.gen.placements.forEach((p, i) => {
       const g0 = placementGeom(p); if(!g0) return;
       const sel = i === S.gen.plSel;
+      // an edit mode for this placement: 'streets' (draw inner streets) or 'objects' (turn single objects)
+      const ed = S.gen.edit && S.gen.edit.i === i ? S.gen.edit.kind : null;
       const g = el('g', {}, layer);
       const P = q => `${q[0]*f},${q[1]*f}`;
       // the whole area in blue: what shows between the copies is the gap
-      const area = el('polygon', { points: g0.outer.map(P).join(' '), class:'grab',
+      const area = el('polygon', { points: g0.outer.map(P).join(' '), class: ed ? '' : 'grab',
         fill:'rgba(70,130,220,.35)', stroke:'#4682DC', 'stroke-width': sel ? hr*0.6 : hr*0.35 }, g);
-      area.addEventListener('pointerdown', e => startScatterDrag(e, i, 'move'));
+      if(!ed) area.addEventListener('pointerdown', e => startScatterDrag(e, i, 'move'));
+      if(ed === 'streets') drawCells(g, p, g0, f, hr, P);
       g0.copies.forEach(c => {
         // a package's copies in their slot's colour, so the mix shows
         const col = c.slot ? c.slot.colour : '216,96,76';
-        el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`,
-          stroke: c.onRoad ? '#999' : `rgb(${col})`, 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
+        const picked = ed === 'objects' && S.gen.edit.sel.has(c.id);
+        const poly = el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`,
+          stroke: picked ? '#FFD23F' : c.onRoad ? '#999' : `rgb(${col})`, 'stroke-width': picked ? hr*0.7 : hr*0.25,
+          'pointer-events': ed === 'objects' ? 'all' : 'none', class: ed === 'objects' ? 'pt' : '' }, g);
+        if(ed === 'objects') poly.addEventListener('pointerdown', e => pickObject(e, c.id));
         if(c.onRoad){
           el('line', { x1:c.pts[0][0]*f, y1:c.pts[0][1]*f, x2:c.pts[2][0]*f, y2:c.pts[2][1]*f, stroke:'#ddd', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
           el('line', { x1:c.pts[1][0]*f, y1:c.pts[1][1]*f, x2:c.pts[3][0]*f, y2:c.pts[3][1]*f, stroke:'#ddd', 'stroke-width': hr*0.25, 'pointer-events':'none' }, g);
@@ -1417,6 +1512,16 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
             fill:'#fff', 'pointer-events':'none' }, g);
         });
       }
+      if(ed === 'objects'){
+        // each object's id, row-column from the top left
+        g0.copies.forEach(c => {
+          const t = el('text', { x: c.cx*f, y: c.cy*f, 'text-anchor':'middle', 'dominant-baseline':'central',
+            'font-size': Math.max(hr*1.6, Math.min(c.w, c.d) * f / 4), fill:'#fff', stroke:'rgba(0,0,0,.6)',
+            'stroke-width': hr*0.25, 'paint-order':'stroke', 'pointer-events':'none' }, g);
+          t.textContent = c.id;
+        });
+      }
+      if(ed) return;                                         // no handles while editing
       if(g0.curve){
         // the points: drag to bend, double-click one in the middle to remove it
         p.path.forEach((q, k) => {
@@ -1449,6 +1554,45 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
     renderPlacementBox();
   }
 
+  // Inner streets: the cells of the spaces, grey, or green when drawn as a street.
+  // Press on a cell and drag across others: they all take the opposite of the first
+  function drawCells(g, p, g0, f, hr, P){
+    const on = new Set((p.streets && p.streets.cells) || []);
+    spaceCells(p, g0).forEach(c => {
+      const poly = el('polygon', { points: c.poly.map(P).join(' '), class:'pt',
+        fill: on.has(c.id) ? 'rgba(60,190,90,.85)' : 'rgba(150,150,150,.6)',
+        stroke: on.has(c.id) ? '#2E9B4F' : '#777', 'stroke-width': hr*0.2 }, g);
+      poly.dataset.cell = c.id;
+      const paint = () => {
+        const st = p.streets, has = st.cells.includes(c.id);
+        if(S.gen.edit.paint && has !== S.gen.edit.paint.to){
+          st.cells = S.gen.edit.paint.to ? st.cells.concat([c.id]) : st.cells.filter(x => x !== c.id);
+          poly.setAttribute('fill', S.gen.edit.paint.to ? 'rgba(60,190,90,.85)' : 'rgba(150,150,150,.6)');
+          poly.setAttribute('stroke', S.gen.edit.paint.to ? '#2E9B4F' : '#777');
+        }
+      };
+      poly.addEventListener('pointerdown', e => {
+        e.stopPropagation(); e.preventDefault();
+        p.streets = streetsOf(p);
+        S.gen.edit.paint = { to: !p.streets.cells.includes(c.id) };
+        paint();
+      });
+      poly.addEventListener('pointerenter', paint);
+    });
+  }
+  const streetsOf = p => ({ cells: [], sidewalk_m: 2, corner_m: 4, markings: true, ...(p.streets || {}) });
+  addEventListener('pointerup', () => {
+    if(S.gen.edit && S.gen.edit.paint){ S.gen.edit.paint = null; saveScatter(); }
+  });
+  // Single objects: click to pick one, shift-click to add or remove more
+  function pickObject(e, id){
+    e.stopPropagation(); e.preventDefault();
+    const sel = S.gen.edit.sel;
+    if(e.shiftKey){ if(sel.has(id)) sel.delete(id); else sel.add(id); }
+    else { sel.clear(); sel.add(id); }
+    drawBridges();
+  }
+
   let sdrag = null;
   // double-clicks are told apart here: the map is redrawn on every press, so
   // the browser's own dblclick never reaches the same element twice
@@ -1463,6 +1607,7 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
   }
   function startScatterDrag(e, i, mode, k){
     e.stopPropagation(); e.preventDefault();
+    if(S.gen.edit && S.gen.edit.i !== i) S.gen.edit = null;
     S.gen.plSel = i;
     const p = S.gen.placements[i], q = toMask(e);
     if(isCurve(p) && isDoublePress(i, mode + (k ?? ''), q)){
@@ -1522,8 +1667,25 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
   function renderPlacementBox(){
     const box = $('#plBox');
     const p = S.gen.placements[S.gen.plSel];
-    if(!p){ box.hidden = true; return; }
+    if(!p){ box.hidden = true; S.gen.edit = null; return; }
     box.hidden = false;
+    // the edit modes belong to the selected placement
+    if(S.gen.edit && S.gen.edit.i !== S.gen.plSel) S.gen.edit = null;
+    const ed = S.gen.edit ? S.gen.edit.kind : null;
+    $('#btnDrawStreets').textContent = ed === 'streets' ? 'Done drawing streets' : 'Draw inner streets';
+    $('#streetBox').hidden = ed !== 'streets';
+    $('#btnEditObjs').textContent = ed === 'objects' ? 'Done turning objects' : 'Turn single objects';
+    $('#objEditBox').hidden = ed !== 'objects';
+    const st = streetsOf(p);
+    if(document.activeElement !== $('#stSidewalk')) $('#stSidewalk').value = st.sidewalk_m;
+    if(document.activeElement !== $('#stCorner')) $('#stCorner').value = st.corner_m;
+    $('#stMarkings').checked = !!st.markings;
+    $('#stInfo').textContent = st.cells.length
+      ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets${st.markings ? '' : ', without markings'}. Press Generate to build them.` : '';
+    const turned = Object.keys(p.turns || {}).length, picked = ed === 'objects' ? [...S.gen.edit.sel] : [];
+    if(picked.length && document.activeElement !== $('#objTurn')) $('#objTurn').value = (p.turns || {})[picked[0]] || 0;
+    $('#objEditInfo').textContent = (picked.length ? `Picked: ${picked.join(', ')}. ` : (ed === 'objects' ? 'Nothing picked yet. ' : ''))
+      + (turned ? `${turned} object${turned > 1 ? 's' : ''} turned on their own.` : '');
     const o = p.package ? null : objById(p.object), pk = p.package ? pkgById(p.package) : null;
     const g0 = placementGeom(p);
     const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
@@ -1565,6 +1727,51 @@ const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
         + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '')) + spNote;
   }
+  // the two edit modes: drawing inner streets, and turning single objects
+  S.gen.edit = null;
+  $('#btnDrawStreets').addEventListener('click', () => {
+    const i = S.gen.plSel, p = S.gen.placements[i]; if(!p) return;
+    if(S.gen.edit && S.gen.edit.kind === 'streets'){
+      S.gen.edit = null;
+      const n = streetsOf(p).cells.length;
+      log(n ? `${n} space(s) drawn as inner streets. Press Generate to build them into the streets.` : 'No inner streets drawn.');
+    } else {
+      p.streets = streetsOf(p); S.gen.edit = { kind: 'streets', i, paint: null };
+      log('Draw inner streets: click a space (or press and drag across several) to make it a street; click again to take it back.');
+    }
+    drawBridges();
+  });
+  [['#stSidewalk', 'sidewalk_m', 0.5], ['#stCorner', 'corner_m', 0]].forEach(([id, key, lo]) => $(id).addEventListener('input', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    p.streets = { ...streetsOf(p), [key]: Math.max(lo, +$(id).value || 0) };
+    clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);
+  }));
+  $('#stMarkings').addEventListener('change', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    p.streets = { ...streetsOf(p), markings: $('#stMarkings').checked }; saveScatter();
+  });
+  $('#btnEditObjs').addEventListener('click', () => {
+    const i = S.gen.plSel, p = S.gen.placements[i]; if(!p) return;
+    if(S.gen.edit && S.gen.edit.kind === 'objects') S.gen.edit = null;
+    else { S.gen.edit = { kind: 'objects', i, sel: new Set() }; log('Turn single objects: click one to pick it, Shift-click to pick more.'); }
+    drawBridges();
+  });
+  // a single object's own rotation, in degrees clockwise on the map, kept by its id
+  function setTurn(p, id, deg){
+    deg = ((deg % 360) + 360) % 360;
+    p.turns = { ...(p.turns || {}) };
+    if(deg) p.turns[id] = deg; else delete p.turns[id];
+  }
+  const turnPicked = f => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !S.gen.edit || S.gen.edit.kind !== 'objects' || !S.gen.edit.sel.size) return;
+    S.gen.edit.sel.forEach(id => setTurn(p, id, f((p.turns || {})[id] || 0)));
+    saveScatter();
+  };
+  $('#objTurn').addEventListener('change', () => { const v = +$('#objTurn').value || 0; turnPicked(() => v); });
+  $('#btnTurnL').addEventListener('click', () => turnPicked(t => t - 90));
+  $('#btnTurnR').addEventListener('click', () => turnPicked(t => t + 90));
+  $('#btnTurnReset').addEventListener('click', () => turnPicked(() => 0));
+  addEventListener('keydown', e => { if(e.key === 'Escape' && S.gen.edit){ S.gen.edit = null; drawBridges(); } });
   $('#plRows').addEventListener('input', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     p.ny = Math.max(1, Math.round(+$('#plRows').value || 1));

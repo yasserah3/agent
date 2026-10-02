@@ -440,6 +440,9 @@ areas in your training pairs.
 server.py            the local server
 app/memory.py        step log, keyed situations, trees
 app/junctions.py     junction detection and classification
+app/curves.py        placements' maths: curves, packages, random spaces, ids, space cells
+app/placements.py    where each copy of a placement goes, for the 3D model and inner streets
+app/streets.py       inner streets drawn between objects, built into the street mask
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
@@ -755,6 +758,56 @@ between rows), then press **Randomize spaces**.
 - The random spaces have their own seed, apart from a package's mix: Shuffle
   does not change the spaces, and Randomize spaces does not change the mix. The
   map and the 3D export use the same random numbers, as with packages.
+
+### Inner streets and islands
+
+Select a placement and press **Draw inner streets**. The spaces between its
+objects split into cells:
+
+- **x**: the space between two neighbours in a row (`x1-2`: row 1, after column 2);
+- **y**: the space between two rows, beside the objects (`y1-1`: rows 1 and 2, first);
+- **j**: a junction, the small cell where a space in a row meets the space
+  between the rows.
+
+Click a cell to make it a street (green), or press and drag across several;
+whatever the first cell becomes, the others do too, so the same drag can take
+streets back (grey). Press **Done drawing streets** (or Esc) to leave; outside
+this mode the spaces look as before. Works for layers and packages, straight
+and curved, with even or random spaces.
+
+When you press **Generate**, the drawn streets become streets in a copy of the
+street mask, so everything after it treats them like the main streets:
+
+- **Road, kerbs and sidewalks**: the road runs down the middle of each space,
+  with a sidewalk of the **Sidewalk width** (2 m by default) between it and the
+  objects, wrapping round each object's corner on a curve. A space needs room
+  for its road between two sidewalks; the console names spaces too narrow.
+- **Rounded corners** to the **Corner radius** (4 m by default, at most three
+  sidewalk widths, never closer to an object than half a sidewalk).
+- **Joining the streets**: a street reaching the edge of the placement goes on
+  straight to the nearest street, up to 50 m, unless that would run through an
+  object of any placement; otherwise it ends at the edge.
+- **Islands**: the areas between streets become islands, like any city block:
+  raised to sidewalk height and paved like the sidewalks, the objects standing
+  on them. Specks of island under 40 m² left between streets become road.
+- **Markings**: tick **Markings on inner streets** for the markings of the main
+  streets, as strips or painted in, whichever the 3D model is set to; untick it
+  for inner streets with no markings at all.
+- Inner streets never run over an object, even where placements overlap.
+
+After changing inner streets (or moving a placement that has them), press
+Generate again: the 3D export says so if you forget.
+
+### Turning single objects
+
+Every object in a placement has an id, **row-column** counted from the top
+left: `1-1` is the first object of the front row, the first along the line.
+Press **Turn single objects** to see them; click an object to pick it,
+Shift-click to pick more. **↺ 90°** and **↻ 90°** turn the picked objects a
+quarter turn, **Rotation** sets an angle (degrees, clockwise on the map), and
+**Reset picked objects** puts them back. The turns are kept with the placement
+by id and apply in the 3D model; a turned object that reaches the road is left
+out like any other.
 
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.
