@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.02-spaces1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1112,22 +1112,68 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
   }
   // copies fill the line at the gap, centred on it; each turns with the curve:
   // its X along the line, its front (+Y) to the left of the line's direction,
-  // or the right when flipped. Returns [x, y, angle] per copy (angle: its X).
-  function curveCopies(P, w, d, gx, gy, ny, flip){
-    const ln = lineOf(P), L = ln.L, step = Math.max(w + gx, 1e-9);
-    const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
-    const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2, Ly = ny*d + (ny - 1)*gy;
-    const spots = [];
-    for(let i = 0; i < n; i++){
-      let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
-      if(flip) ang += Math.PI;
-      const v = [-Math.sin(ang), Math.cos(ang)];            // across the line, towards the copy's back
-      for(let r = 0; r < ny; r++){
-        const off = -Ly/2 + d/2 + r*(d + gy);
+  // or the right when flipped. With random spaces each row has its own gaps.
+  // Returns [x, y, angle] per copy (angle: its X) and the copies in each row.
+  function curveCopies(P, w, d, gx, gy, ny, flip, spaces){
+    const ln = lineOf(P), L = ln.L, { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
+    const spots = [], counts = [];
+    if(!spaces){
+      const step = Math.max(w + gx, 1e-9);
+      const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
+      const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2;
+      for(let i = 0; i < n; i++){
+        let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
+        if(flip) ang += Math.PI;
+        const v = [-Math.sin(ang), Math.cos(ang)];          // across the line, towards the copy's back
+        for(let r = 0; r < ny; r++){
+          const off = fronts[r] + d/2;
+          spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
+        }
+      }
+      return { spots, counts: Array(ny).fill(n), n, L, Ly, samples: ln.S };
+    }
+    for(let r = 0; r < ny; r++){
+      const gap = spacer(spaces, r, gx), gaps = [0];
+      let used = Math.max(w, 1e-6);
+      while(gaps.length < 5000){
+        const g = gap();
+        if(used + g + Math.max(w, 1e-6) > L + 1e-9) break;   // the row is full: always at least one
+        gaps.push(g); used += g + Math.max(w, 1e-6);
+      }
+      counts.push(gaps.length);
+      let at = (L - used) / 2;
+      for(const g of gaps){
+        at += g;
+        let [pos, ang] = lineAt(ln, Math.min(Math.max(at + w/2, 0), L));
+        at += Math.max(w, 1e-6);
+        if(flip) ang += Math.PI;
+        const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + d/2;
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
       }
     }
-    return { spots, n, L, samples: ln.S };
+    return { spots, counts, n: Math.max(...counts), L, Ly, samples: ln.S };
+  }
+  // a rectangle of copies: nx along its width in each of ny rows, centred on c,
+  // rows along angle a. With random spaces each row has its own gaps and length
+  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces){
+    const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
+    const { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
+    const spots = [], lengths = [];
+    for(let r = 0; r < ny; r++){
+      const gap = spacer(spaces, r, gx), gaps = [0];
+      for(let i = 1; i < nx; i++) gaps.push(gap());
+      let Lr = nx * w;
+      for(const g of gaps) Lr += g;
+      lengths.push(Lr);
+      let at = -Lr / 2;
+      for(const g of gaps){
+        at += g;
+        const o1 = at + w/2, o2 = fronts[r] + d/2;
+        spots.push([c[0] + u[0]*o1 + v[0]*o2, c[1] + u[1]*o1 + v[1]*o2, a]);
+        at += w;
+      }
+    }
+    return { spots, lengths, Ly };
   }
 
   // A package mixes several objects in one placement: each row is filled with
@@ -1155,36 +1201,62 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
     for(const k of cand){ acc += weights[k]; if(r < acc) return k; }
     return cand[cand.length - 1];
   }
+  // Random spaces: each gap along a row a random distance between the X min and
+  // max, each gap between two rows one between the Y min and max (metres). Same
+  // steps and random numbers as app/curves.py. spaces = { on, x:[min,max], y:[min,max], seed };
+  // only used when on. Their own seed, apart from a package's mix.
+  const spacesOf = p => (p.spaces && p.spaces.on) ? p.spaces : null;
+  function spacer(spaces, row, even){
+    if(!spaces) return () => even;
+    const [lo, hi] = spaces.x.map(x => Math.max(0, +x)).sort((a, b) => a - b);
+    const rnd = rng(rowSeed(((spaces.seed >>> 0) ^ 0x5BD1E995) >>> 0, row));
+    return () => lo + rnd() * (hi - lo);
+  }
+  function rowGaps(spaces, n, even){
+    if(!spaces) return Array(Math.max(n, 0)).fill(even);
+    const [lo, hi] = spaces.y.map(x => Math.max(0, +x)).sort((a, b) => a - b);
+    const rnd = rng(((spaces.seed >>> 0) ^ 0xA5A5A5A5) >>> 0), out = [];
+    for(let i = 0; i < n; i++) out.push(lo + rnd() * (hi - lo));
+    return out;
+  }
+  function rowFronts(depth, ny, gaps){
+    let Ly = ny * depth;
+    for(const g of gaps) Ly += g;
+    const fronts = [];
+    let f = -Ly / 2;
+    for(let r = 0; r < ny; r++){ if(r) f += depth + gaps[r - 1]; fronts.push(f); }
+    return { fronts, Ly };
+  }
   // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
-  function packageCopies(P, slots, gx, gy, ny, flip, seed){
+  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces){
     const ln = lineOf(P), L = ln.L;
     let weights = slots.map(q => Math.max(0, +q[2] || 0));
     if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
-    const D = Math.max(...slots.map(q => q[1])), Ly = ny*D + (ny - 1)*gy;
+    const D = Math.max(...slots.map(q => q[1])), { fronts, Ly } = rowFronts(D, ny, rowGaps(spaces, ny - 1, gy));
     const spots = [], counts = [];
     for(let r = 0; r < ny; r++){
-      const rnd = rng(rowSeed(seed, r)), picks = [];
+      const rnd = rng(rowSeed(seed, r)), gap = spacer(spaces, r, gx), picks = [], gaps = [];
       let used = 0, prev = null;
       while(picks.length < 5000){
         const k = pickSlot(rnd, weights, prev);
-        const need = Math.max(slots[k][0], 1e-6) + (picks.length ? gx : 0);
+        const g = picks.length ? gap() : 0;
+        const need = Math.max(slots[k][0], 1e-6) + g;
         if(picks.length && used + need > L + 1e-9) break;      // the row is full: always at least one
-        picks.push(k); used += need; prev = k;
+        picks.push(k); gaps.push(g); used += need; prev = k;
       }
       counts.push(picks.length);
-      const front = -Ly/2 + r*(D + gy);                      // the row's front edge, across the line
       let at = (L - used) / 2;
       picks.forEach((k, i) => {
         const [w, d] = slots[k];
-        if(i) at += gx;
+        at += gaps[i];
         let [pos, ang] = lineAt(ln, Math.min(Math.max(at + w/2, 0), L));
         at += Math.max(w, 1e-6);
         if(flip) ang += Math.PI;
-        const v = [-Math.sin(ang), Math.cos(ang)], off = front + d/2;
+        const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + d/2;   // fronts in line on the row's front edge
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang, k]);
       });
     }
-    return { spots, counts, L, D, samples: ln.S };
+    return { spots, counts, L, D, Ly, samples: ln.S };
   }
 
   function roadAt(x, y){
@@ -1233,9 +1305,9 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
       const curve = isCurve(p), a = p.angle * Math.PI / 180, Lx = p.length || 0;
       const P = curve ? p.path : [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]];
       const r = packageCopies(P.map(q => [q[0]*m, q[1]*m]), slots.map(s => [s.w, s.d, s.weight]),
-                              p.gap_x, p.gap_y, p.ny, curve && !!p.flip, p.seed >>> 0);
+                              p.gap_x, p.gap_y, p.ny, curve && !!p.flip, p.seed >>> 0, spacesOf(p));
       const copies = r.spots.map(([x, y, ang, k]) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k]));
-      const Ly = (p.ny * r.D + (p.ny - 1) * p.gap_y) / m;
+      const Ly = r.Ly / m;
       const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L };
       if(curve){
         const line = r.samples.map(q => [q[0]/m, q[1]/m]);
@@ -1247,19 +1319,17 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
     const [w, d] = objSize(o);
     if(isCurve(p)){
       // worked out in metres, as the 3D export does, then back to mask pixels
-      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip);
+      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p));
       const line = r.samples.map(q => [q[0]/m, q[1]/m]);
-      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a, w, d)), line,
-               outer: band(line, (p.ny * d + (p.ny - 1) * p.gap_y) / m / 2), along: r.n, length_m: r.L, w: w/m, d: d/m };
+      return { curve: true, copies: r.spots.map(([x, y, a]) => copyAt(x / m, y / m, a, w, d)), line, counts: r.counts,
+               outer: band(line, r.Ly / m / 2), along: r.n, length_m: r.L, w: w/m, d: d/m };
     }
-    const a = p.angle * Math.PI / 180, u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
-    const Lx = (p.nx * w + (p.nx - 1) * p.gap_x) / m, Ly = (p.ny * d + (p.ny - 1) * p.gap_y) / m;
-    const copies = [];
-    for(let i = 0; i < p.nx; i++) for(let k = 0; k < p.ny; k++){
-      const ox = (-Lx/2 + (w/2 + i*(w + p.gap_x)) / m), oy = (-Ly/2 + (d/2 + k*(d + p.gap_y)) / m);
-      copies.push(copyAt(p.cx + u[0]*ox + v[0]*oy, p.cy + u[1]*ox + v[1]*oy, a, w, d));
-    }
-    return { ...box(a, Lx, Ly), w: w/m, d: d/m, copies };
+    // a rectangle of copies, in metres as the 3D export does; with random spaces
+    // each row has its own length, and the rectangle is as long as the longest
+    const a = p.angle * Math.PI / 180;
+    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p));
+    const copies = r.spots.map(([x, y]) => copyAt(x / m, y / m, a, w, d));
+    return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m), w: w/m, d: d/m, copies };
   }
 
   // editing a curve: points are kept in mask pixels, like the rectangles
@@ -1419,18 +1489,21 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
     } else if(sdrag.mode === 'size'){
       const m = mppMask(), a = o.angle * Math.PI / 180, dx = q[0] - o.cx, dy = q[1] - o.cy;
       const wantX = 2 * Math.abs(dx*Math.cos(a) + dy*Math.sin(a)) * m, wantY = 2 * Math.abs(-dx*Math.sin(a) + dy*Math.cos(a)) * m;
+      // with random spaces, copies and rows are counted with the middle of their range
+      const sp = spacesOf(p), mid = k => (+sp[k][0] + +sp[k][1]) / 2;
+      const gx = sp ? mid('x') : p.gap_x, gy = sp ? mid('y') : p.gap_y;
       if(p.package){
         // a package fills the length it is given; rows are as deep as its deepest object.
         // It never gets shorter than its widest object
         const slots = pkgSlots(pkgById(p.package)); if(!slots.length) return;
         p.length = Math.max(wantX, ...slots.map(s => s.w)) / m;
-        p.ny = Math.max(1, Math.round((wantY + p.gap_y) / (Math.max(...slots.map(s => s.d)) + p.gap_y)));
+        p.ny = Math.max(1, Math.round((wantY + gy) / (Math.max(...slots.map(s => s.d)) + gy)));
       } else {
         // stretch adds whole copies; the rectangle never goes below one object
         const ob = objById(p.object); if(!ob) return;
         const [w, d] = objSize(ob);
-        p.nx = Math.max(1, Math.round((wantX + p.gap_x) / (w + p.gap_x)));
-        p.ny = Math.max(1, Math.round((wantY + p.gap_y) / (d + p.gap_y)));
+        p.nx = Math.max(1, Math.round((wantX + gx) / (w + gx)));
+        p.ny = Math.max(1, Math.round((wantY + gy) / (d + gy)));
       }
     } else {
       p.angle = Math.atan2(q[1] - o.cy, q[0] - o.cx) * 180 / Math.PI;
@@ -1463,6 +1536,15 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
     $('#plCurveBox').hidden = !curve; $('#btnCurve').hidden = curve;
     if(document.activeElement !== $('#gapX')) $('#gapX').value = p.gap_x;
     if(document.activeElement !== $('#gapY')) $('#gapY').value = p.gap_y;
+    // random spaces: the ranges stay with the placement, even when switched off
+    const sp = p.spaces || { on: false, x: [1, 4], y: [2, 6] }, on = !!(p.spaces && p.spaces.on);
+    [['#spXmin', sp.x[0]], ['#spXmax', sp.x[1]], ['#spYmin', sp.y[0]], ['#spYmax', sp.y[1]]].forEach(([id, v]) => {
+      if(document.activeElement !== $(id)) $(id).value = v;
+    });
+    $('#gapX').disabled = $('#gapY').disabled = on;
+    $('#gapX').title = $('#gapY').title = on ? 'Spaces are random: set their range below, or press Even spaces' : '';
+    $('#btnEvenSpaces').disabled = !on;
+    const spNote = on ? `, random spaces X ${sp.x[0]}–${sp.x[1]} m, Y ${sp.y[0]}–${sp.y[1]} m` : '';
     if(document.activeElement !== $('#plRows')) $('#plRows').value = p.ny;
     const road = onRoad ? `, ${onRoad} on the road (left out)` : '';
     if(p.package){
@@ -1472,13 +1554,16 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
       $('#plInfo').textContent = !g0 ? 'This package has no objects yet: import some into its slots.'
         : `${g0.copies.length} copies in ${p.ny} row${p.ny > 1 ? 's' : ''}: ` + Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', ')
           + road + (curve ? `, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
-                          : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`);
+                          : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`) + spNote;
       return;
     }
-    $('#plInfo').textContent = curve && g0
-      ? `${g0.along} along the line × ${p.ny} row${p.ny > 1 ? 's' : ''} = ${g0.copies.length} copies${road}, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
+    const even = g0 && g0.counts && g0.counts.every(n => n === g0.counts[0]);
+    $('#plInfo').textContent = (curve && g0
+      ? (even ? `${g0.along} along the line × ${p.ny} row${p.ny > 1 ? 's' : ''} = ${g0.copies.length} copies`
+              : `${g0.copies.length} copies in ${p.ny} rows (${g0.counts.join(', ')})`)
+        + `${road}, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
-        + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '');
+        + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '')) + spNote;
   }
   $('#plRows').addEventListener('input', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
@@ -1495,6 +1580,25 @@ const UI_VERSION = '2026.10.01-packages1';   // must match VERSION in server.py
       + 'double-click a point to remove it. Drag an end to make the line longer or shorter.');
     saveScatter();
   });
+  // Randomize spaces: a new random set within the ranges; editing a range keeps
+  // the set and stretches it to the new range; Even spaces goes back to the gaps
+  const spaceRange = () => ({ x: [Math.max(0, +$('#spXmin').value || 0), Math.max(0, +$('#spXmax').value || 0)],
+                              y: [Math.max(0, +$('#spYmin').value || 0), Math.max(0, +$('#spYmax').value || 0)] });
+  $('#btnRandSpaces').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    p.spaces = { on: true, ...spaceRange(), seed: (Math.random() * 4294967296) >>> 0 };
+    log(`Random spaces: X ${p.spaces.x[0]}–${p.spaces.x[1]} m, Y ${p.spaces.y[0]}–${p.spaces.y[1]} m. Press again for another set.`);
+    saveScatter();
+  });
+  $('#btnEvenSpaces').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.spaces) return;
+    p.spaces.on = false; log('Even spaces: the gaps above apply again.'); saveScatter();
+  });
+  ['#spXmin', '#spXmax', '#spYmin', '#spYmax'].forEach(id => $(id).addEventListener('input', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    p.spaces = { on: false, seed: (Math.random() * 4294967296) >>> 0, ...(p.spaces || {}), ...spaceRange() };
+    drawBridges(); clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);
+  }));
   $('#btnShuffle').addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p || !p.package) return;
     p.seed = (Math.random() * 4294967296) >>> 0; log('New mix.'); saveScatter();

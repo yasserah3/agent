@@ -734,6 +734,28 @@ package by editing its name. Objects in a package do not appear as layers.
 GLB objects with a plain colour (no texture) now keep that colour; before, they
 came in grey.
 
+### Random spaces
+
+Under **Random spaces** in a selected placement's panel, set a **min** and
+**max** in metres for **X** (the spaces along the rows) and **Y** (the spaces
+between rows), then press **Randomize spaces**.
+
+- Every space along a row becomes its own random distance between the X min and
+  max, and every space between two rows its own one between the Y min and max.
+  A row moves as a whole, so its fronts stay in line.
+- Each press gives a new random set. The set is saved with the placement and
+  never changes on its own. Changing a min or max keeps the set and stretches it
+  to the new range. **Even spaces** goes back to the gaps above, which are greyed
+  out while spaces are random; the ranges are kept for next time.
+- It works for layers and packages, straight and curved. A curve or a package
+  holds as many objects as fit with the random spaces. A layer's rectangle keeps
+  its number of copies, so each row gets its own length, centred, and the
+  rectangle is as long as the longest row. Dragging a corner counts copies and
+  rows with the middle of the range.
+- The random spaces have their own seed, apart from a package's mix: Shuffle
+  does not change the spaces, and Randomize spaces does not change the mix. The
+  map and the 3D export use the same random numbers, as with packages.
+
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.
 ASCII FBX, rigs and animation are not read. OBJ textures need their MTL and

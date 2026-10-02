@@ -74,31 +74,82 @@ def _at(line, at):
     return pos, math.atan2(t[1], t[0])
 
 
-def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False):
+def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None):
     """
     Where the copies go along the line through the points.
 
     Points and sizes in one unit (metres here), image axes: x right, y down.
-    w is a copy's size along the line, d across it. Returns the copies as
-    (x, y, angle), the angle in radians being the direction of the copy's own
-    X; the number of copies along the line; and the line's length.
+    w is a copy's size along the line, d across it. With random spaces (see
+    spacer) each row has its own gaps, so its own number of copies. Returns
+    the copies as (x, y, angle), the angle in radians being the direction of
+    the copy's own X; the copies in each row; and the line's length.
     """
     line = _line(points)
     L = line[3]
-    step = max(w + gap_x, 1e-9)
-    n = max(1, int(math.floor((L + gap_x) / step + 1e-6)))
-    first = (L - (n * w + (n - 1) * gap_x)) / 2 + w / 2
-    Ly = ny * d + (ny - 1) * gap_y
-    out = []
-    for i in range(n):
-        pos, ang = _at(line, min(max(first + i * step, 0.0), L))
-        if flip:
-            ang += math.pi
-        v = np.array([-math.sin(ang), math.cos(ang)])  # across the line, towards the copy's back
-        for r in range(ny):
-            c = pos + v * (-Ly / 2 + d / 2 + r * (d + gap_y))
+    fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
+    out, counts = [], []
+    if not spaces:
+        step = max(w + gap_x, 1e-9)
+        n = max(1, int(math.floor((L + gap_x) / step + 1e-6)))
+        first = (L - (n * w + (n - 1) * gap_x)) / 2 + w / 2
+        for i in range(n):
+            pos, ang = _at(line, min(max(first + i * step, 0.0), L))
+            if flip:
+                ang += math.pi
+            v = np.array([-math.sin(ang), math.cos(ang)])  # across the line, towards the copy's back
+            for r in range(ny):
+                c = pos + v * (fronts[r] + d / 2)
+                out.append((float(c[0]), float(c[1]), ang))
+        return out, [n] * ny, L
+    for r in range(ny):
+        gap = spacer(spaces, r, gap_x)
+        gaps, used = [0.0], max(w, 1e-6)
+        while len(gaps) < 5000:
+            g = gap()
+            if used + g + max(w, 1e-6) > L + 1e-9:
+                break                                   # the row is full: always at least one
+            gaps.append(g)
+            used += g + max(w, 1e-6)
+        counts.append(len(gaps))
+        at = (L - used) / 2
+        for i, g in enumerate(gaps):
+            at += g
+            pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
+            at += max(w, 1e-6)
+            if flip:
+                ang += math.pi
+            v = np.array([-math.sin(ang), math.cos(ang)])
+            c = pos + v * (fronts[r] + d / 2)
             out.append((float(c[0]), float(c[1]), ang))
-    return out, n, L
+    return out, counts, L
+
+
+def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None):
+    """
+    A rectangle of copies: nx along its width in each of ny rows, centred on
+    centre, the rows running along angle (radians, image axes). With random
+    spaces each row has its own gaps, so its own length (each row centred).
+    Returns the copies as (x, y, angle), each row's length, and the depth.
+    """
+    u = np.array([math.cos(angle), math.sin(angle)])
+    v = np.array([-u[1], u[0]])
+    c0 = np.asarray(centre, float)
+    fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
+    out, lengths = [], []
+    for r in range(ny):
+        gap = spacer(spaces, r, gap_x)
+        gaps = [0.0] + [gap() for _ in range(nx - 1)]
+        Lr = nx * w
+        for g in gaps:
+            Lr += g                                     # summed in the same order as ui/app.js
+        lengths.append(Lr)
+        at = -Lr / 2
+        for g in gaps:
+            at += g
+            c = c0 + u * (at + w / 2) + v * (fronts[r] + d / 2)
+            at += w
+            out.append((float(c[0]), float(c[1]), angle))
+    return out, lengths, Ly
 
 
 # ----------------------------------------------------------------- packages
@@ -147,7 +198,46 @@ def _pick(rnd, weights, prev):
     return cand[-1]
 
 
-def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1):
+# ----------------------------------------------------------------- random spaces
+# Spaces can be random: each gap along a row a random distance between the X
+# min and max, each gap between two rows one between the Y min and max (in
+# metres). spaces = {"on": True, "x": [min, max], "y": [min, max], "seed": n};
+# None (or "on" false) is even spacing, the placement's own gaps. The random
+# numbers have their own seed, apart from a package's mix, so neither changes
+# the other, and each row its own stream, so a longer row only adds to its end.
+
+def spacer(spaces, row, even):
+    """The gaps along one row, one call per gap: random, or the even gap."""
+    if not spaces:
+        return lambda: even
+    lo, hi = sorted(max(0.0, float(x)) for x in spaces["x"])
+    rnd = _rng(row_seed((int(spaces["seed"]) ^ 0x5BD1E995) & _M32, row))
+    return lambda: lo + rnd() * (hi - lo)
+
+
+def row_gaps(spaces, n, even):
+    """The n gaps between rows: random, or all the even gap."""
+    if not spaces:
+        return [even] * n
+    lo, hi = sorted(max(0.0, float(x)) for x in spaces["y"])
+    rnd = _rng((int(spaces["seed"]) ^ 0xA5A5A5A5) & _M32)
+    return [lo + rnd() * (hi - lo) for _ in range(n)]
+
+
+def row_fronts(depth, ny, gaps):
+    """Each row's front edge across the line, the rows centred on it, and their total depth."""
+    Ly = ny * depth
+    for g in gaps:
+        Ly += g
+    fronts, f = [], -Ly / 2
+    for r in range(ny):
+        if r:
+            f += depth + gaps[r - 1]
+        fronts.append(f)
+    return fronts, Ly
+
+
+def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None):
     """
     A package along the line through the points. slots: (w, d, weight) per
     object, w along the line and d across, in the points' unit. Returns the
@@ -159,31 +249,31 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
     if not any(weights):
         weights = [1.0] * len(slots)
     D = max(d for _, d, _ in slots)                     # rows are as deep as the deepest object
-    Ly = ny * D + (ny - 1) * gap_y
+    fronts, Ly = row_fronts(D, ny, row_gaps(spaces, ny - 1, gap_y))
     out, counts = [], []
     for r in range(ny):
-        rnd = _rng(row_seed(seed, r))
-        picks, used, prev = [], 0.0, None
+        rnd, gap = _rng(row_seed(seed, r)), spacer(spaces, r, gap_x)
+        picks, gaps, used, prev = [], [], 0.0, None
         while len(picks) < 5000:
             k = _pick(rnd, weights, prev)
-            need = max(slots[k][0], 1e-6) + (gap_x if picks else 0.0)
+            g = gap() if picks else 0.0
+            need = max(slots[k][0], 1e-6) + g
             if picks and used + need > L + 1e-9:
                 break                                   # the row is full: always at least one
             picks.append(k)
+            gaps.append(g)
             used += need
             prev = k
         counts.append(len(picks))
-        front = -Ly / 2 + r * (D + gap_y)               # the row's front edge, across the line
         at = (L - used) / 2
-        for i, k in enumerate(picks):
+        for k, g in zip(picks, gaps):
             w, d, _ = slots[k]
-            if i:
-                at += gap_x
+            at += g
             pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
             at += max(w, 1e-6)
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
-            c = pos + v * (front + d / 2)
+            c = pos + v * (fronts[r] + d / 2)           # fronts in line on the row's front edge
             out.append((float(c[0]), float(c[1]), ang, k))
     return out, counts, L

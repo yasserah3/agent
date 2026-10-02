@@ -44,7 +44,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.01-packages1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.02-spaces1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -855,6 +855,15 @@ def _placement_list(raw):
                       "angle": float(p.get("angle", 0.0)), "nx": max(1, int(p.get("nx", 1))),
                       "ny": max(1, int(p.get("ny", 1))), "gap_x": max(0.0, float(p.get("gap_x", 0.0))),
                       "gap_y": max(0.0, float(p.get("gap_y", 0.0)))})
+            # random spaces: each gap a random distance in metres between min and max,
+            # along the rows (x) and between them (y); kept when off, so the values stay
+            sp = p.get("spaces")
+            if isinstance(sp, dict):
+                (x0, x1), (y0, y1) = sp.get("x", (0, 0)), sp.get("y", (0, 0))
+                q["spaces"] = {"on": bool(sp.get("on", False)),
+                               "x": [max(0.0, float(x0)), max(0.0, float(x1))],
+                               "y": [max(0.0, float(y0)), max(0.0, float(y1))],
+                               "seed": int(sp.get("seed", 1)) & 0xFFFFFFFF}
             # a curved placement: copies along the smooth line through these points
             path = [[float(x), float(y)] for x, y in (p.get("path") or [])]
             if len(path) >= 2:

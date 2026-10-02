@@ -111,6 +111,8 @@
   .bridge-layer .corner{ pointer-events:all; cursor:nwse-resize; }
   .bridge-layer .spin{ pointer-events:all; cursor:grab; }
   .bridge-layer .pt{ pointer-events:all; cursor:move; }
+  .field .pair{ display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+  .field .pair input{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:5px 6px; width:100%; min-width:0; }
   .pkg{ border:1px solid var(--line); border-radius:6px; padding:8px; margin-top:8px; }
   .pkg .pkg-name{ flex:1; background:var(--field); border:1px solid var(--line); border-radius:4px; padding:4px 6px; font-weight:600; min-width:0; }
   .pkg .swatch{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
@@ -341,6 +343,13 @@
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
             <div class="field"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
             <div class="field"><label for="gapY" id="gapYLabel">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div style="font-size:12px;font-weight:600;margin-top:6px">Random spaces <span style="font-weight:400;color:var(--muted)">min – max, metres</span></div>
+            <div class="field"><label for="spXmin">X, along the rows</label><span class="pair"><input type="number" id="spXmin" value="1" step="0.1" min="0" aria-label="X min"><input type="number" id="spXmax" value="4" step="0.1" min="0" aria-label="X max"></span></div>
+            <div class="field"><label for="spYmin">Y, between rows</label><span class="pair"><input type="number" id="spYmin" value="2" step="0.1" min="0" aria-label="Y min"><input type="number" id="spYmax" value="6" step="0.1" min="0" aria-label="Y max"></span></div>
+            <div class="btn-row">
+              <button class="btn secondary" id="btnRandSpaces" title="Each space becomes a random distance between min and max; press again for another set">Randomize spaces</button>
+              <button class="btn secondary" id="btnEvenSpaces" title="Back to the even gaps above">Even spaces</button>
+            </div>
             <div id="plCurveBox" hidden>
               <div class="field"><label for="plRows">Rows</label><input type="number" id="plRows" value="1" step="1" min="1"></div>
               <div class="btn-row">

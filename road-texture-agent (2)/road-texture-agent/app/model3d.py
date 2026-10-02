@@ -1343,6 +1343,7 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
 
     for p in scatter["placements"]:
       label = p.get("object") or "package"
+      spaces = p["spaces"] if (p.get("spaces") or {}).get("on") else None    # random spaces, app/curves.py
       try:
         # every copy: its object, centre in metres (image axes) and the direction of its X
         if "package" in p:
@@ -1358,24 +1359,19 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
                 c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
                 pts = np.array([c - u * half, c + u * half])     # a rectangle is a straight line
             spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
-                                            p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"])
+                                            p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces)
             spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
         else:
             label = scatter["objects"][p["object"]]["meta"].get("name", "object")
             k, turn, w, d = sized(p["object"])
             if p.get("path"):
                 spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
-                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False))
+                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces)
                 spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
             else:
-                a = math.radians(p["angle"])
-                u = np.array([math.cos(a), math.sin(a)])         # along the width, in image axes
-                v = np.array([-u[1], u[0]])                       # along the depth
-                Lx = p["nx"] * w + (p["nx"] - 1) * p["gap_x"]
-                Ly = p["ny"] * d + (p["ny"] - 1) * p["gap_y"]
-                c = np.array([p["cx"], p["cy"]]) * mpp_mask      # metres, image axes
-                spots = [(p["object"], c + u * (-Lx / 2 + w / 2 + i * (w + p["gap_x"])) + v * (-Ly / 2 + d / 2 + j * (d + p["gap_y"])), a)
-                         for i in range(p["nx"]) for j in range(p["ny"])]
+                spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
+                                             p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces)
+                spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
         for oid, cc, a in spots:
             k, turn, w, d = sized(oid)
             u = np.array([math.cos(a), math.sin(a)])
