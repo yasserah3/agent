@@ -74,28 +74,47 @@ def _at(line, at):
     return pos, math.atan2(t[1], t[0])
 
 
-def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None):
+def turned(w, d, deg):
+    """
+    A footprint's size along its row and across it once turned by deg degrees:
+    a turned object takes its whole turned outline, so the spaces around it
+    stay as set (neighbours and the rows behind move instead).
+    """
+    if not deg:
+        return w, d
+    t = math.radians(deg)
+    c, s = abs(math.cos(t)), abs(math.sin(t))
+    return w * c + d * s, w * s + d * c
+
+
+def _turn(turns, r, i):
+    """A copy's own turn, by its id "row-column" (both from 1)."""
+    return float((turns or {}).get("%d-%d" % (r + 1, i + 1), 0.0))
+
+
+def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None, turns=None):
     """
     Where the copies go along the line through the points.
 
     Points and sizes in one unit (metres here), image axes: x right, y down.
     w is a copy's size along the line, d across it. With random spaces (see
-    spacer) each row has its own gaps, so its own number of copies. Returns
-    the copies as (x, y, angle), the angle in radians being the direction of
-    the copy's own X; the copies in each row; and the line's length. A
+    spacer) or turned copies (turns: {id: degrees}) each row has its own gaps
+    and sizes, so its own number of copies. Returns the copies as (x, y,
+    angle), the angle in radians being the direction of the copy's own X
+    (without its own turn); the copies in each row; and the line's length. A
     layout dict, if given, is filled in (see new_layout).
     """
     line = _line(points)
     L = line[3]
-    fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
-    lay = new_layout(layout, points, flip, fronts, d)
-    out, counts = [], []
-    if not spaces:
+    if not spaces and not turns:
+        fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
+        lay = new_layout(layout, points, flip, fronts, [d] * ny)
         step = max(w + gap_x, 1e-9)
         n = max(1, int(math.floor((L + gap_x) / step + 1e-6)))
         first = (L - (n * w + (n - 1) * gap_x)) / 2 + w / 2
         for r in range(ny):
             lay["rows"][r]["items"] = [[first + i * step - w / 2, first + i * step + w / 2] for i in range(n)]
+        out = []
         for i in range(n):
             pos, ang = _at(line, min(max(first + i * step, 0.0), L))
             if flip:
@@ -106,66 +125,85 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
                 out.append((float(c[0]), float(c[1]), ang))
                 lay["ids"].append("%d-%d" % (r + 1, i + 1))
         return out, [n] * ny, L
+    # each row first: its copies' (turned) sizes, as many as fit with the gaps
+    rows = []
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
-        gaps, used = [0.0], max(w, 1e-6)
+        sizes = [turned(w, d, _turn(turns, r, 0))]
+        gaps, used = [0.0], max(sizes[0][0], 1e-6)
         while len(gaps) < 5000:
+            nxt = turned(w, d, _turn(turns, r, len(gaps)))
             g = gap()
-            if used + g + max(w, 1e-6) > L + 1e-9:
+            if used + g + max(nxt[0], 1e-6) > L + 1e-9:
                 break                                   # the row is full: always at least one
             gaps.append(g)
-            used += g + max(w, 1e-6)
+            sizes.append(nxt)
+            used += g + max(nxt[0], 1e-6)
+        rows.append((gaps, sizes, used))
+    # then the rows, each as deep as its deepest (turned) copy
+    depths = [max([d] + [z[1] for z in sz]) for _, sz, _ in rows]
+    fronts, Ly = row_fronts(depths, ny, row_gaps(spaces, ny - 1, gap_y), base=d)
+    lay = new_layout(layout, points, flip, fronts, depths)
+    out, counts = [], []
+    for r, (gaps, sizes, used) in enumerate(rows):
         counts.append(len(gaps))
         at = (L - used) / 2
-        for i, g in enumerate(gaps):
+        for i, (g, (ww, dd)) in enumerate(zip(gaps, sizes)):
             at += g
-            pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
-            lay["rows"][r]["items"].append([at, at + max(w, 1e-6)])
-            at += max(w, 1e-6)
+            pos, ang = _at(line, min(max(at + ww / 2, 0.0), L))
+            lay["rows"][r]["items"].append([at, at + max(ww, 1e-6)])
+            at += max(ww, 1e-6)
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
-            c = pos + v * (fronts[r] + d / 2)
+            c = pos + v * (fronts[r] + dd / 2)          # fronts in line on the row's front edge
             out.append((float(c[0]), float(c[1]), ang))
             lay["ids"].append("%d-%d" % (r + 1, i + 1))
     return out, counts, L
 
 
-def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, layout=None):
+def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, layout=None, turns=None):
     """
     A rectangle of copies: nx along its width in each of ny rows, centred on
     centre, the rows running along angle (radians, image axes). With random
-    spaces each row has its own gaps, so its own length (each row centred).
+    spaces or turned copies each row has its own gaps and sizes, so its own
+    length (each row centred), and each row is as deep as its deepest copy.
     Returns the copies as (x, y, angle), each row's length, and the depth.
     """
     u = np.array([math.cos(angle), math.sin(angle)])
     v = np.array([-u[1], u[0]])
     c0 = np.asarray(centre, float)
-    fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
-    out, lengths, starts = [], [], []
+    rows = []
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
         gaps = [0.0] + [gap() for _ in range(nx - 1)]
-        Lr = nx * w
-        for g in gaps:
+        sizes = [turned(w, d, _turn(turns, r, i)) for i in range(nx)]
+        Lr = 0.0
+        for g, (ww, _) in zip(gaps, sizes):
             Lr += g                                     # summed in the same order as ui/app.js
+            Lr += ww
+        rows.append((gaps, sizes, Lr))
+    depths = [max([d] + [z[1] for z in sz]) for _, sz, _ in rows]
+    fronts, Ly = row_fronts(depths, ny, row_gaps(spaces, ny - 1, gap_y), base=d)
+    out, lengths, starts = [], [], []
+    for r, (gaps, sizes, Lr) in enumerate(rows):
         lengths.append(Lr)
         at = -Lr / 2
         row = []
-        for g in gaps:
+        for g, (ww, dd) in zip(gaps, sizes):
             at += g
-            c = c0 + u * (at + w / 2) + v * (fronts[r] + d / 2)
-            row.append(at)
-            at += w
+            c = c0 + u * (at + ww / 2) + v * (fronts[r] + dd / 2)
+            row.append([at, at + ww])
+            at += ww
             out.append((float(c[0]), float(c[1]), angle))
         starts.append(row)
     if layout is not None:
         # the rectangle's middle line, as long as its longest row: distances along
         # it start at its left end
         half = max(lengths) / 2
-        lay = new_layout(layout, [c0 - u * half, c0 + u * half], False, fronts, d)
+        lay = new_layout(layout, [c0 - u * half, c0 + u * half], False, fronts, depths)
         for r in range(ny):
-            lay["rows"][r]["items"] = [[a + half, a + half + w] for a in starts[r]]
+            lay["rows"][r]["items"] = [[a + half, b + half] for a, b in starts[r]]
             lay["ids"] += ["%d-%d" % (r + 1, i + 1) for i in range(nx)]
     return out, lengths, Ly
 
@@ -242,24 +280,42 @@ def row_gaps(spaces, n, even):
     return [lo + rnd() * (hi - lo) for _ in range(n)]
 
 
-def row_fronts(depth, ny, gaps):
-    """Each row's front edge across the line, the rows centred on it, and their total depth."""
-    Ly = ny * depth
+def row_fronts(depth, ny, gaps, base=None):
+    """
+    Each row's front edge across the line, the rows centred on it, and their
+    total depth. depth: one for every row, or a list, one per row. With base
+    (the rows' depth before any copy was turned), the rows are placed as for
+    base and keep their front: rows made deeper by a turned copy push only the
+    rows behind them back.
+    """
+    depths = list(depth) if isinstance(depth, (list, tuple)) else [depth] * ny
+    Ly = 0.0
+    for dd in depths:
+        Ly += dd
     for g in gaps:
         Ly += g
-    fronts, f = [], -Ly / 2
+    Ly0 = Ly
+    if base is not None:
+        Ly0 = 0.0
+        for _ in range(ny):
+            Ly0 += base
+        for g in gaps:
+            Ly0 += g
+    fronts, f = [], -Ly0 / 2
     for r in range(ny):
         if r:
-            f += depth + gaps[r - 1]
+            f += depths[r - 1] + gaps[r - 1]
         fronts.append(f)
     return fronts, Ly
 
 
-def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None, layout=None):
+def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None, layout=None,
+                   turns=None):
     """
     A package along the line through the points. slots: (w, d, weight) per
-    object, w along the line and d across, in the points' unit. Returns the
-    copies as (x, y, angle, slot), the copies in each row, and the line's length.
+    object, w along the line and d across, in the points' unit. Turned copies
+    (turns: {id: degrees}) take their turned size. Returns the copies as (x, y,
+    angle, slot), the copies in each row, and the line's length.
     """
     line = _line(points)
     L = line[3]
@@ -267,35 +323,41 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
     if not any(weights):
         weights = [1.0] * len(slots)
     D = max(d for _, d, _ in slots)                     # rows are as deep as the deepest object
-    fronts, Ly = row_fronts(D, ny, row_gaps(spaces, ny - 1, gap_y))
-    lay = new_layout(layout, points, flip, fronts, D)
-    out, counts = [], []
+    rows = []
     for r in range(ny):
         rnd, gap = _rng(row_seed(seed, r)), spacer(spaces, r, gap_x)
-        picks, gaps, used, prev = [], [], 0.0, None
+        picks, gaps, sizes, used, prev = [], [], [], 0.0, None
         while len(picks) < 5000:
             k = _pick(rnd, weights, prev)
+            ww, dd = turned(slots[k][0], slots[k][1], _turn(turns, r, len(picks)))
             g = gap() if picks else 0.0
-            need = max(slots[k][0], 1e-6) + g
+            need = max(ww, 1e-6) + g
             if picks and used + need > L + 1e-9:
                 break                                   # the row is full: always at least one
             picks.append(k)
             gaps.append(g)
+            sizes.append((ww, dd))
             used += need
             prev = k
+        rows.append((picks, gaps, sizes, used))
+    # each row as deep as the package's deepest object, or a deeper turned one in it
+    depths = [max([D] + [z[1] for z in sz]) for _, _, sz, _ in rows]
+    fronts, Ly = row_fronts(depths, ny, row_gaps(spaces, ny - 1, gap_y), base=D)
+    lay = new_layout(layout, points, flip, fronts, depths)
+    out, counts = [], []
+    for r, (picks, gaps, sizes, used) in enumerate(rows):
         counts.append(len(picks))
         at = (L - used) / 2
-        for i, (k, g) in enumerate(zip(picks, gaps)):
-            w, d, _ = slots[k]
+        for i, (k, g, (ww, dd)) in enumerate(zip(picks, gaps, sizes)):
             at += g
-            pos, ang = _at(line, min(max(at + w / 2, 0.0), L))
-            lay["rows"][r]["items"].append([at, at + max(w, 1e-6)])
+            pos, ang = _at(line, min(max(at + ww / 2, 0.0), L))
+            lay["rows"][r]["items"].append([at, at + max(ww, 1e-6)])
             lay["ids"].append("%d-%d" % (r + 1, i + 1))
-            at += max(w, 1e-6)
+            at += max(ww, 1e-6)
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
-            c = pos + v * (fronts[r] + d / 2)           # fronts in line on the row's front edge
+            c = pos + v * (fronts[r] + dd / 2)          # fronts in line on the row's front edge
             out.append((float(c[0]), float(c[1]), ang, k))
     return out, counts, L
 
@@ -312,11 +374,12 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
 #   y  the space between two rows, beside the objects  ("y1-1": rows 1 and 2, first)
 #   j  a junction: where an x space of either row meets the space between rows
 
-def new_layout(layout, points, flip, fronts, depth):
-    """Start a layout in the given dict (or a throwaway one)."""
+def new_layout(layout, points, flip, fronts, depths):
+    """Start a layout in the given dict (or a throwaway one); depths: one per row."""
     lay = layout if layout is not None else {}
     lay.update({"line": [[float(p[0]), float(p[1])] for p in points], "flip": bool(flip),
-                "rows": [{"front": float(f), "depth": float(depth), "items": []} for f in fronts], "ids": []})
+                "rows": [{"front": float(f), "depth": float(dd), "items": []} for f, dd in zip(fronts, depths)],
+                "ids": []})
     return lay
 
 

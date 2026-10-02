@@ -802,12 +802,22 @@ Generate again: the 3D export says so if you forget.
 
 Every object in a placement has an id, **row-column** counted from the top
 left: `1-1` is the first object of the front row, the first along the line.
-Press **Turn single objects** to see them; click an object to pick it,
-Shift-click to pick more. **↺ 90°** and **↻ 90°** turn the picked objects a
-quarter turn, **Rotation** sets an angle (degrees, clockwise on the map), and
-**Reset picked objects** puts them back. The turns are kept with the placement
-by id and apply in the 3D model; a turned object that reaches the road is left
-out like any other.
+Press **Turn single objects** to see them: each object shows its id (at 30% of
+its smaller side, so small objects get small labels) and a **green arrow** from
+its centre to its front, its +Y like Blender's green axis, turning with it.
+Click an object to pick it, Shift-click to pick more. **↺ 90°** and **↻ 90°**
+turn the picked objects a quarter turn, **Rotation** sets an angle (degrees,
+clockwise on the map), and **Reset picked objects** puts them back. The turns
+are kept with the placement by id and apply in the 3D model.
+
+**The spaces stay as set around a turned object.** A turned object takes its
+whole turned outline in its row: its neighbours move along the row to keep the
+gap, and when it gets deeper its row gets deeper, so the rows behind move back
+by the difference and the gap between rows stays as set. Its front stays on
+the row's front line, and the front row never moves. On a curve or in a
+package, a wider turned object can mean one object fewer on the line. Inner
+street cells follow the new layout, so after turning objects in a placement
+with inner streets, press Generate again.
 
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.

@@ -5,7 +5,8 @@ the 3D export, and the inner streets drawn between them.
 A placement is one object or a package, as a rectangle (rows along its middle
 line) or a curve, with even or random spaces (app/curves.py). Each copy has an
 id, "row-column" from the top left, and can be given its own extra rotation in
-the placement's "turns": {id: degrees, clockwise on the map}.
+the placement's "turns": {id: degrees, clockwise on the map}. A turned copy
+takes its turned outline in its row, so the spaces around it stay as set.
 """
 
 import math
@@ -49,16 +50,17 @@ def copies_of(p, objects, packages, mpp_mask):
             c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
             pts = np.array([c - u * half, c + u * half])        # a rectangle is a straight line
         spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
-                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces, layout)
+                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces, layout,
+                                        p.get("turns"))
         spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
     else:
         k, turn, w, d = sized(objects[p["object"]]["meta"])
         if p.get("path"):
             spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
-                                    p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces, layout)
+                                    p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces, layout, p.get("turns"))
         else:
             spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
-                                         p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout)
+                                         p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout, p.get("turns"))
         spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
     turns = p.get("turns") or {}
     out = [(oid, cc, a + math.radians(float(turns.get(cid, 0.0))), cid)
