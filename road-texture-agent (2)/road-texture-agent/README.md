@@ -440,7 +440,7 @@ areas in your training pairs.
 server.py            the local server
 app/memory.py        step log, keyed situations, trees
 app/junctions.py     junction detection and classification
-app/curves.py        placements' maths: curves, packages, random spaces, ids, space cells
+app/curves.py        placements' maths: curves and curve lines, mirroring, packages, random spaces, ids, space cells
 app/placements.py    where each copy of a placement goes, for the 3D model and inner streets
 app/streets.py       inner streets drawn between objects, built into the street mask
 app/images.py        loading, hashing, noise isolation
@@ -677,6 +677,24 @@ In the Generate tab, **Objects** sits above Foliage (not active yet) and Bridges
   sidewalk height.
 - Placements are saved with their mask, like bridges.
 
+### Duplicate and flip a placement
+
+The two buttons side by side under **Add selected object to the map** work on
+the selected placement (a layer or a package, straight or curved):
+
+- **Duplicate placement** makes a copy with everything in it: gaps, random
+  spaces, the package mix, curve lines, single turns and inner streets. The copy
+  lands just behind the original, moved by its whole depth and a gap so the two
+  never overlap, and is selected, ready to drag where it goes.
+- **Flip placement** gives the mirror image, left to right along the rows: the
+  order of the objects in each row reverses (a package's mix and random spaces
+  too), a curve bends the other way, and a single object's turn mirrors (30°
+  becomes -30°). Fronts still face the same side, and the models themselves are
+  not mirrored. Every object keeps its id, so its turn and the inner streets
+  around it stay with it. Press it again to flip back. **Flip side** (in a
+  curve's panel) is different: it turns the copies to face the other side of
+  the line.
+
 ### Curved placements
 
 For copies along a curved street, select a placement and press **Bend into a
@@ -700,7 +718,37 @@ each end, holding the same copies as before.
 - What the map shows is what the 3D model gets: the map and the export use the
   same curve steps (`ui/app.js` and `app/curves.py`). Copies on the road are left
   out, as with rectangles. On a tight bend, copies on the inside of the curve
-  can touch; add a gap or move the line outwards.
+  can touch; add a gap or move the line outwards, or give the rows their own
+  curve lines (below).
+
+### Curve lines
+
+With one line every row runs parallel to it. To shape the rows differently, for
+example the front row hugging a curved street and the back row straight along
+the block behind, press **Add curve line** under **Rows**.
+
+- **Spread over the rows**: the first line shapes the front row, the last line
+  the back row, and any others are spread evenly between. A row between two
+  lines follows a blend of the two, point by point: with 5 rows and 2 lines,
+  row 2 is 3/4 of line 1 and 1/4 of line 2, row 3 half of each, row 4 a quarter
+  and three quarters. With as many lines as rows, each row has its own line.
+  Each line is drawn on the row it shapes, dashed, with its points.
+- **At most one line per row.** Add curve line is greyed out when there are as
+  many lines as rows; with fewer rows than lines, the lines are spread over the
+  rows again. **Remove curve line** takes one away, the rest spread over the
+  rows again (one line left becomes the middle line).
+- **A point added goes on every line**, at the same place along each (Add point
+  or a double-click on any line); removing a point removes it from every line.
+- **Dragging a point**: along its line, only that point moves; across its line,
+  the points at the same place on the other lines move with it, so the rows bend
+  together and keep their spacing. A drag in any other direction does both: the
+  along part moves the point alone, the across part moves the whole column.
+  Along and across are taken at the point itself, from its own line's direction.
+- Each row keeps its depth and the gaps between rows (even or random), and each
+  row has its own length along its own line, so rows can hold different numbers
+  of copies. Inner street cells follow each row's line; a space between two
+  rows runs from one row's line to the next.
+- **Make straight again** uses the middle of the lines.
 
 ### Packages: several objects in one placement
 

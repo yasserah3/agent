@@ -45,7 +45,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.02-turns1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.03-lines1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -881,11 +881,18 @@ def _placement_list(raw):
                                 "sidewalk_m": min(10.0, max(0.5, float(st.get("sidewalk_m", 2.0)))),
                                 "corner_m": min(30.0, max(0.0, float(st.get("corner_m", 4.0)))),
                                 "markings": bool(st.get("markings", True))}
-            # a curved placement: copies along the smooth line through these points
+            # a curved placement: copies along the smooth line through these points;
+            # more curve lines for the rows behind, each with as many points
             path = [[float(x), float(y)] for x, y in (p.get("path") or [])]
             if len(path) >= 2:
                 q["path"] = path
                 q["flip"] = bool(p.get("flip", False))
+                lines = [[[float(x), float(y)] for x, y in ln] for ln in (p.get("lines") or [])]
+                lines = [ln for ln in lines if len(ln) == len(path)][:500]
+                if lines:
+                    q["lines"] = lines
+            elif p.get("mirror"):
+                q["mirror"] = True              # a rectangle laid out from its other end: its mirror image
             out.append(q)
         except (KeyError, TypeError, ValueError):
             continue

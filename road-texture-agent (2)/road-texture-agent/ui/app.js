@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1117,6 +1117,38 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     while(j > 0 && seg[j] <= 1e-12) j--;
     return [pos, Math.atan2(S[j+1][1] - S[j][1], S[j+1][0] - S[j][0])];
   }
+  // Several curve lines (each with as many points): the first shapes the front
+  // row, the last the back row, the others spread evenly between; a row between
+  // two lines follows a blend of the two, point by point (5 rows on 2 lines: the
+  // second row is 3/4 of the first line and 1/4 of the second). Each row's line
+  // and its points (null with one line); rows on the same line share it
+  function rowLines(P, ny){
+    if(!Array.isArray(P[0][0]) || P.length === 1){
+      const ln = lineOf(Array.isArray(P[0][0]) ? P[0] : P);
+      return { lines: Array(ny).fill(ln), pts: null };
+    }
+    const m = P.length, lines = [], pts = [], made = new Map();
+    for(let r = 0; r < ny; r++){
+      const x = ny > 1 ? r * (m - 1) / (ny - 1) : 0;      // where the row is among the lines
+      const a = Math.min(Math.floor(x), m - 2), f = x - a, key = `${a}:${f}`;
+      if(!made.has(key)){
+        const q = f === 0 ? P[a].map(z => z.slice()) : P[a].map((z, j) => [(1 - f)*z[0] + f*P[a+1][j][0], (1 - f)*z[1] + f*P[a+1][j][1]]);
+        made.set(key, [q, lineOf(q)]);
+      }
+      pts.push(made.get(key)[0]); lines.push(made.get(key)[1]);
+    }
+    return { lines, pts };
+  }
+  // a distance along line la to the same place along line lb: lines with as many
+  // points have as many samples, and the same sample on each is the same place
+  function carry(la, lb, at){
+    if(la === lb || !la.seg.length) return at;
+    let k = 0;
+    while(k + 1 < la.s.length && la.s[k+1] <= at) k++;
+    k = Math.min(Math.max(k, 0), la.seg.length - 1);
+    const t = la.seg[k] > 0 ? (at - la.s[k]) / la.seg[k] : 0;
+    return lb.s[k] + t * lb.seg[k];
+  }
   // a footprint's size along its row and across it once turned by deg degrees:
   // a turned object takes its whole turned outline, so the spaces around it stay
   // as set (neighbours and the rows behind move instead)
@@ -1132,31 +1164,32 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   // its own gaps and sizes. Returns [x, y, angle] per copy (angle: its X, without
   // its own turn) and the copies in each row.
   function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout, turns){
-    const ln = lineOf(P), L = ln.L, spots = [];
+    const { lines, pts } = rowLines(P, ny), spots = [];
     const hasTurns = turns && Object.keys(turns).length;
     if(!spaces && !hasTurns){
       const { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
-      const lay = newLayout(layout, P, flip, fronts, Array(ny).fill(d));
-      const step = Math.max(w + gx, 1e-9);
-      const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
-      const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2;
-      for(let r = 0; r < ny; r++)
-        for(let i = 0; i < n; i++) lay.rows[r].items.push([first + i*step - w/2, first + i*step + w/2]);
-      for(let i = 0; i < n; i++){
-        let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
-        if(flip) ang += Math.PI;
-        const v = [-Math.sin(ang), Math.cos(ang)];          // across the line, towards the copy's back
-        for(let r = 0; r < ny; r++){
-          const off = fronts[r] + d/2;
+      const lay = newLayout(layout, P, flip, fronts, Array(ny).fill(d), pts);
+      const step = Math.max(w + gx, 1e-9), counts = [];
+      for(let r = 0; r < ny; r++){
+        const ln = lines[r], L = ln.L;
+        const n = Math.max(1, Math.floor((L + gx) / step + 1e-6));
+        const first = (L - (n*w + (n - 1)*gx)) / 2 + w / 2;
+        counts.push(n);
+        for(let i = 0; i < n; i++){
+          lay.rows[r].items.push([first + i*step - w/2, first + i*step + w/2]);
+          let [pos, ang] = lineAt(ln, Math.min(Math.max(first + i*step, 0), L));
+          if(flip) ang += Math.PI;
+          const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + d/2;   // across the line, towards the copy's back
           spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
           lay.ids.push(`${r + 1}-${i + 1}`);
         }
       }
-      return { spots, counts: Array(ny).fill(n), n, L, Ly, samples: ln.S, layout: lay };
+      return { spots, counts, n: Math.max(...counts), L: lines[0].L, Ly, samples: lines[0].S, lines, layout: lay };
     }
     // each row first: its copies' (turned) sizes, as many as fit with the gaps
     const rows = [];
     for(let r = 0; r < ny; r++){
+      const L = lines[r].L;
       const gap = spacer(spaces, r, gx), sizes = [turned(w, d, turnAt(turns, r, 0))], gaps = [0];
       let used = Math.max(sizes[0][0], 1e-6);
       while(gaps.length < 5000){
@@ -1169,8 +1202,9 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     // then the rows, each as deep as its deepest (turned) copy
     const depths = rows.map(([, sz]) => Math.max(d, ...sz.map(z => z[1])));
     const { fronts, Ly } = rowFronts(depths, ny, rowGaps(spaces, ny - 1, gy), d);
-    const lay = newLayout(layout, P, flip, fronts, depths), counts = [];
+    const lay = newLayout(layout, P, flip, fronts, depths, pts), counts = [];
     rows.forEach(([gaps, sizes, used], r) => {
+      const ln = lines[r], L = ln.L;
       counts.push(gaps.length);
       let at = (L - used) / 2;
       gaps.forEach((g, i) => {
@@ -1185,13 +1219,14 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
         lay.ids.push(`${r + 1}-${i + 1}`);
       });
     });
-    return { spots, counts, n: Math.max(...counts), L, Ly, samples: ln.S, layout: lay };
+    return { spots, counts, n: Math.max(...counts), L: lines[0].L, Ly, samples: lines[0].S, lines, layout: lay };
   }
   // a rectangle of copies: nx along its width in each of ny rows, centred on c,
   // rows along angle a. With random spaces or turned copies each row has its own
-  // gaps, sizes and length, and each row is as deep as its deepest copy
-  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns){
-    const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]];
+  // gaps, sizes and length, and each row is as deep as its deepest copy.
+  // Mirrored, the rows are laid out from the other end, the copies facing the same way
+  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns, mirror){
+    const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], du = mirror ? [-u[0], -u[1]] : u;
     const rows = [];
     for(let r = 0; r < ny; r++){
       const gap = spacer(spaces, r, gx), gaps = [0];
@@ -1212,7 +1247,7 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
         const [ww, dd] = sizes[i];
         at += g;
         const o1 = at + ww/2, o2 = fronts[r] + dd/2;
-        spots.push([c[0] + u[0]*o1 + v[0]*o2, c[1] + u[1]*o1 + v[1]*o2, a]);
+        spots.push([c[0] + du[0]*o1 + v[0]*o2, c[1] + du[1]*o1 + v[1]*o2, a]);
         row.push([at, at + ww]);
         at += ww;
       });
@@ -1220,7 +1255,7 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     });
     // the rectangle's middle line, as long as its longest row
     const half = Math.max(...lengths) / 2;
-    const lay = newLayout(layout, [[c[0] - u[0]*half, c[1] - u[1]*half], [c[0] + u[0]*half, c[1] + u[1]*half]], false, fronts, depths);
+    const lay = newLayout(layout, [[c[0] - du[0]*half, c[1] - du[1]*half], [c[0] + du[0]*half, c[1] + du[1]*half]], !!mirror, fronts, depths);
     for(let r = 0; r < ny; r++){
       lay.rows[r].items = starts[r].map(([x0, x1]) => [x0 + half, x1 + half]);
       for(let i = 0; i < nx; i++) lay.ids.push(`${r + 1}-${i + 1}`);
@@ -1291,12 +1326,13 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   }
   // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
   function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout, turns){
-    const ln = lineOf(P), L = ln.L;
+    const { lines, pts } = rowLines(P, ny);
     let weights = slots.map(q => Math.max(0, +q[2] || 0));
     if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
     const D = Math.max(...slots.map(q => q[1]));          // rows are as deep as the deepest object
     const rows = [];
     for(let r = 0; r < ny; r++){
+      const L = lines[r].L;
       const rnd = rng(rowSeed(seed, r)), gap = spacer(spaces, r, gx), picks = [], gaps = [], sizes = [];
       let used = 0, prev = null;
       while(picks.length < 5000){
@@ -1312,9 +1348,10 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     // each row as deep as the package's deepest object, or a deeper turned one in it
     const depths = rows.map(([, , sz]) => Math.max(D, ...sz.map(z => z[1])));
     const { fronts, Ly } = rowFronts(depths, ny, rowGaps(spaces, ny - 1, gy), D);
-    const lay = newLayout(layout, P, flip, fronts, depths);
+    const lay = newLayout(layout, P, flip, fronts, depths, pts);
     const spots = [], counts = [];
     rows.forEach(([picks, gaps, sizes, used], r) => {
+      const ln = lines[r], L = ln.L;
       counts.push(picks.length);
       let at = (L - used) / 2;
       picks.forEach((k, i) => {
@@ -1329,33 +1366,48 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
         spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang, k]);
       });
     });
-    return { spots, counts, L, D, Ly, samples: ln.S, layout: lay };
+    return { spots, counts, L: lines[0].L, D, Ly, samples: lines[0].S, lines, layout: lay };
   }
 
   // Layout and cells, as in app/curves.py: every placement is rows of objects
   // along a line; objects have ids "row-column" from the top left. The spaces
   // split into cells for inner streets: x between neighbours in a row, y between
   // two rows beside the objects, j junctions where an x space meets a y space.
-  function newLayout(layout, points, flip, fronts, depths){
-    const lay = layout || {};
-    Object.assign(lay, { line: points.map(q => [+q[0], +q[1]]), flip: !!flip,
+  // With several curve lines each row has its own line (its points), and its
+  // distances are along it; a cell's are along its row's (y and j: the front one's)
+  function newLayout(layout, points, flip, fronts, depths, rowPoints){
+    const lay = layout || {}, first = Array.isArray(points[0][0]) ? points[0] : points;
+    Object.assign(lay, { line: first.map(q => [+q[0], +q[1]]), flip: !!flip,
                          rows: fronts.map((f, r) => ({ front: f, depth: depths[r], items: [] })), ids: [] });
+    if(rowPoints) lay.rows.forEach((row, r) => { row.line = rowPoints[r].map(q => [+q[0], +q[1]]); });
     return lay;
   }
-  function cellsOf(lay, minM = 0.05){
+  // row r's line: its own with several curve lines, else the layout's (cache: reused)
+  function rowLine(lay, r, cache = new Map()){
+    const key = lay.rows[r].line ? r : -1;
+    if(!cache.has(key)) cache.set(key, lineOf(key >= 0 ? lay.rows[r].line : lay.line));
+    return cache.get(key);
+  }
+  function cellsOf(lay, minM = 0.05, cache = new Map()){
     const rows = lay.rows, out = [];
     rows.forEach((row, r) => {
       const it = row.items;
       for(let i = 0; i + 1 < it.length; i++)
         if(it[i+1][0] - it[i][1] > minM)
-          out.push({ id: `x${r + 1}-${i + 1}`, kind: 'x', s: [it[i][1], it[i+1][0]], o: [row.front, row.front + row.depth] });
+          out.push({ id: `x${r + 1}-${i + 1}`, kind: 'x', row: r, s: [it[i][1], it[i+1][0]], o: [row.front, row.front + row.depth] });
     });
     for(let r = 0; r + 1 < rows.length; r++){
       const a = rows[r], b = rows[r + 1], o0 = a.front + a.depth, o1 = b.front;
       if(o1 - o0 <= minM || !a.items.length || !b.items.length) continue;
-      const lo = Math.min(a.items[0][0], b.items[0][0]), hi = Math.max(a.items[a.items.length - 1][1], b.items[b.items.length - 1][1]);
+      let bi = b.items;
+      if(a.line || b.line){
+        // the row behind on a line of its own: its objects where they are along the front one's
+        const la = rowLine(lay, r, cache), lb = rowLine(lay, r + 1, cache);
+        bi = bi.map(([s0, s1]) => [carry(lb, la, s0), carry(lb, la, s1)]);
+      }
+      const lo = Math.min(a.items[0][0], bi[0][0]), hi = Math.max(a.items[a.items.length - 1][1], bi[bi.length - 1][1]);
       const gaps = [];
-      for(const it of [a.items, b.items])
+      for(const it of [a.items, bi])
         for(let i = 0; i + 1 < it.length; i++) if(it[i+1][0] - it[i][1] > minM) gaps.push([it[i][1], it[i+1][0]]);
       gaps.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
       const merged = [];
@@ -1366,25 +1418,36 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       let cur = lo, ky = 0, kj = 0;
       for(let [g0, g1] of merged){
         g0 = Math.max(g0, lo); g1 = Math.min(g1, hi);
-        if(g0 - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', s: [cur, g0], o: [o0, o1] }); }
-        kj++; out.push({ id: `j${r + 1}-${kj}`, kind: 'j', s: [g0, g1], o: [o0, o1] });
+        if(g0 - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', row: r, s: [cur, g0], o: [o0, o1] }); }
+        kj++; out.push({ id: `j${r + 1}-${kj}`, kind: 'j', row: r, s: [g0, g1], o: [o0, o1] });
         cur = g1;
       }
-      if(hi - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', s: [cur, hi], o: [o0, o1] }); }
+      if(hi - cur > minM){ ky++; out.push({ id: `y${r + 1}-${ky}`, kind: 'y', row: r, s: [cur, hi], o: [o0, o1] }); }
     }
     return out;
   }
-  function stripPolygon(lay, s0, s1, o0, o1, step = 1.0, ln = null){
+  // with far, another row's line, the far edge runs along that one, at the same places
+  function stripPolygon(lay, s0, s1, o0, o1, step = 1.0, ln = null, far = null){
     ln = ln || lineOf(lay.line);
-    const n = Math.max(1, Math.ceil((s1 - s0) / step - 1e-9)), sign = lay.flip ? -1 : 1, near = [], far = [];
+    const n = Math.max(1, Math.ceil((s1 - s0) / step - 1e-9)), sign = lay.flip ? -1 : 1, near = [], back = [];
     for(let k = 0; k <= n; k++){
-      const [pos, ang] = lineAt(ln, Math.min(Math.max(s0 + (s1 - s0) * k / n, 0), ln.L));
-      const v = [-Math.sin(ang) * sign, Math.cos(ang) * sign];
-      near.push([pos[0] + v[0]*o0, pos[1] + v[1]*o0]); far.push([pos[0] + v[0]*o1, pos[1] + v[1]*o1]);
+      const at = Math.min(Math.max(s0 + (s1 - s0) * k / n, 0), ln.L);
+      let [pos, ang] = lineAt(ln, at), v = [-Math.sin(ang) * sign, Math.cos(ang) * sign];
+      near.push([pos[0] + v[0]*o0, pos[1] + v[1]*o0]);
+      if(far && far !== ln){
+        [pos, ang] = lineAt(far, Math.min(Math.max(carry(ln, far, at), 0), far.L));
+        v = [-Math.sin(ang) * sign, Math.cos(ang) * sign];
+      }
+      back.push([pos[0] + v[0]*o1, pos[1] + v[1]*o1]);
     }
-    return near.concat(far.reverse());
+    return near.concat(back.reverse());
   }
-  const cellPolygon = (lay, c, step, ln) => stripPolygon(lay, c.s[0], c.s[1], c.o[0], c.o[1], step, ln);
+  // a cell's area: along its row's line, a y or j cell reaching across to the next row's
+  function cellPolygon(lay, c, step, cache = new Map()){
+    const r = c.row || 0, ln = rowLine(lay, r, cache);
+    const far = c.kind !== 'x' && r + 1 < lay.rows.length ? rowLine(lay, r + 1, cache) : ln;
+    return stripPolygon(lay, c.s[0], c.s[1], c.o[0], c.o[1], step, ln, far);
+  }
 
   function roadAt(x, y){
     // the mask itself: white is road. Read once per mask
@@ -1400,6 +1463,15 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   }
 
   const isCurve = p => Array.isArray(p.path) && p.path.length >= 2;
+  // a curve's lines in mask pixels: the first (path), then any more curve lines,
+  // each with as many points
+  const curveLinesOf = p => [p.path].concat((p.lines || []).filter(q => q.length === p.path.length));
+  function setCurveLines(p, all){ p.path = all[0]; if(all.length > 1) p.lines = all.slice(1); else delete p.lines; }
+  // in metres for the maths: the one line, or all of them
+  function curvePoints(p, m){
+    const all = curveLinesOf(p).map(q => q.map(z => [z[0]*m, z[1]*m]));
+    return all.length > 1 ? all : all[0];
+  }
 
   function placementGeom(p){
     const m = mppMask();
@@ -1412,15 +1484,45 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null, id };
     };
     // the band the rows cover beside a curve, from o0 to o1 across it (towards the
-    // copies' backs): blue between copies is the gap
-    const band = (line, o0, o1, flip) => {
+    // copies' backs): blue between copies is the gap. With line2 (the back row's
+    // own line) the far side runs along that one
+    const along = (line, k) => {
+      const a = line[Math.max(k - 1, 0)], b = line[Math.min(k + 1, line.length - 1)], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      return [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    };
+    const band = (line, o0, o1, flip, line2) => {
       const near = [], far = [], sg = flip ? -1 : 1;
       line.forEach((q, k) => {
-        const a = line[Math.max(k - 1, 0)], b = line[Math.min(k + 1, line.length - 1)];
-        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, nx = -(b[1] - a[1]) / len * sg, ny = (b[0] - a[0]) / len * sg;
-        near.push([q[0] + nx*o0, q[1] + ny*o0]); far.push([q[0] + nx*o1, q[1] + ny*o1]);
+        const t = along(line, k);
+        near.push([q[0] - t[1]*sg*o0, q[1] + t[0]*sg*o0]);
+      });
+      (line2 || line).forEach((q, k) => {
+        const t = along(line2 || line, k);
+        far.push([q[0] - t[1]*sg*o1, q[1] + t[0]*sg*o1]);
       });
       return near.concat(far.reverse());
+    };
+    // a curve's outline, from the front row's front to the back row's back, each
+    // on its row's line, and its curve lines as drawn: one line is the middle
+    // line; with more, each sits on the row it shapes (between two rows when it
+    // falls between), its points where they bend that row
+    const curveShape = r => {
+      const lay = r.layout, rows = lay.rows, ny = rows.length, sg = p.flip ? -1 : 1;
+      const px = S => S.map(q => [q[0] / m, q[1] / m]);
+      const line = px(r.samples), last = rows[ny - 1], own = r.lines[ny - 1] !== r.lines[0];
+      const outer = own ? band(line, rows[0].front / m, (last.front + last.depth) / m, !!p.flip, px(r.lines[ny - 1].S))
+                        : band(line, front0(lay), front0(lay) + r.Ly / m, !!p.flip);
+      const all = curveLinesOf(p), k = all.length, cen = i => rows[i].front + rows[i].depth / 2;
+      const centre = x => { const a = Math.min(Math.floor(x), ny - 1), b = Math.min(a + 1, ny - 1), f = x - a; return (1 - f)*cen(a) + f*cen(b); };
+      const curveLines = all.map((pts, li) => {
+        const off = k > 1 ? centre(ny > 1 ? li * (ny - 1) / (k - 1) : 0) / m : 0;
+        const S = px(curveSamples(pts.map(q => [q[0]*m, q[1]*m]))), T = S.map((_, j) => along(S, j));
+        const shown = off ? S.map((q, j) => [q[0] - T[j][1]*sg*off, q[1] + T[j][0]*sg*off]) : S;
+        const at = j => Math.min(j * CURVE_STEPS, S.length - 1);
+        return { samples: shown, off, handles: off ? pts.map((_, j) => shown[at(j)]) : pts.map(q => q.slice()),
+                 tangents: pts.map((_, j) => T[at(j)]) };
+      });
+      return { line, outer, curveLines, Ly: r.Ly / m, lengths_m: r.lines.map(l => l.L) };
     };
     // a rectangle's outline: Lx long, across from o0 to o1 (centred when not given)
     const box = (a, Lx, Ly, o0 = -Ly/2) => {
@@ -1434,32 +1536,29 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       // worked out in metres exactly as the 3D export does, then back to mask pixels
       const slots = pkgSlots(pkgById(p.package)); if(!slots.length) return null;
       const curve = isCurve(p), a = p.angle * Math.PI / 180, Lx = p.length || 0;
-      const P = curve ? p.path : [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]];
-      const r = packageCopies(P.map(q => [q[0]*m, q[1]*m]), slots.map(s => [s.w, s.d, s.weight]),
-                              p.gap_x, p.gap_y, p.ny, curve && !!p.flip, p.seed >>> 0, spacesOf(p), null, p.turns);
+      // a rectangle is a straight line; mirrored, it is laid out from the other end, facing the same way
+      const straight = [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]].map(q => [q[0]*m, q[1]*m]);
+      const P = curve ? curvePoints(p, m) : p.mirror ? straight.reverse() : straight;
+      const r = packageCopies(P, slots.map(s => [s.w, s.d, s.weight]),
+                              p.gap_x, p.gap_y, p.ny, curve ? !!p.flip : !!p.mirror, p.seed >>> 0, spacesOf(p), null, p.turns);
       const copies = r.spots.map(([x, y, ang, k], n) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k], r.layout.ids[n]));
       const Ly = r.Ly / m;
       const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L, layout: r.layout };
-      if(curve){
-        const line = r.samples.map(q => [q[0]/m, q[1]/m]);
-        return { ...base, curve: true, line, outer: band(line, front0(r.layout), front0(r.layout) + Ly, !!p.flip) };
-      }
+      if(curve) return { ...base, curve: true, ...curveShape(r) };
       return { ...base, ...box(a, Lx, Ly, front0(r.layout)) };
     }
     const o = objById(p.object); if(!o) return null;
     const [w, d] = objSize(o);
     if(isCurve(p)){
       // worked out in metres, as the 3D export does, then back to mask pixels
-      const r = curveCopies(p.path.map(q => [q[0]*m, q[1]*m]), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns);
-      const line = r.samples.map(q => [q[0]/m, q[1]/m]);
-      return { curve: true, copies: r.spots.map(([x, y, a], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n])), line,
-               counts: r.counts, outer: band(line, front0(r.layout), front0(r.layout) + r.Ly / m, !!p.flip),
-               along: r.n, length_m: r.L, w: w/m, d: d/m, layout: r.layout };
+      const r = curveCopies(curvePoints(p, m), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns);
+      return { curve: true, copies: r.spots.map(([x, y, a], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n])),
+               counts: r.counts, along: r.n, length_m: r.L, w: w/m, d: d/m, layout: r.layout, ...curveShape(r) };
     }
     // a rectangle of copies, in metres as the 3D export does; with random spaces
     // each row has its own length, and the rectangle is as long as the longest
     const a = p.angle * Math.PI / 180;
-    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns);
+    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns, !!p.mirror);
     const copies = r.spots.map(([x, y], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n]));
     return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m, front0(r.layout)), w: w/m, d: d/m, copies, layout: r.layout };
   }
@@ -1468,57 +1567,90 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   // the cells of a placement's spaces, as polygons in mask pixels
   function spaceCells(p, g0){
     if(!g0 || !g0.layout) return [];
-    const m = mppMask(), ln = lineOf(g0.layout.line);
-    return cellsOf(g0.layout).map(c => ({ ...c, poly: cellPolygon(g0.layout, c, 1.0, ln).map(q => [q[0] / m, q[1] / m]) }));
+    const m = mppMask(), cache = new Map();                 // the rows' lines
+    return cellsOf(g0.layout, 0.05, cache).map(c => ({ ...c, poly: cellPolygon(g0.layout, c, 1.0, cache).map(q => [q[0] / m, q[1] / m]) }));
   }
 
-  // editing a curve: points are kept in mask pixels, like the rectangles
+  // editing a curve: points are kept in mask pixels, like the rectangles. A
+  // point added or removed goes on (or off) every curve line, at the same place
   function curveCentre(p){
     // cx, cy stay meaningful (the middle of the points) for anything that reads them
-    p.cx = p.path.reduce((s, q) => s + q[0], 0) / p.path.length;
-    p.cy = p.path.reduce((s, q) => s + q[1], 0) / p.path.length;
+    const all = curveLinesOf(p).flat();
+    p.cx = all.reduce((s, q) => s + q[0], 0) / all.length;
+    p.cy = all.reduce((s, q) => s + q[1], 0) / all.length;
   }
-  function curveLine(p){
-    // the line's samples in mask pixels: CURVE_STEPS per span between two points
+  function curveLine(pts){
+    // a line's samples in mask pixels: CURVE_STEPS per span between two points
     const m = mppMask();
-    return curveSamples(p.path.map(q => [q[0]*m, q[1]*m])).map(q => [q[0]/m, q[1]/m]);
+    return curveSamples(pts.map(q => [q[0]*m, q[1]*m])).map(q => [q[0]/m, q[1]/m]);
   }
-  function addCurvePointNear(p, q){
-    // the nearest spot on the line goes in between the two points of its span,
-    // so the line keeps its shape until the new point is dragged
-    const S = curveLine(p);
+  // the point at sample k + t (0 <= t <= 1) of a line's samples
+  const sampleAt = (S, k, t) => [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t];
+  function insertPoint(p, span, where){
+    // where(line's samples, its span's first sample) gives the new point on each line
+    setCurveLines(p, curveLinesOf(p).map(pts => {
+      const out = pts.map(q => q.slice());
+      out.splice(span + 1, 0, where(curveLine(pts), span * CURVE_STEPS));
+      return out;
+    }));
+  }
+  function addCurvePointNear(p, q, g0){
+    // the nearest spot on a line as drawn goes in between the two points of its
+    // span, on every line at the same place, so the lines keep their shape until
+    // the new point is dragged
     let best = null;
-    for(let k = 0; k + 1 < S.length; k++){
-      const a = S[k], b = S[k+1], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx*dx + dy*dy;
-      const t = l2 > 0 ? Math.min(Math.max(((q[0] - a[0])*dx + (q[1] - a[1])*dy) / l2, 0), 1) : 0;
-      const c = [a[0] + dx*t, a[1] + dy*t], dd = Math.hypot(c[0] - q[0], c[1] - q[1]);
-      if(!best || dd < best.dd) best = { dd, c, span: Math.min(Math.floor(k / CURVE_STEPS), p.path.length - 2) };
-    }
+    (g0.curveLines || []).forEach((cl, li) => {
+      const S = cl.samples;
+      for(let k = 0; k + 1 < S.length; k++){
+        const a = S[k], b = S[k+1], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx*dx + dy*dy;
+        const t = l2 > 0 ? Math.min(Math.max(((q[0] - a[0])*dx + (q[1] - a[1])*dy) / l2, 0), 1) : 0;
+        const dd = Math.hypot(a[0] + dx*t - q[0], a[1] + dy*t - q[1]);
+        if(!best || dd < best.dd) best = { dd, li, k, t };
+      }
+    });
     if(!best) return false;
-    const near = i => Math.hypot(p.path[i][0] - best.c[0], p.path[i][1] - best.c[1]) < 1.5;
-    if(near(best.span) || near(best.span + 1)) return false;             // already a point there
-    p.path.splice(best.span + 1, 0, best.c);
+    const span = Math.min(Math.floor(best.k / CURVE_STEPS), p.path.length - 2);
+    const pts = curveLinesOf(p)[best.li], c = sampleAt(curveLine(pts), best.k, best.t);
+    const near = i => Math.hypot(pts[i][0] - c[0], pts[i][1] - c[1]) < 1.5;
+    if(near(span) || near(span + 1)) return false;                       // already a point there
+    insertPoint(p, span, (S, k0) => sampleAt(S, best.k, best.t));
     return true;
   }
   function addCurvePointMiddle(p){
-    // in the middle of the longest stretch between two points
-    const S = curveLine(p);
+    // in the middle of the longest stretch between two points (over all the lines)
+    const lines = curveLinesOf(p).map(curveLine);
+    const spanLen = (S, i) => { let len = 0; for(let k = i*CURVE_STEPS; k < (i + 1)*CURVE_STEPS; k++) len += Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]); return len; };
     let bestSpan = 0, bestLen = -1;
     for(let i = 0; i + 1 < p.path.length; i++){
-      let len = 0;
-      for(let k = i*CURVE_STEPS; k < (i + 1)*CURVE_STEPS; k++) len += Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]);
+      const len = lines.reduce((sum, S) => sum + spanLen(S, i), 0);
       if(len > bestLen){ bestLen = len; bestSpan = i; }
     }
-    let run = 0;
-    for(let k = bestSpan*CURVE_STEPS; k < (bestSpan + 1)*CURVE_STEPS; k++){
-      const l = Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]);
-      if(run + l >= bestLen / 2){
-        const t = l > 0 ? (bestLen / 2 - run) / l : 0;
-        p.path.splice(bestSpan + 1, 0, [S[k][0] + (S[k+1][0] - S[k][0])*t, S[k][1] + (S[k+1][1] - S[k][1])*t]);
-        return;
+    insertPoint(p, bestSpan, (S, k0) => {
+      // half way along this line's own stretch
+      const half = spanLen(S, bestSpan) / 2;
+      let run = 0;
+      for(let k = k0; k < k0 + CURVE_STEPS; k++){
+        const l = Math.hypot(S[k+1][0] - S[k][0], S[k+1][1] - S[k][1]);
+        if(run + l >= half) return sampleAt(S, k, l > 0 ? (half - run) / l : 0);
+        run += l;
       }
-      run += l;
-    }
+      return S[k0 + CURVE_STEPS].slice();
+    });
+  }
+  function removeCurvePoint(p, j){
+    setCurveLines(p, curveLinesOf(p).map(pts => pts.filter((_, i) => i !== j)));
+  }
+  // the line t of the way through the curve lines (0 the first, 1 the last), point by point
+  function blendLines(all, t){
+    const m = all.length;
+    if(m === 1) return all[0].map(z => z.slice());
+    const x = t * (m - 1), a = Math.min(Math.floor(x), m - 2), f = x - a;
+    return all[a].map((z, j) => [(1 - f)*z[0] + f*all[a+1][j][0], (1 - f)*z[1] + f*all[a+1][j][1]]);
+  }
+  function spreadLines(p, k){
+    // k curve lines, spread over the rows like the ones there: the first and last stay
+    const all = curveLinesOf(p);
+    setCurveLines(p, k === 1 ? [blendLines(all, 0.5)] : Array.from({ length: k }, (_, i) => blendLines(all, i / (k - 1))));
   }
 
   function drawScatter(f, hr){
@@ -1550,8 +1682,9 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       const ob = p.package ? null : objById(p.object), turn = (ob && ob.turn) || 0;
       if(g0.curve){
         if(!g0.pkg) p.nx = g0.along;                         // copies along the line, for the panel and the file
-        el('polyline', { points: g0.line.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
-          'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g);
+        // the curve lines, dashed: one is the middle line; more sit on the rows they shape
+        g0.curveLines.forEach(cl => el('polyline', { points: cl.samples.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
+          'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g));
       }
       if((g0.curve || g0.pkg) && ed !== 'objects'){
         // a small arrow on each copy's front: Blender's +Y, turned with the curve and the object
@@ -1586,13 +1719,14 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       }
       if(ed) return;                                         // no handles while editing
       if(g0.curve){
-        // the points: drag to bend, double-click one in the middle to remove it
-        p.path.forEach((q, k) => {
-          const end = k === 0 || k === p.path.length - 1;
+        // the points: drag to bend, double-click one in the middle to remove it (from every line)
+        g0.curveLines.forEach((cl, li) => cl.handles.forEach((q, k) => {
+          const end = k === 0 || k === cl.handles.length - 1;
           const c = el('circle', { cx:q[0]*f, cy:q[1]*f, r: end ? hr : hr*0.85, class:'pt',
             fill: end ? '#fff' : '#4682DC', stroke: end ? '#4682DC' : '#fff', 'stroke-width': hr*0.35 }, g);
-          c.addEventListener('pointerdown', e => startScatterDrag(e, i, 'point', k));
-        });
+          c.dataset.pt = `${i}/${li}-${k}`;                // placement / line-point
+          c.addEventListener('pointerdown', e => startScatterDrag(e, i, 'point', [li, k], cl.tangents[k]));
+        }));
         return;
       }
       if(!g0.pkg){
@@ -1670,30 +1804,39 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     if(dbl) lastPress = null;
     return dbl;
   }
-  function startScatterDrag(e, i, mode, k){
+  function startScatterDrag(e, i, mode, k, tangent){
+    // k: for a curve's point, [its line, its index]; tangent: its line's direction there
     e.stopPropagation(); e.preventDefault();
     if(S.gen.edit && S.gen.edit.i !== i) S.gen.edit = null;
     S.gen.plSel = i;
     const p = S.gen.placements[i], q = toMask(e);
     if(isCurve(p) && isDoublePress(i, mode + (k ?? ''), q)){
-      if(mode === 'point' && k > 0 && k < p.path.length - 1){
-        p.path.splice(k, 1); curveCentre(p); log('Point removed.'); saveScatter(); return;
+      if(mode === 'point' && k[1] > 0 && k[1] < p.path.length - 1){
+        removeCurvePoint(p, k[1]); curveCentre(p); log('Point removed.'); saveScatter(); return;
       }
-      if(mode === 'move' && addCurvePointNear(p, q)){
+      const g0 = mode === 'move' ? placementGeom(p) : null;
+      if(g0 && g0.curve && addCurvePointNear(p, q, g0)){
         curveCentre(p); log('Point added: drag it to bend the line.'); saveScatter(); return;
       }
     }
-    sdrag = { i, mode, k, start: q, orig: { ...p, path: isCurve(p) ? p.path.map(r => r.slice()) : undefined } };
+    sdrag = { i, mode, k, tangent, start: q, orig: { ...p, lines: isCurve(p) ? curveLinesOf(p).map(l => l.map(r => r.slice())) : undefined } };
     drawBridges();
   }
   addEventListener('pointermove', e => {
     if(!sdrag) return;
     const p = S.gen.placements[sdrag.i], o = sdrag.orig, q = toMask(e);
-    if(sdrag.mode === 'move' && o.path){
+    if(sdrag.mode === 'move' && o.lines){
       const dx = q[0] - sdrag.start[0], dy = q[1] - sdrag.start[1];
-      p.path = o.path.map(r => [r[0] + dx, r[1] + dy]); curveCentre(p);
+      setCurveLines(p, o.lines.map(l => l.map(r => [r[0] + dx, r[1] + dy]))); curveCentre(p);
     } else if(sdrag.mode === 'point'){
-      p.path[sdrag.k] = [q[0], q[1]]; curveCentre(p);
+      // along its line the point moves on its own; across it, the points at the
+      // same place on the other curve lines move with it
+      const [li, j] = sdrag.k, t = sdrag.tangent || [1, 0];
+      const dx = q[0] - sdrag.start[0], dy = q[1] - sdrag.start[1], a = dx*t[0] + dy*t[1];
+      const across = [dx - a*t[0], dy - a*t[1]];
+      setCurveLines(p, o.lines.map((l, n) => l.map((r, k) => k !== j ? r.slice()
+        : n === li ? [r[0] + dx, r[1] + dy] : [r[0] + across[0], r[1] + across[1]])));
+      curveCentre(p);
     } else if(sdrag.mode === 'move'){
       p.cx = o.cx + q[0] - sdrag.start[0]; p.cy = o.cy + q[1] - sdrag.start[1];
     } else if(sdrag.mode === 'size'){
@@ -1732,6 +1875,7 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   function renderPlacementBox(){
     const box = $('#plBox');
     const p = S.gen.placements[S.gen.plSel];
+    $('#btnDupPl').disabled = $('#btnMirrorPl').disabled = !p;           // they act on the selected placement
     if(!p){ box.hidden = true; S.gen.edit = null; return; }
     box.hidden = false;
     // the edit modes belong to the selected placement
@@ -1773,6 +1917,15 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     $('#btnEvenSpaces').disabled = !on;
     const spNote = on ? `, random spaces X ${sp.x[0]}–${sp.x[1]} m, Y ${sp.y[0]}–${sp.y[1]} m` : '';
     if(document.activeElement !== $('#plRows')) $('#plRows').value = p.ny;
+    // curve lines: at most one per row
+    const nLines = curve ? curveLinesOf(p).length : 0;
+    $('#btnAddLine').disabled = nLines >= p.ny; $('#btnRemoveLine').disabled = nLines < 2;
+    $('#btnAddLine').title = nLines >= p.ny ? 'A curve line per row at most: add rows first'
+      : 'Another curve line: the first shapes the front row, the last the back row, the others spread between; rows between two lines follow a blend. At most one per row';
+    $('#plLinesInfo').textContent = nLines > 1 ? `${nLines} curve lines over ${p.ny} rows: the first shapes the front row, the last the back row.` : '';
+    const lineNote = !curve || !g0 ? '' : nLines > 1
+      ? `, lines ${Math.min(...g0.lengths_m).toFixed(1)}–${Math.max(...g0.lengths_m).toFixed(1)} m, ${p.path.length} points each`
+      : `, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`;
     const road = onRoad ? `, ${onRoad} on the road (left out)` : '';
     if(p.package){
       // how many of each object the mix holds
@@ -1780,15 +1933,14 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       (g0 ? g0.copies : []).forEach(c => { n[c.slot.o.name] = (n[c.slot.o.name] || 0) + 1; });
       $('#plInfo').textContent = !g0 ? 'This package has no objects yet: import some into its slots.'
         : `${g0.copies.length} copies in ${p.ny} row${p.ny > 1 ? 's' : ''}: ` + Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', ')
-          + road + (curve ? `, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
-                          : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`) + spNote;
+          + road + (curve ? lineNote : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`) + spNote;
       return;
     }
     const even = g0 && g0.counts && g0.counts.every(n => n === g0.counts[0]);
     $('#plInfo').textContent = (curve && g0
       ? (even ? `${g0.along} along the line × ${p.ny} row${p.ny > 1 ? 's' : ''} = ${g0.copies.length} copies`
               : `${g0.copies.length} copies in ${p.ny} rows (${g0.counts.join(', ')})`)
-        + `${road}, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`
+        + road + lineNote
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
         + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '')) + spNote;
   }
@@ -1842,12 +1994,81 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
     p.ny = Math.max(1, Math.round(+$('#plRows').value || 1));
     drawBridges(); clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);
   });
+  $('#plRows').addEventListener('change', () => {
+    // never more curve lines than rows: fewer rows spread the lines over them again
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    const k = curveLinesOf(p).length;
+    if(k > p.ny){ spreadLines(p, p.ny); log(`${p.ny} curve line${p.ny > 1 ? 's' : ''} now: never more than rows.`); saveScatter(); }
+  });
+  $('#btnAddLine').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    const k = curveLinesOf(p).length;
+    if(k >= p.ny){ log('A curve line per row at most: add rows first.', 'warn'); return; }
+    spreadLines(p, k + 1);
+    log(k === 1 ? 'Two curve lines: the first shapes the front row, the second the back row. Drag a point along its line to move it alone, across to move the points beside it on the other line too.'
+                : `${k + 1} curve lines, spread over the ${p.ny} rows.`);
+    saveScatter();
+  });
+  $('#btnRemoveLine').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
+    const k = curveLinesOf(p).length; if(k < 2) return;
+    spreadLines(p, k - 1); log(k === 2 ? 'One curve line again: the rows run beside it.' : `${k - 1} curve lines.`); saveScatter();
+  });
+  // Duplicate: the same placement with all its settings, just behind the original, selected to drag
+  $('#btnDupPl').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    const g0 = placementGeom(p), q = JSON.parse(JSON.stringify(p)), m = mppMask();
+    if(g0){
+      let v = g0.v;                                         // a rectangle: towards its backs
+      if(g0.curve){
+        // a curve: across its first line at the middle, towards the backs
+        const S = g0.line, k = Math.floor(S.length / 2), a = S[Math.max(k - 1, 0)], b = S[Math.min(k + 1, S.length - 1)];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, sg = p.flip ? -1 : 1;
+        v = [-(b[1] - a[1]) / len * sg, (b[0] - a[0]) / len * sg];
+      }
+      // moved by its whole extent that way and a gap, so the two never overlap, however it bends
+      const proj = g0.outer.map(q => q[0]*v[0] + q[1]*v[1]);
+      const step = Math.max(...proj) - Math.min(...proj) + Math.max(p.gap_y, 2) / m;
+      const dx = v[0] * step, dy = v[1] * step;
+      if(isCurve(q)){ setCurveLines(q, curveLinesOf(q).map(l => l.map(r => [r[0] + dx, r[1] + dy]))); curveCentre(q); }
+      else { q.cx += dx; q.cy += dy; }
+    }
+    S.gen.placements.push(q); S.gen.plSel = S.gen.placements.length - 1; S.gen.edit = null;
+    log(`Placement ${S.gen.plSel + 1}: a copy of placement ${S.gen.placements.indexOf(p) + 1}, just behind it. Drag it where it goes.`);
+    saveScatter();
+  });
+  // Flip: the mirror image along the rows. The order of the objects reverses, a
+  // curve bends the other way, single turns mirror (30° becomes -30°); fronts
+  // still face the same side and the models themselves are not mirrored
+  $('#btnMirrorPl').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    if(isCurve(p)){
+      // every curve line mirrored across the line square to the first one's ends,
+      // through the middle; the rows still laid out from the same end, so flipped
+      const all = curveLinesOf(p), A = all[0][0], B = all[0][all[0].length - 1];
+      let u = [B[0] - A[0], B[1] - A[1]];
+      if(Math.hypot(...u) < 1e-6) u = [all[0][1][0] - A[0], all[0][1][1] - A[1]];
+      const len = Math.hypot(...u) || 1; u = [u[0] / len, u[1] / len];
+      const c = [0, 0];
+      all.forEach(l => { c[0] += (l[0][0] + l[l.length - 1][0]) / 2 / all.length; c[1] += (l[0][1] + l[l.length - 1][1]) / 2 / all.length; });
+      setCurveLines(p, all.map(l => l.map(q => {
+        const t = (q[0] - c[0])*u[0] + (q[1] - c[1])*u[1];
+        return [q[0] - 2*t*u[0], q[1] - 2*t*u[1]];
+      })));
+      p.flip = !p.flip; curveCentre(p);
+    } else if(p.mirror) delete p.mirror;
+    else p.mirror = true;
+    Object.keys(p.turns || {}).forEach(id => setTurn(p, id, -p.turns[id]));
+    log('Placement flipped: its mirror image, left to right along the rows.');
+    saveScatter();
+  });
   $('#btnCurve').addEventListener('click', () => {
     // the rectangle's middle line, end to end: the same copies, now on a line that can bend
     const p = S.gen.placements[S.gen.plSel]; if(!p || isCurve(p)) return;
     const g0 = placementGeom(p); if(!g0) return;
     const hx = g0.u[0] * g0.Lx / 2, hy = g0.u[1] * g0.Lx / 2;
     p.path = [[p.cx - hx, p.cy - hy], [p.cx + hx, p.cy + hy]]; p.flip = false;
+    if(p.mirror){ p.path.reverse(); p.flip = true; delete p.mirror; }      // laid out from the same end as before
     log('Curve: double-click the line (or press Add point) to add a point, drag points to bend it, '
       + 'double-click a point to remove it. Drag an end to make the line longer or shorter.');
     saveScatter();
@@ -1885,8 +2106,10 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
   });
   $('#btnStraight').addEventListener('click', () => {
     // back to a rectangle along the line from its first point to its last, facing the same way
+    // and laid out from the same end; with several curve lines, along the middle of them
     const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
-    const A = p.path[0], B = p.path[p.path.length - 1], m = mppMask(), len = Math.hypot(B[0] - A[0], B[1] - A[1]);
+    const mid = blendLines(curveLinesOf(p), 0.5);
+    const A = mid[0], B = mid[mid.length - 1], m = mppMask(), len = Math.hypot(B[0] - A[0], B[1] - A[1]);
     p.cx = (A[0] + B[0]) / 2; p.cy = (A[1] + B[1]) / 2;
     p.angle = Math.atan2(B[1] - A[1], B[0] - A[0]) * 180 / Math.PI + (p.flip ? 180 : 0);
     if(p.package) p.length = len;                                        // a package fills the length
@@ -1894,7 +2117,8 @@ const UI_VERSION = '2026.10.02-turns1';   // must match VERSION in server.py
       const o = objById(p.object), w = o ? objSize(o)[0] : 1;
       p.nx = Math.max(1, Math.floor((len * m + p.gap_x) / Math.max(w + p.gap_x, 1e-9) + 1e-6));
     }
-    delete p.path; delete p.flip;
+    if(p.flip) p.mirror = true; else delete p.mirror;
+    delete p.path; delete p.flip; delete p.lines;
     log('Placement is a straight rectangle again.'); saveScatter();
   });
   ['#gapX', '#gapY'].forEach((id, k) => $(id).addEventListener('input', () => {

@@ -333,6 +333,10 @@
           <div class="note" style="color:var(--amber);margin-top:6px">Before importing: the object's front must face the +Y axis (Blender's green arrow). Use ↻ on a layer to turn an object that faces another way. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
           <div id="objList" style="margin-top:8px"></div>
           <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnDupPl" disabled title="A copy of the selected placement, just behind it, with all its settings">Duplicate placement</button>
+            <button class="btn secondary" id="btnMirrorPl" disabled title="The mirror image of the selected placement, left to right along its rows: the order reverses, a curve bends the other way, single turns mirror; fronts face the same side">Flip placement</button>
+          </div>
           <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
             <div style="font-size:12.5px;font-weight:600">Packages <small id="pkgCount" style="color:var(--muted);font-weight:400"></small></div>
             <div class="note" style="margin-top:2px">A package mixes several objects in one placement. Import objects into its slots; each spot on the map gets a random one (the weight sets how often), never the same twice in a row. Each object takes its own width, and fronts line up.</div>
@@ -352,6 +356,11 @@
             </div>
             <div id="plCurveBox" hidden>
               <div class="field"><label for="plRows">Rows</label><input type="number" id="plRows" value="1" step="1" min="1"></div>
+              <div class="btn-row">
+                <button class="btn secondary" id="btnAddLine" title="Another curve line: the first shapes the front row, the last the back row, the others spread between; rows between two lines follow a blend. At most one per row">Add curve line</button>
+                <button class="btn secondary" id="btnRemoveLine" title="One curve line fewer: the rest spread over the rows again">Remove curve line</button>
+              </div>
+              <div class="note" id="plLinesInfo"></div>
               <div class="btn-row">
                 <button class="btn secondary" id="btnAddPt" title="Add a point in the middle of the longest stretch of the line">Add point</button>
                 <button class="btn secondary" id="btnFlipPl" title="Turn every copy to face the other side of the line">Flip side</button>
@@ -386,6 +395,7 @@
           </div>
           <div class="note">Drag a rectangle to move it, its corners to add copies (it never shrinks below one object), the round handle to rotate. Blue shows the gaps; copies on the road are crossed out and left out of the 3D model.</div>
           <div class="note"><b>Curves:</b> select a placement and press <i>Bend into a curve</i>. Double-click the line (or press <i>Add point</i>) to add a point, drag points to bend the line, double-click a point to remove it. Copies fill the line and turn with it; drag an end point to make the line longer or shorter.</div>
+          <div class="note"><b>Curve lines:</b> <i>Add curve line</i> gives the rows more lines to bend them by (one per row at most): the first shapes the front row, the last the back row. A point added goes on every line. Drag a point along its line and only that point moves; drag it across and the points at the same place on the other lines move with it.</div>
         </div>
       </section>
 

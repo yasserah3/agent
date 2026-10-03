@@ -35,21 +35,28 @@ FINE_M = 0.25       # the grid the streets are shaped on, at most this coarse
 SPECK_M2 = 40.0     # islands smaller than this, left between streets, become road
 
 
-def _edge_extensions(layout, line, sel_cells, all_cells, road, mpp, objects_area):
+def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_area):
     """
     Drawn cells on the edge of the placement, continued straight on to the
     nearest street: (polygon in metres, reached) per open edge. One that would
     cross an object (objects_area: shapely, metres) stops at the edge instead.
+    cache: the rows' lines (app/curves.py row_line).
     """
     from shapely.geometry import Polygon
     rows = layout["rows"]
     sign = -1.0 if layout["flip"] else 1.0
     H, W = road.shape
 
-    def frame(s):
+    def frame(r, s):
+        line = CV.row_line(layout, r, cache)
         pos, ang = CV._at(line, min(max(s, 0.0), line[3]))
         t = np.array([math.cos(ang), math.sin(ang)])
         return pos, t, np.array([-t[1], t[0]]) * sign       # along, and across (towards the back)
+
+    def far(r, s, o):
+        # across the space between rows r and r + 1: the far side is on the next row's line
+        pos, _, v = frame(r + 1, CV.carry(CV.row_line(layout, r, cache), CV.row_line(layout, r + 1, cache), s))
+        return pos + v * o
 
     def is_road(q):
         x, y = int(math.floor(q[0] / mpp)), int(math.floor(q[1] / mpp))
@@ -60,10 +67,10 @@ def _edge_extensions(layout, line, sel_cells, all_cells, road, mpp, objects_area
     for c in sel_cells:
         s0, s1 = c["s"]
         o0, o1 = c["o"]
+        r = c["row"]
         if c["kind"] == "x":
-            r = int(c["id"][1:].split("-")[0]) - 1
-            v = frame((s0 + s1) / 2)[2]                       # straight on, square to the row
-            pa, pb = frame(s0), frame(s1)
+            v = frame(r, (s0 + s1) / 2)[2]                    # straight on, square to the row
+            pa, pb = frame(r, s0), frame(r, s1)
             if r == 0:              # the front row: open towards the front
                 edges.append((pa[0] + pa[2] * o0, pb[0] + pb[2] * o0, -v))
             if r == last:           # the back row: open towards the back
@@ -74,11 +81,11 @@ def _edge_extensions(layout, line, sel_cells, all_cells, road, mpp, objects_area
             same = [x for x in all_cells if x["kind"] in "yj" and x["id"][1:].split("-")[0] == pair]
             lo, hi = min(x["s"][0] for x in same), max(x["s"][1] for x in same)
             if abs(s0 - lo) < 1e-6:
-                pos, t, v = frame(s0)
-                edges.append((pos + v * o0, pos + v * o1, -t))
+                pos, t, v = frame(r, s0)
+                edges.append((pos + v * o0, far(r, s0, o1), -t))
             if abs(s1 - hi) < 1e-6:
-                pos, t, v = frame(s1)
-                edges.append((pos + v * o0, pos + v * o1, t))
+                pos, t, v = frame(r, s1)
+                edges.append((pos + v * o0, far(r, s1, o1), t))
     out = []
     for A, B, d in edges:
         mid = (A + B) / 2
@@ -135,16 +142,16 @@ def inner_streets(road, mpp, placements, objects, packages):
         except Exception as e:
             report.append({"placement": idx + 1, "name": name, "problem": str(e)})
             continue
-        line = CV._line(layout["line"])
-        all_cells = CV.cells(layout)
+        cache = {}                                            # the rows' lines
+        all_cells = CV.cells(layout, cache=cache)
         sel = [c for c in all_cells if c["id"] in chosen]
         if not sel:
             report.append({"placement": idx + 1, "name": name, "problem": "its drawn spaces no longer exist"})
             continue
         sw = float(st.get("sidewalk_m", 2.0))
         radius = min(float(st.get("corner_m", 4.0)), 3.0 * sw)     # rounder would reach the objects
-        polys = [CV.cell_polygon(layout, c, 0.5, line) for c in sel]
-        ext = _edge_extensions(layout, line, sel, all_cells, road, mpp, objects_area)
+        polys = [CV.cell_polygon(layout, c, 0.5, cache) for c in sel]
+        ext = _edge_extensions(layout, cache, sel, all_cells, road, mpp, objects_area)
         polys += [e for e, ok in ext if ok]
 
         # the window: the drawn streets with room around them, on the mask's pixel grid

@@ -3,7 +3,8 @@ Where the copies of a placement go, in one place for everything that needs it:
 the 3D export, and the inner streets drawn between them.
 
 A placement is one object or a package, as a rectangle (rows along its middle
-line) or a curve, with even or random spaces (app/curves.py). Each copy has an
+line, mirrored or not) or a curve (one or more curve lines), with even or
+random spaces (app/curves.py). Each copy has an
 id, "row-column" from the top left, and can be given its own extra rotation in
 the placement's "turns": {id: degrees, clockwise on the map}. A turned copy
 takes its turned outline in its row, so the spaces around it stay as set.
@@ -28,6 +29,13 @@ def spaces_of(p):
     return p["spaces"] if (p.get("spaces") or {}).get("on") else None
 
 
+def curve_points(p, mpp_mask):
+    """A curve's line in metres, or its curve lines, the first and the others (same number of points)."""
+    first = np.asarray(p["path"], float) * mpp_mask
+    more = [np.asarray(q, float) * mpp_mask for q in (p.get("lines") or []) if len(q) == len(p["path"])]
+    return np.array([first] + more) if more else first
+
+
 def copies_of(p, objects, packages, mpp_mask):
     """
     A placement's copies and layout, in metres in image axes (x right, y down).
@@ -42,25 +50,29 @@ def copies_of(p, objects, packages, mpp_mask):
         pk = packages[p["package"]]
         slots = [sl for sl in pk["slots"] if sl["object"] in objects]
         sizes = [sized(objects[sl["object"]]["meta"]) for sl in slots]
+        flip = p.get("flip", False)
         if p.get("path"):
-            pts = np.asarray(p["path"], float) * mpp_mask
+            pts = curve_points(p, mpp_mask)
         else:
             a = math.radians(p["angle"])
             u = np.array([math.cos(a), math.sin(a)])
             c, half = np.array([p["cx"], p["cy"]]) * mpp_mask, p["length"] * mpp_mask / 2
             pts = np.array([c - u * half, c + u * half])        # a rectangle is a straight line
+            if p.get("mirror"):
+                pts, flip = pts[::-1], True                     # laid out from the other end, facing the same way
         spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
-                                        p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), p["seed"], spaces, layout,
+                                        p["gap_x"], p["gap_y"], p["ny"], flip, p["seed"], spaces, layout,
                                         p.get("turns"))
         spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
     else:
         k, turn, w, d = sized(objects[p["object"]]["meta"])
         if p.get("path"):
-            spots, _, _ = CV.copies(np.asarray(p["path"], float) * mpp_mask, w, d,
+            spots, _, _ = CV.copies(curve_points(p, mpp_mask), w, d,
                                     p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces, layout, p.get("turns"))
         else:
             spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
-                                         p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout, p.get("turns"))
+                                         p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout, p.get("turns"),
+                                         bool(p.get("mirror")))
         spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
     turns = p.get("turns") or {}
     out = [(oid, cc, a + math.radians(float(turns.get(cid, 0.0))), cid)
