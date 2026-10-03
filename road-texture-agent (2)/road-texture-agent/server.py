@@ -45,7 +45,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.03-lines1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.03-align1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -872,6 +872,13 @@ def _placement_list(raw):
                      if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))}
             if turns:
                 q["turns"] = {k: v for k, v in turns.items() if v}
+            # objects alignment (app/curves.py): every second row turned round, the last
+            # row turned round, the ends of rows facing out, the first and last rows left out
+            al = p.get("align")
+            if isinstance(al, dict):
+                al = {k: bool(al.get(k, False)) for k in ("rows", "last", "columns", "exclude")}
+                if any(al.values()):
+                    q["align"] = al
             # inner streets: the space cells drawn as streets (app/curves.py cells),
             # with the sidewalk width and corner radius, and whether they get markings
             st = p.get("streets")

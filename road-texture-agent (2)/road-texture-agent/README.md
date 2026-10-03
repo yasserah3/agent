@@ -440,7 +440,7 @@ areas in your training pairs.
 server.py            the local server
 app/memory.py        step log, keyed situations, trees
 app/junctions.py     junction detection and classification
-app/curves.py        placements' maths: curves and curve lines, mirroring, packages, random spaces, ids, space cells
+app/curves.py        placements' maths: curves and curve lines, mirroring, alignment, packages, random spaces, ids, space cells
 app/placements.py    where each copy of a placement goes, for the 3D model and inner streets
 app/streets.py       inner streets drawn between objects, built into the street mask
 app/images.py        loading, hashing, noise isolation
@@ -866,6 +866,35 @@ the row's front line, and the front row never moves. On a curve or in a
 package, a wider turned object can mean one object fewer on the line. Inner
 street cells follow the new layout, so after turning objects in a placement
 with inner streets, press Generate again.
+
+### Objects alignment
+
+By default every row faces the same way. For rows that face each other across
+an inner street, a selected placement's panel has **Objects alignment**: three
+switches (press again to switch off) and a checkbox, kept with the placement.
+
+- **Alternate rows**: row 1 stays as placed, row 2 is turned round, row 3 is as
+  row 1, row 4 turned round, and so on. Rows 2 and 3 then face each other, as
+  do rows 4 and 5.
+- **Flip last row**: the last row faces the other way from where it faces now
+  (with Alternate rows on as well, it is turned back).
+- **Flip columns**: the objects at either end of each row face out of that end:
+  the left column turned 270° and the right column 90°, measured clockwise
+  from row 1's direction (the object's arrow). They face out in every row,
+  turned round or not, so a row's left end always faces left. One object
+  alone in its row is not turned.
+- **Exclude rows from columns**: the first and last rows are left out of Flip
+  columns, so the four corner objects face the same way as their row and only
+  the rows between have turned ends.
+
+The panel shows which way each row faces (↑ as placed, ↓ turned round). A row
+turned round lines up its objects' fronts on its back edge, the side it now
+faces. Turned ends take their turned outline, so the spaces stay as set: the
+row gets longer or deeper, or, on a curve or in a package, one object fewer
+may fit. On a curve the ends face out along the line. **Flip placement**
+mirrors all of it (the ends still face out), **Duplicate** copies it, and an
+object's own turn in **Turn single objects** adds to it. The map and the 3D
+model use the same steps.
 
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.

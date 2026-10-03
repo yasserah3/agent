@@ -95,6 +95,7 @@
   .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
   .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
   .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btn.secondary.toggle[aria-pressed="true"]{ background:rgba(70,130,220,.28); border-color:var(--blue); }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
 
   .viewport{
@@ -388,6 +389,14 @@
               <button class="btn secondary" id="btnTurnReset">Reset picked objects</button>
             </div>
             <div class="note" id="objEditInfo"></div>
+            <div style="font-size:12px;font-weight:600;margin-top:10px">Objects alignment</div>
+            <div class="btn-row">
+              <button class="btn secondary toggle" id="btnAlignRows" aria-pressed="false" title="On or off: every second row faces the other way. Row 1 stays as placed, row 2 is turned round, row 3 as row 1, and so on">Alternate rows</button>
+              <button class="btn secondary toggle" id="btnAlignLast" aria-pressed="false" title="On or off: the last row faces the other way from where it faces now">Flip last row</button>
+            </div>
+            <button class="btn secondary toggle" id="btnAlignCols" aria-pressed="false" title="On or off: the objects at either end of each row face out of that end. The left column is turned 270°, the right column 90°, from row 1's direction (clockwise)">Flip columns</button>
+            <div class="field"><label for="alignExclude">Exclude rows from columns</label><input type="checkbox" id="alignExclude" style="justify-self:start;accent-color:var(--blue)" title="The first and last rows keep their end objects (the four corners) facing as their row"></div>
+            <div class="note" id="alignInfo"></div>
             <button class="btn secondary" id="btnShuffle" hidden title="A new random mix of the package's objects">Shuffle the mix</button>
             <button class="btn secondary" id="btnCurve" title="Turn this rectangle into a line you can bend to follow a curved street">Bend into a curve</button>
             <div class="note" id="plInfo"></div>

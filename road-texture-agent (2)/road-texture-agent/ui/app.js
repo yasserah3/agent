@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1158,15 +1158,35 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     return [w * c + d * s, w * s + d * c];
   }
   const turnAt = (turns, r, i) => +((turns || {})[`${r + 1}-${i + 1}`] || 0);
+  // Objects alignment, as in app/curves.py: align = { rows, last, columns, exclude }.
+  // rows: every second row turned round; last: the last row turned round (back
+  // again if rows had turned it); columns: the objects at either end of a row
+  // face out of that end, in every row (first column 270 degrees clockwise from
+  // row 1's direction, last 90; swapped when the line is flipped or the rectangle
+  // mirrored); exclude: the first and last rows keep their ends as their row.
+  // A row turned round lines its fronts up on its back edge, the side it faces
+  const aligned = al => !!al && !!(al.rows || al.last || al.columns);
+  const turnedRound = (al, r, ny) => !!(al.rows && r % 2) !== !!(al.last && r === ny - 1);
+  const endsOut = (al, r, ny) => !!al.columns && !(al.exclude && (r === 0 || r === ny - 1));
+  function autoTurn(al, r, i, n, ny, flip){
+    // n: the objects in the row, or null while it is being filled (not the last yet)
+    if(!al) return 0;
+    if(endsOut(al, r, ny) && (n === null || n > 1)){
+      if(i === 0) return flip ? 90 : 270;
+      if(n !== null && i === n - 1) return flip ? 270 : 90;
+    }
+    return turnedRound(al, r, ny) ? 180 : 0;
+  }
+  const DEG = Math.PI / 180;
   // copies fill the line at the gap, centred on it; each turns with the curve:
   // its X along the line, its front (+Y) to the left of the line's direction,
   // or the right when flipped. With random spaces or turned copies each row has
   // its own gaps and sizes. Returns [x, y, angle] per copy (angle: its X, without
   // its own turn) and the copies in each row.
-  function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout, turns){
+  function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout, turns, align){
     const { lines, pts } = rowLines(P, ny), spots = [];
     const hasTurns = turns && Object.keys(turns).length;
-    if(!spaces && !hasTurns){
+    if(!spaces && !hasTurns && !aligned(align)){
       const { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
       const lay = newLayout(layout, P, flip, fronts, Array(ny).fill(d), pts);
       const step = Math.max(w + gx, 1e-9), counts = [];
@@ -1190,12 +1210,24 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     const rows = [];
     for(let r = 0; r < ny; r++){
       const L = lines[r].L;
-      const gap = spacer(spaces, r, gx), sizes = [turned(w, d, turnAt(turns, r, 0))], gaps = [0];
+      const tt = (i, n = null) => autoTurn(align, r, i, n, ny, flip) + turnAt(turns, r, i);
+      const gap = spacer(spaces, r, gx), sizes = [turned(w, d, tt(0))], gaps = [0];
       let used = Math.max(sizes[0][0], 1e-6);
       while(gaps.length < 5000){
-        const nxt = turned(w, d, turnAt(turns, r, gaps.length)), g = gap();
+        const nxt = turned(w, d, tt(gaps.length)), g = gap();
         if(used + g + Math.max(nxt[0], 1e-6) > L + 1e-9) break;   // the row is full: always at least one
         gaps.push(g); sizes.push(nxt); used += g + Math.max(nxt[0], 1e-6);
+      }
+      if(align && endsOut(align, r, ny)){
+        // the last one faces out of its end too: turned, and as many as still fit
+        for(;;){
+          const n = sizes.length;
+          sizes[n - 1] = turned(w, d, tt(n - 1, n));
+          used = Math.max(sizes[0][0], 1e-6);
+          for(let i = 1; i < n; i++) used += gaps[i] + Math.max(sizes[i][0], 1e-6);
+          if(n === 1 || used <= L + 1e-9) break;
+          gaps.pop(); sizes.pop();
+        }
       }
       rows.push([gaps, sizes, used]);
     }
@@ -1204,8 +1236,8 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     const { fronts, Ly } = rowFronts(depths, ny, rowGaps(spaces, ny - 1, gy), d);
     const lay = newLayout(layout, P, flip, fronts, depths, pts), counts = [];
     rows.forEach(([gaps, sizes, used], r) => {
-      const ln = lines[r], L = ln.L;
-      counts.push(gaps.length);
+      const ln = lines[r], L = ln.L, n = gaps.length, back = !!align && turnedRound(align, r, ny);
+      counts.push(n);
       let at = (L - used) / 2;
       gaps.forEach((g, i) => {
         const [ww, dd] = sizes[i];
@@ -1214,8 +1246,9 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
         lay.rows[r].items.push([at, at + Math.max(ww, 1e-6)]);
         at += Math.max(ww, 1e-6);
         if(flip) ang += Math.PI;
-        const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + dd/2;   // fronts in line
-        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang]);
+        // fronts in line on the row's front edge, or its back edge when turned round
+        const v = [-Math.sin(ang), Math.cos(ang)], off = back ? fronts[r] + depths[r] - dd/2 : fronts[r] + dd/2;
+        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang + autoTurn(align, r, i, n, ny, flip) * DEG]);
         lay.ids.push(`${r + 1}-${i + 1}`);
       });
     });
@@ -1225,13 +1258,13 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
   // rows along angle a. With random spaces or turned copies each row has its own
   // gaps, sizes and length, and each row is as deep as its deepest copy.
   // Mirrored, the rows are laid out from the other end, the copies facing the same way
-  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns, mirror){
+  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns, mirror, align){
     const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], du = mirror ? [-u[0], -u[1]] : u;
     const rows = [];
     for(let r = 0; r < ny; r++){
       const gap = spacer(spaces, r, gx), gaps = [0];
       for(let i = 1; i < nx; i++) gaps.push(gap());
-      const sizes = gaps.map((_, i) => turned(w, d, turnAt(turns, r, i)));
+      const sizes = gaps.map((_, i) => turned(w, d, autoTurn(align, r, i, nx, ny, !!mirror) + turnAt(turns, r, i)));
       let Lr = 0;
       gaps.forEach((g, i) => { Lr += g; Lr += sizes[i][0]; });
       rows.push([gaps, sizes, Lr]);
@@ -1242,12 +1275,12 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     rows.forEach(([gaps, sizes, Lr], r) => {
       lengths.push(Lr);
       let at = -Lr / 2;
-      const row = [];
+      const row = [], back = !!align && turnedRound(align, r, ny);
       gaps.forEach((g, i) => {
         const [ww, dd] = sizes[i];
         at += g;
-        const o1 = at + ww/2, o2 = fronts[r] + dd/2;
-        spots.push([c[0] + du[0]*o1 + v[0]*o2, c[1] + du[1]*o1 + v[1]*o2, a]);
+        const o1 = at + ww/2, o2 = back ? fronts[r] + depths[r] - dd/2 : fronts[r] + dd/2;
+        spots.push([c[0] + du[0]*o1 + v[0]*o2, c[1] + du[1]*o1 + v[1]*o2, a + autoTurn(align, r, i, nx, ny, !!mirror) * DEG]);
         row.push([at, at + ww]);
         at += ww;
       });
@@ -1325,7 +1358,7 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     return { fronts, Ly };
   }
   // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
-  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout, turns){
+  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout, turns, align){
     const { lines, pts } = rowLines(P, ny);
     let weights = slots.map(q => Math.max(0, +q[2] || 0));
     if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
@@ -1334,14 +1367,26 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     for(let r = 0; r < ny; r++){
       const L = lines[r].L;
       const rnd = rng(rowSeed(seed, r)), gap = spacer(spaces, r, gx), picks = [], gaps = [], sizes = [];
+      const tt = (i, n = null) => autoTurn(align, r, i, n, ny, flip) + turnAt(turns, r, i);
       let used = 0, prev = null;
       while(picks.length < 5000){
         const k = pickSlot(rnd, weights, prev);
-        const [ww, dd] = turned(slots[k][0], slots[k][1], turnAt(turns, r, picks.length));
+        const [ww, dd] = turned(slots[k][0], slots[k][1], tt(picks.length));
         const g = picks.length ? gap() : 0;
         const need = Math.max(ww, 1e-6) + g;
         if(picks.length && used + need > L + 1e-9) break;      // the row is full: always at least one
         picks.push(k); gaps.push(g); sizes.push([ww, dd]); used += need; prev = k;
+      }
+      if(align && endsOut(align, r, ny)){
+        // the last one faces out of its end too: turned, and as many as still fit
+        for(;;){
+          const n = picks.length, k = picks[n - 1];
+          sizes[n - 1] = turned(slots[k][0], slots[k][1], tt(n - 1, n));
+          used = 0;
+          for(let i = 0; i < n; i++) used += Math.max(sizes[i][0], 1e-6) + gaps[i];
+          if(n === 1 || used <= L + 1e-9) break;
+          picks.pop(); gaps.pop(); sizes.pop();
+        }
       }
       rows.push([picks, gaps, sizes, used]);
     }
@@ -1351,8 +1396,8 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     const lay = newLayout(layout, P, flip, fronts, depths, pts);
     const spots = [], counts = [];
     rows.forEach(([picks, gaps, sizes, used], r) => {
-      const ln = lines[r], L = ln.L;
-      counts.push(picks.length);
+      const ln = lines[r], L = ln.L, n = picks.length, back = !!align && turnedRound(align, r, ny);
+      counts.push(n);
       let at = (L - used) / 2;
       picks.forEach((k, i) => {
         const [ww, dd] = sizes[i];
@@ -1362,8 +1407,9 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
         lay.ids.push(`${r + 1}-${i + 1}`);
         at += Math.max(ww, 1e-6);
         if(flip) ang += Math.PI;
-        const v = [-Math.sin(ang), Math.cos(ang)], off = fronts[r] + dd/2;   // fronts in line on the row's front edge
-        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang, k]);
+        // fronts in line on the row's front edge, or its back edge when turned round
+        const v = [-Math.sin(ang), Math.cos(ang)], off = back ? fronts[r] + depths[r] - dd/2 : fronts[r] + dd/2;
+        spots.push([pos[0] + v[0]*off, pos[1] + v[1]*off, ang + autoTurn(align, r, i, n, ny, flip) * DEG, k]);
       });
     });
     return { spots, counts, L: lines[0].L, D, Ly, samples: lines[0].S, lines, layout: lay };
@@ -1540,7 +1586,7 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
       const straight = [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]].map(q => [q[0]*m, q[1]*m]);
       const P = curve ? curvePoints(p, m) : p.mirror ? straight.reverse() : straight;
       const r = packageCopies(P, slots.map(s => [s.w, s.d, s.weight]),
-                              p.gap_x, p.gap_y, p.ny, curve ? !!p.flip : !!p.mirror, p.seed >>> 0, spacesOf(p), null, p.turns);
+                              p.gap_x, p.gap_y, p.ny, curve ? !!p.flip : !!p.mirror, p.seed >>> 0, spacesOf(p), null, p.turns, p.align);
       const copies = r.spots.map(([x, y, ang, k], n) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k], r.layout.ids[n]));
       const Ly = r.Ly / m;
       const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L, layout: r.layout };
@@ -1551,15 +1597,15 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     const [w, d] = objSize(o);
     if(isCurve(p)){
       // worked out in metres, as the 3D export does, then back to mask pixels
-      const r = curveCopies(curvePoints(p, m), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns);
+      const r = curveCopies(curvePoints(p, m), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns, p.align);
       return { curve: true, copies: r.spots.map(([x, y, a], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n])),
                counts: r.counts, along: r.n, length_m: r.L, w: w/m, d: d/m, layout: r.layout, ...curveShape(r) };
     }
     // a rectangle of copies, in metres as the 3D export does; with random spaces
     // each row has its own length, and the rectangle is as long as the longest
     const a = p.angle * Math.PI / 180;
-    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns, !!p.mirror);
-    const copies = r.spots.map(([x, y], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n]));
+    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns, !!p.mirror, p.align);
+    const copies = r.spots.map(([x, y, ang], n) => copyAt(x / m, y / m, ang, w, d, null, r.layout.ids[n]));
     return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m, front0(r.layout)), w: w/m, d: d/m, copies, layout: r.layout };
   }
   const turnOf = (p, id) => ((p.turns || {})[id] || 0) * Math.PI / 180;
@@ -1891,6 +1937,15 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
     $('#stMarkings').checked = !!st.markings;
     $('#stInfo').textContent = st.cells.length
       ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets${st.markings ? '' : ', without markings'}. Press Generate to build them.` : '';
+    // objects alignment: three switches and the checkbox, and which way each row faces
+    const al = alignOf(p);
+    [['#btnAlignRows', 'rows'], ['#btnAlignLast', 'last'], ['#btnAlignCols', 'columns']].forEach(([id, key]) =>
+      $(id).setAttribute('aria-pressed', al[key] ? 'true' : 'false'));
+    $('#alignExclude').checked = al.exclude; $('#alignExclude').disabled = !al.columns;
+    const between = p.ny > 3 ? `rows 2 to ${p.ny - 1}` : p.ny === 3 ? 'row 2' : 'no row';
+    $('#alignInfo').textContent = !aligned(al) ? ''
+      : `Rows face ${Array.from({ length: p.ny }, (_, r) => turnedRound(al, r, p.ny) ? '↓' : '↑').join(' ')} (↑ as placed)`
+        + (al.columns ? `; the ends face out in ${al.exclude ? between : 'every row'}.` : '.');
     const turned = Object.keys(p.turns || {}).length, picked = ed === 'objects' ? [...S.gen.edit.sel] : [];
     if(picked.length && document.activeElement !== $('#objTurn')) $('#objTurn').value = (p.turns || {})[picked[0]] || 0;
     $('#objEditInfo').textContent = (picked.length ? `Picked: ${picked.join(', ')}. ` : (ed === 'objects' ? 'Nothing picked yet. ' : ''))
@@ -1989,6 +2044,29 @@ const UI_VERSION = '2026.10.03-lines1';   // must match VERSION in server.py
   $('#btnTurnR').addEventListener('click', () => turnPicked(t => t + 90));
   $('#btnTurnReset').addEventListener('click', () => turnPicked(() => 0));
   addEventListener('keydown', e => { if(e.key === 'Escape' && S.gen.edit){ S.gen.edit = null; drawBridges(); } });
+  // Objects alignment: on/off switches kept with the placement (app/curves.py)
+  const alignOf = p => ({ rows: false, last: false, columns: false, exclude: false, ...(p.align || {}) });
+  function setAlign(p, key, on){
+    const al = { ...alignOf(p), [key]: on };
+    if(Object.values(al).some(Boolean)) p.align = al; else delete p.align;
+    saveScatter();
+  }
+  const ALIGN_LOG = {
+    rows: ['Alternate rows: row 1 as placed, row 2 turned round, row 3 as row 1, and so on.', 'Alternate rows off.'],
+    last: ['Flip last row: the last row faces the other way.', 'Flip last row off.'],
+    columns: ['Flip columns: the objects at either end of each row face out of that end (left 270°, right 90°).', 'Flip columns off.'],
+  };
+  [['#btnAlignRows', 'rows'], ['#btnAlignLast', 'last'], ['#btnAlignCols', 'columns']].forEach(([id, key]) => $(id).addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    const on = !alignOf(p)[key];
+    log(ALIGN_LOG[key][on ? 0 : 1]); setAlign(p, key, on);
+  }));
+  $('#alignExclude').addEventListener('change', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p) return;
+    const on = $('#alignExclude').checked;
+    log(on ? 'Exclude rows from columns: the first and last rows keep their ends facing as their row.' : 'The first and last rows have their ends facing out too.');
+    setAlign(p, 'exclude', on);
+  });
   $('#plRows').addEventListener('input', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     p.ny = Math.max(1, Math.round(+$('#plRows').value || 1));

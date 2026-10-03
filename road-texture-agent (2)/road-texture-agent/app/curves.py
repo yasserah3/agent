@@ -139,7 +139,51 @@ def _turn(turns, r, i):
     return float((turns or {}).get("%d-%d" % (r + 1, i + 1), 0.0))
 
 
-def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None, turns=None):
+# ----------------------------------------------------------------- objects alignment
+# align = {"rows": .., "last": .., "columns": .., "exclude": ..}, each true or false:
+#   rows     every second row turned round: row 1 as placed, row 2 facing the
+#            other way, row 3 as row 1, and so on
+#   last     the last row turned round (back again, if rows had turned it)
+#   columns  the objects at either end of a row face out of that end, in every
+#            row, turned round or not: the first column 270 degrees from row 1's
+#            direction (clockwise), the last column 90. With the line flipped
+#            (or a rectangle mirrored) the two swap, so the ends still face out.
+#            One object alone in its row is not an end
+#   exclude  the first and last rows keep their ends facing as their row
+# A row turned round lines its fronts up on its back edge, the side it faces.
+# An object's own turn (turns) adds to these, and every turned object takes
+# its turned outline, so the spaces stay as set.
+
+def _aligned(align):
+    return bool(align) and any(align.get(k) for k in ("rows", "last", "columns"))
+
+
+def _round(align, r, ny):
+    """Whether row r is turned round."""
+    return bool(align.get("rows") and r % 2) != bool(align.get("last") and r == ny - 1)
+
+
+def _ends(align, r, ny):
+    """Whether row r's end objects face out of its ends."""
+    return bool(align.get("columns")) and not (align.get("exclude") and (r == 0 or r == ny - 1))
+
+
+def _auto(align, r, i, n, ny, flip):
+    """
+    An object's turn from the alignment, in degrees clockwise. n: the objects
+    in its row, or None while the row is being filled (it is not the last yet).
+    """
+    if not align:
+        return 0.0
+    if _ends(align, r, ny) and (n is None or n > 1):
+        if i == 0:
+            return 90.0 if flip else 270.0
+        if n is not None and i == n - 1:
+            return 270.0 if flip else 90.0
+    return 180.0 if _round(align, r, ny) else 0.0
+
+
+def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None, turns=None, align=None):
     """
     Where the copies go along the line through the points.
 
@@ -148,13 +192,14 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
     size along the line, d across it. With random spaces (see spacer) or
     turned copies (turns: {id: degrees}) each row has its own gaps and sizes,
     so its own number of copies, as has each row on a line of its own length.
+    The alignment (align, see above) turns rows round and the ends of rows.
     Returns the copies as (x, y, angle), the angle in radians being the
-    direction of the copy's own X (without its own turn); the copies in each
-    row; and the (first) line's length. A layout dict, if given, is filled in
-    (see new_layout).
+    direction of the copy's own X with the alignment's turn (without its own
+    turn); the copies in each row; and the (first) line's length. A layout
+    dict, if given, is filled in (see new_layout).
     """
     lines, rpts = row_lines(points, ny)
-    if not spaces and not turns:
+    if not spaces and not turns and not _aligned(align):
         fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
         lay = new_layout(layout, points, flip, fronts, [d] * ny, rpts)
         step = max(w + gap_x, 1e-9)
@@ -180,16 +225,29 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
     for r in range(ny):
         L = lines[r][3]
         gap = spacer(spaces, r, gap_x)
-        sizes = [turned(w, d, _turn(turns, r, 0))]
+        tt = lambda i, n=None: _auto(align, r, i, n, ny, flip) + _turn(turns, r, i)
+        sizes = [turned(w, d, tt(0))]
         gaps, used = [0.0], max(sizes[0][0], 1e-6)
         while len(gaps) < 5000:
-            nxt = turned(w, d, _turn(turns, r, len(gaps)))
+            nxt = turned(w, d, tt(len(gaps)))
             g = gap()
             if used + g + max(nxt[0], 1e-6) > L + 1e-9:
                 break                                   # the row is full: always at least one
             gaps.append(g)
             sizes.append(nxt)
             used += g + max(nxt[0], 1e-6)
+        if align and _ends(align, r, ny):
+            # the last one faces out of its end too: turned, and as many as still fit
+            while True:
+                n = len(sizes)
+                sizes[-1] = turned(w, d, tt(n - 1, n))
+                used = max(sizes[0][0], 1e-6)
+                for g, z in zip(gaps[1:], sizes[1:]):
+                    used += g + max(z[0], 1e-6)
+                if n == 1 or used <= L + 1e-9:
+                    break
+                gaps.pop()
+                sizes.pop()
         rows.append((gaps, sizes, used))
     # then the rows, each as deep as its deepest (turned) copy
     depths = [max([d] + [z[1] for z in sz]) for _, sz, _ in rows]
@@ -199,7 +257,9 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
     for r, (gaps, sizes, used) in enumerate(rows):
         line = lines[r]
         L = line[3]
-        counts.append(len(gaps))
+        n = len(gaps)
+        counts.append(n)
+        back = bool(align) and _round(align, r, ny)
         at = (L - used) / 2
         for i, (g, (ww, dd)) in enumerate(zip(gaps, sizes)):
             at += g
@@ -209,21 +269,23 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
-            c = pos + v * (fronts[r] + dd / 2)          # fronts in line on the row's front edge
-            out.append((float(c[0]), float(c[1]), ang))
+            # fronts in line on the row's front edge, or its back edge when turned round
+            c = pos + v * (fronts[r] + depths[r] - dd / 2 if back else fronts[r] + dd / 2)
+            out.append((float(c[0]), float(c[1]), ang + math.radians(_auto(align, r, i, n, ny, flip))))
             lay["ids"].append("%d-%d" % (r + 1, i + 1))
     return out, counts, lines[0][3]
 
 
 def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, layout=None, turns=None,
-                mirror=False):
+                mirror=False, align=None):
     """
     A rectangle of copies: nx along its width in each of ny rows, centred on
     centre, the rows running along angle (radians, image axes). With random
     spaces or turned copies each row has its own gaps and sizes, so its own
     length (each row centred), and each row is as deep as its deepest copy.
     Mirrored, the rows are laid out from the other end: the mirror image, the
-    copies still facing the same way. Returns the copies as (x, y, angle),
+    copies still facing the same way. The alignment (align, see above) turns
+    rows round and the ends of rows. Returns the copies as (x, y, angle),
     each row's length, and the depth.
     """
     u = np.array([math.cos(angle), math.sin(angle)])
@@ -234,7 +296,7 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, 
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
         gaps = [0.0] + [gap() for _ in range(nx - 1)]
-        sizes = [turned(w, d, _turn(turns, r, i)) for i in range(nx)]
+        sizes = [turned(w, d, _auto(align, r, i, nx, ny, mirror) + _turn(turns, r, i)) for i in range(nx)]
         Lr = 0.0
         for g, (ww, _) in zip(gaps, sizes):
             Lr += g                                     # summed in the same order as ui/app.js
@@ -247,12 +309,13 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, 
         lengths.append(Lr)
         at = -Lr / 2
         row = []
-        for g, (ww, dd) in zip(gaps, sizes):
+        back = bool(align) and _round(align, r, ny)
+        for i, (g, (ww, dd)) in enumerate(zip(gaps, sizes)):
             at += g
-            c = c0 + du * (at + ww / 2) + v * (fronts[r] + dd / 2)
+            c = c0 + du * (at + ww / 2) + v * (fronts[r] + depths[r] - dd / 2 if back else fronts[r] + dd / 2)
             row.append([at, at + ww])
             at += ww
-            out.append((float(c[0]), float(c[1]), angle))
+            out.append((float(c[0]), float(c[1]), angle + math.radians(_auto(align, r, i, nx, ny, mirror))))
         starts.append(row)
     if layout is not None:
         # the rectangle's middle line, as long as its longest row: distances along
@@ -367,12 +430,13 @@ def row_fronts(depth, ny, gaps, base=None):
 
 
 def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None, layout=None,
-                   turns=None):
+                   turns=None, align=None):
     """
     A package along the line through the points (one line, or several curve
     lines: see row_lines). slots: (w, d, weight) per object, w along the line
     and d across, in the points' unit. Turned copies (turns: {id: degrees})
-    take their turned size. Returns the copies as (x, y, angle, slot), the
+    take their turned size, and the alignment (align, see above) turns rows
+    round and the ends of rows. Returns the copies as (x, y, angle, slot), the
     copies in each row, and the (first) line's length.
     """
     lines, rpts = row_lines(points, ny)
@@ -384,10 +448,11 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
     for r in range(ny):
         L = lines[r][3]
         rnd, gap = _rng(row_seed(seed, r)), spacer(spaces, r, gap_x)
+        tt = lambda i, n=None: _auto(align, r, i, n, ny, flip) + _turn(turns, r, i)
         picks, gaps, sizes, used, prev = [], [], [], 0.0, None
         while len(picks) < 5000:
             k = _pick(rnd, weights, prev)
-            ww, dd = turned(slots[k][0], slots[k][1], _turn(turns, r, len(picks)))
+            ww, dd = turned(slots[k][0], slots[k][1], tt(len(picks)))
             g = gap() if picks else 0.0
             need = max(ww, 1e-6) + g
             if picks and used + need > L + 1e-9:
@@ -397,6 +462,19 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
             sizes.append((ww, dd))
             used += need
             prev = k
+        if align and _ends(align, r, ny):
+            # the last one faces out of its end too: turned, and as many as still fit
+            while True:
+                n = len(picks)
+                sizes[-1] = turned(slots[picks[-1]][0], slots[picks[-1]][1], tt(n - 1, n))
+                used = 0.0
+                for g, z in zip(gaps, sizes):
+                    used += max(z[0], 1e-6) + g
+                if n == 1 or used <= L + 1e-9:
+                    break
+                picks.pop()
+                gaps.pop()
+                sizes.pop()
         rows.append((picks, gaps, sizes, used))
     # each row as deep as the package's deepest object, or a deeper turned one in it
     depths = [max([D] + [z[1] for z in sz]) for _, _, sz, _ in rows]
@@ -406,7 +484,9 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
     for r, (picks, gaps, sizes, used) in enumerate(rows):
         line = lines[r]
         L = line[3]
-        counts.append(len(picks))
+        n = len(picks)
+        counts.append(n)
+        back = bool(align) and _round(align, r, ny)
         at = (L - used) / 2
         for i, (k, g, (ww, dd)) in enumerate(zip(picks, gaps, sizes)):
             at += g
@@ -417,8 +497,9 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
             if flip:
                 ang += math.pi
             v = np.array([-math.sin(ang), math.cos(ang)])
-            c = pos + v * (fronts[r] + dd / 2)          # fronts in line on the row's front edge
-            out.append((float(c[0]), float(c[1]), ang, k))
+            # fronts in line on the row's front edge, or its back edge when turned round
+            c = pos + v * (fronts[r] + depths[r] - dd / 2 if back else fronts[r] + dd / 2)
+            out.append((float(c[0]), float(c[1]), ang + math.radians(_auto(align, r, i, n, ny, flip)), k))
     return out, counts, lines[0][3]
 
 
