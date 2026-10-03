@@ -18,6 +18,7 @@ What is not built yet (these endpoints say so honestly instead of pretending):
 """
 
 import json
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -28,6 +29,10 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 import numpy as np
+
+# scripts as JavaScript whatever the system says (some Windows set-ups say text/plain,
+# and browsers will not run a module script, like the 3D tab's, with that type)
+mimetypes.add_type("text/javascript", ".js")
 
 from app import analysis as A
 from app import images as I
@@ -45,7 +50,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.03-align1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.03-foliage1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -656,11 +661,12 @@ def _bridge_list(raw):
 
 # ------------------------------------------------------------------ objects
 @app.post("/api/objects/import")
-async def import_object(file: UploadFile = File(...), package: str = Form("")):
+async def import_object(file: UploadFile = File(...), package: str = Form(""), foliage: str = Form("")):
     """
     Import a GLB, OBJ or FBX object: normalised to metres, footprint centred,
     base at 0. With a package, the object becomes a new slot of that package
-    instead of a layer of its own.
+    instead of a layer of its own. Plants (foliage) are imported the same way,
+    marked foliage, or into a foliage package.
     """
     name = Path(file.filename or "object").name
     ext = name.lower().rsplit(".", 1)[-1]
@@ -685,6 +691,8 @@ async def import_object(file: UploadFile = File(...), package: str = Form("")):
         raise HTTPException(400, "could not read %s: %s" % (name, e))
     OB.save(parts, folder)
     meta = {"name": Path(name).stem, "file": name, "format": ext, "scale": 1.0, "turn": 0, **info}
+    if (pk.get("foliage") if pk is not None else foliage.strip().lower() in ("1", "true", "yes")):
+        meta["foliage"] = True
     if pk is not None:
         meta["package"] = package
         pk["slots"].append({"object": oid, "weight": 1.0})
@@ -766,7 +774,10 @@ def _package(pid):
 
 
 def _save_package(pid, pk):
-    (PACKAGES / ("%s.json" % pid)).write_text(json.dumps({"name": pk["name"], "slots": pk["slots"]}))
+    keep = {"name": pk["name"], "slots": pk["slots"]}
+    if pk.get("foliage"):
+        keep["foliage"] = True                    # a package of plants
+    (PACKAGES / ("%s.json" % pid)).write_text(json.dumps(keep))
 
 
 @app.get("/api/packages")
@@ -783,6 +794,8 @@ def list_packages():
 def create_package(payload: dict):
     pid = uuid.uuid4().hex[:12]
     pk = {"name": str(payload.get("name") or "Package %d" % (len(list(PACKAGES.glob("*.json"))) + 1))[:80], "slots": []}
+    if payload.get("foliage"):
+        pk["foliage"] = True                      # a mix of plants, in the Foliage panel
     _save_package(pid, pk)
     mem.record("package_create", "created package %s" % pk["name"], {"id": pid})
     return {"id": pid, **pk}
@@ -872,6 +885,18 @@ def _placement_list(raw):
                      if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))}
             if turns:
                 q["turns"] = {k: v for k, v in turns.items() if v}
+            # foliage: a placement of plants, each with its own random scale, turn (degrees)
+            # and offset (metres) between a min and a max, and whether plants may overlap
+            if p.get("foliage"):
+                q["foliage"] = True
+            jt = p.get("jitter")
+            if isinstance(jt, dict):
+                def pair(key, lo, hi, default):
+                    v = [min(hi, max(lo, float(x))) for x in (jt.get(key) or default)][:2]
+                    return (v * 2)[:2] if v else list(default)
+                q["jitter"] = {"seed": int(jt.get("seed", 1)) & 0xFFFFFFFF, "scale": pair("scale", 0.01, 100.0, (1.0, 1.0)),
+                               "rotate": pair("rotate", -3600.0, 3600.0, (0.0, 0.0)),
+                               "offset": pair("offset", 0.0, 1000.0, (0.0, 0.0)), "overlap": bool(jt.get("overlap", True))}
             # objects alignment (app/curves.py): every second row turned round, the last
             # row turned round, the ends of rows facing out, the first and last rows left out
             al = p.get("align")

@@ -446,6 +446,7 @@ app/streets.py       inner streets drawn between objects, built into the street 
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
+ui/view3d.js         the 3D tab's viewport (three.js, bundled in ui/vendor/three)
 workspace/           created on first run: uploads, artifacts, memory.db
 ```
 
@@ -641,7 +642,7 @@ next to `server.py`, or set the `RTA_WORKSPACE` environment variable.
 
 ## Objects (scatter)
 
-In the Generate tab, **Objects** sits above Foliage (not active yet) and Bridges.
+In the Generate tab, **Objects** sits above **Foliage** (below) and Bridges.
 
 - **Import** a GLB, OBJ or FBX. Model it with its **front facing +Y** (Blender's
   green arrow). The **↻** button on a layer turns an object a quarter turn
@@ -901,6 +902,49 @@ transforms, unit scale and axis settings, material colour and embedded textures.
 ASCII FBX, rigs and animation are not read. OBJ textures need their MTL and
 image files, which a single-file import does not include, so OBJ objects come
 in untextured.
+
+## Foliage
+
+Trees, bushes and other plants, in the **Foliage** panel under Objects. It
+works like Objects, with only what plants need:
+
+- **Import plant** (GLB, OBJ or FBX) makes a layer, with its scale and ↻
+  quarter turn; select it and press **Add selected plant to the map**.
+- **Plant packages** mix several plants in one placement, with weights, as
+  object packages do (**Create package**, **Import plant**, **Place on the
+  map**, **Shuffle the mix**).
+- Placements are dragged, sized and rotated like objects' and can be bent into
+  a curve (with **Add point**, **Flip side** and **Make straight again**).
+  **Duplicate placement** and **Flip placement** sit under Add selected plant.
+  Plants are green on the map. Random spaces, curve lines, inner streets,
+  turning single objects and objects alignment are for objects only.
+
+**Random transform**: each plant can vary on its own, between a **min** and a
+**max**: **Scale** (×, the same in every direction), **Rotation** (degrees,
+clockwise) and **Offset** (metres, in a random direction). A new placement
+starts with no variation (scale 1 to 1, rotation and offset 0 to 0). The random
+values are kept with the placement; changing a range keeps them and stretches
+them to it, and **New random set** picks new ones.
+
+- **Overlap on** (the default): plants keep their spots, laid out from their
+  real size and the gaps, and vary on them, so big plants may overlap their
+  neighbours, as in a real garden.
+- **Overlap off**: each plant takes the room of its scaled and turned outline,
+  plus its offset on every side, so no two plants overlap; rows get longer or
+  hold fewer plants.
+
+Plants on the road are left out, as objects are. The 3D export places every
+plant as an instance with its own scale and rotation, exactly as on the map.
+
+## 3D tab
+
+A **3D** tab sits between Generate and Memory, with a viewport to look around
+in: left drag orbits, right drag (or Shift + drag) pans, the wheel zooms, and
+**Reset view** goes back. For now it shows the ground grid (500 m across, in
+10 m squares) and the axes. **Generate 3D scene**, the generated streets,
+objects and foliage together in this viewport, is coming soon. The viewport
+uses three.js, bundled in `ui/vendor/three` (MIT licence), so it works
+offline.
 
 ## When something goes wrong
 

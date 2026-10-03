@@ -86,6 +86,8 @@
   .field{ display:grid; grid-template-columns:1fr 130px; align-items:center; gap:8px; padding:4px 0; }
   .field label{ color:var(--muted); }
   .field input[type=number], .select-full{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:5px 8px; width:100%; }
+  .minmax{ display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+  .field .minmax input[type=number]{ padding:5px 5px; min-width:0; }
   .field input[type=range]{ width:100%; accent-color:var(--blue); }
   .select-full{ margin:4px 0 10px; }
 
@@ -197,10 +199,11 @@
 
 <header class="topbar">
   <div class="app-name"><span class="app-mark" aria-hidden="true"></span>Road Texture Agent
-    <span title="Interface version" style="font-weight:400;font-size:11px;color:var(--faint);margin-left:6px">v2026.10.01-objects7</span></div>
+    <span title="Interface version" id="uiVersion" style="font-weight:400;font-size:11px;color:var(--faint);margin-left:6px"></span></div>
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" aria-selected="true" data-tab="train">Train</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="generate">Generate</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="view3d">3D</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="memory">Memory</button>
   </div>
   <div class="engine" title="Connection to the local Python server"><i></i>Engine not connected</div>
@@ -344,30 +347,42 @@
             <div id="pkgList"></div>
             <button class="btn secondary" id="btnCreatePkg">Create package</button>
           </div>
-          <div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+          <div id="objPlHost"><div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
             <div class="field"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
             <div class="field"><label for="gapY" id="gapYLabel">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div data-only="foliage">
+              <div style="font-size:12px;font-weight:600;margin-top:6px">Random transform <span style="font-weight:400;color:var(--muted)">min – max, per plant</span></div>
+              <div class="field"><label for="jScMin">Scale (×)</label><span class="minmax"><input type="number" id="jScMin" value="1" step="0.05" min="0.01" aria-label="Scale min"><input type="number" id="jScMax" value="1" step="0.05" min="0.01" aria-label="Scale max"></span></div>
+              <div class="field"><label for="jRotMin">Rotation (°)</label><span class="minmax"><input type="number" id="jRotMin" value="0" step="5" aria-label="Rotation min"><input type="number" id="jRotMax" value="0" step="5" aria-label="Rotation max"></span></div>
+              <div class="field"><label for="jOffMin">Offset (m)</label><span class="minmax"><input type="number" id="jOffMin" value="0" step="0.1" min="0" aria-label="Offset min"><input type="number" id="jOffMax" value="0" step="0.1" min="0" aria-label="Offset max"></span></div>
+              <div class="field"><label for="jOverlap">Overlap</label><input type="checkbox" id="jOverlap" checked style="justify-self:start;accent-color:var(--blue)" title="On: the plants keep their spots and vary on them, so big ones may overlap. Off: each plant takes the room of its size, turn and offset, so none overlap"></div>
+              <button class="btn secondary" id="btnJitter" title="New random values within the same ranges">New random set</button>
+              <div class="note" id="jInfo"></div>
+            </div>
+            <div data-only="objects">
             <div style="font-size:12px;font-weight:600;margin-top:6px">Random spaces <span style="font-weight:400;color:var(--muted)">min – max, metres</span></div>
-            <div class="field"><label for="spXmin">X, along the rows</label><span class="pair"><input type="number" id="spXmin" value="1" step="0.1" min="0" aria-label="X min"><input type="number" id="spXmax" value="4" step="0.1" min="0" aria-label="X max"></span></div>
-            <div class="field"><label for="spYmin">Y, between rows</label><span class="pair"><input type="number" id="spYmin" value="2" step="0.1" min="0" aria-label="Y min"><input type="number" id="spYmax" value="6" step="0.1" min="0" aria-label="Y max"></span></div>
+            <div class="field"><label for="spXmin">X, along the rows</label><span class="minmax"><input type="number" id="spXmin" value="1" step="0.1" min="0" aria-label="X min"><input type="number" id="spXmax" value="4" step="0.1" min="0" aria-label="X max"></span></div>
+            <div class="field"><label for="spYmin">Y, between rows</label><span class="minmax"><input type="number" id="spYmin" value="2" step="0.1" min="0" aria-label="Y min"><input type="number" id="spYmax" value="6" step="0.1" min="0" aria-label="Y max"></span></div>
             <div class="btn-row">
               <button class="btn secondary" id="btnRandSpaces" title="Each space becomes a random distance between min and max; press again for another set">Randomize spaces</button>
               <button class="btn secondary" id="btnEvenSpaces" title="Back to the even gaps above">Even spaces</button>
             </div>
+            </div>
             <div id="plCurveBox" hidden>
               <div class="field"><label for="plRows">Rows</label><input type="number" id="plRows" value="1" step="1" min="1"></div>
-              <div class="btn-row">
+              <div class="btn-row" data-only="objects">
                 <button class="btn secondary" id="btnAddLine" title="Another curve line: the first shapes the front row, the last the back row, the others spread between; rows between two lines follow a blend. At most one per row">Add curve line</button>
                 <button class="btn secondary" id="btnRemoveLine" title="One curve line fewer: the rest spread over the rows again">Remove curve line</button>
               </div>
-              <div class="note" id="plLinesInfo"></div>
+              <div class="note" id="plLinesInfo" data-only="objects"></div>
               <div class="btn-row">
                 <button class="btn secondary" id="btnAddPt" title="Add a point in the middle of the longest stretch of the line">Add point</button>
                 <button class="btn secondary" id="btnFlipPl" title="Turn every copy to face the other side of the line">Flip side</button>
               </div>
               <button class="btn secondary" id="btnStraight">Make straight again</button>
             </div>
+            <div data-only="objects">
             <div style="font-size:12px;font-weight:600;margin-top:10px">Inner streets &amp; islands</div>
             <button class="btn secondary" id="btnDrawStreets" title="Turn spaces between the objects into streets">Draw inner streets</button>
             <div id="streetBox" hidden>
@@ -397,22 +412,36 @@
             <button class="btn secondary toggle" id="btnAlignCols" aria-pressed="false" title="On or off: the objects at either end of each row face out of that end. The left column is turned 270°, the right column 90°, from row 1's direction (clockwise)">Flip columns</button>
             <div class="field"><label for="alignExclude">Exclude rows from columns</label><input type="checkbox" id="alignExclude" style="justify-self:start;accent-color:var(--blue)" title="The first and last rows keep their end objects (the four corners) facing as their row"></div>
             <div class="note" id="alignInfo"></div>
+            </div>
             <button class="btn secondary" id="btnShuffle" hidden title="A new random mix of the package's objects">Shuffle the mix</button>
             <button class="btn secondary" id="btnCurve" title="Turn this rectangle into a line you can bend to follow a curved street">Bend into a curve</button>
             <div class="note" id="plInfo"></div>
             <button class="btn secondary" id="btnRemovePl">Remove this placement</button>
-          </div>
+          </div></div>
           <div class="note">Drag a rectangle to move it, its corners to add copies (it never shrinks below one object), the round handle to rotate. Blue shows the gaps; copies on the road are crossed out and left out of the 3D model.</div>
           <div class="note"><b>Curves:</b> select a placement and press <i>Bend into a curve</i>. Double-click the line (or press <i>Add point</i>) to add a point, drag points to bend the line, double-click a point to remove it. Copies fill the line and turn with it; drag an end point to make the line longer or shorter.</div>
           <div class="note"><b>Curve lines:</b> <i>Add curve line</i> gives the rows more lines to bend them by (one per row at most): the first shapes the front row, the last the back row. A point added goes on every line. Drag a point along its line and only that point moves; drag it across and the points at the same place on the other lines move with it.</div>
         </div>
       </section>
 
-      <section class="panel" style="opacity:.55">
-        <div class="panel-h">Foliage <small>coming later</small></div>
+      <section class="panel">
+        <div class="panel-h">Foliage <small id="folCount"></small></div>
         <div class="panel-b">
-          <button class="btn secondary" disabled>Add foliage</button>
-          <div class="note">Not active yet.</div>
+          <button class="btn secondary" id="btnImportFol">Import plant (GLB, OBJ, FBX)</button>
+          <div class="note" style="margin-top:6px">Trees, bushes and other plants. A plant imported here is a layer, like an object: select it and add it to the map. Placements work as for objects (drag, corners, the round handle, Bend into a curve), and each plant can vary by a random scale, rotation and offset.</div>
+          <div id="folList" style="margin-top:8px"></div>
+          <button class="btn secondary" id="btnAddFol" disabled>Add selected plant to the map</button>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnDupFol" disabled title="A copy of the selected foliage placement, just behind it, with all its settings">Duplicate placement</button>
+            <button class="btn secondary" id="btnMirrorFol" disabled title="The mirror image of the selected foliage placement, left to right along its rows: the order reverses, a curve bends the other way">Flip placement</button>
+          </div>
+          <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:8px">
+            <div style="font-size:12.5px;font-weight:600">Plant packages <small id="folPkgCount" style="color:var(--muted);font-weight:400"></small></div>
+            <div class="note" style="margin-top:2px">A package mixes several plants in one placement: import plants into its slots; each spot gets a random one (the weight sets how often), never the same twice in a row.</div>
+            <div id="folPkgList"></div>
+            <button class="btn secondary" id="btnCreateFolPkg">Create package</button>
+          </div>
+          <div id="folPlHost"></div>
         </div>
       </section>
 
@@ -586,6 +615,30 @@
     </section>
   </div>
 
+  <!-- ===================== 3D TAB ===================== -->
+  <div class="tabpane" id="pane-view3d" hidden>
+    <aside class="left">
+      <section class="panel">
+        <div class="panel-h">3D scene <small>coming soon</small></div>
+        <div class="panel-b">
+          <button class="btn" id="btnScene3d" disabled title="Coming soon">Generate 3D scene</button>
+          <div class="note">Coming soon: the generated streets, objects and foliage together in one 3D scene, to look around here.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">View</div>
+        <div class="panel-b">
+          <button class="btn secondary" id="btnView3dReset">Reset view</button>
+          <div class="note">Left drag: orbit. Right drag (or Shift + drag): pan. Wheel: zoom. The grid is 500 m across in 10 m squares; red is X (the map's right), blue is Z (the map's down), green is up.</div>
+        </div>
+      </section>
+    </aside>
+    <section class="panel pane-wide" style="overflow:hidden;position:relative">
+      <div id="view3d" style="position:absolute;inset:0"></div>
+      <div id="view3dMsg" class="note" style="position:absolute;left:12px;top:10px;margin:0"></div>
+    </section>
+  </div>
+
   <!-- ===================== SHARED BOTTOM ===================== -->
   <div class="bottom">
     <section class="console">
@@ -608,5 +661,6 @@
 <input type="file" id="picker" accept="image/png,image/jpeg,image/webp" hidden>
 
 <script src="app.js"></script>
+<script type="module" src="view3d.js"></script>
 </body>
 </html>

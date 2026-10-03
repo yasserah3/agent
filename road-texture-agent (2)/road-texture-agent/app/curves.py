@@ -154,6 +154,50 @@ def _turn(turns, r, i):
 # An object's own turn (turns) adds to these, and every turned object takes
 # its turned outline, so the spaces stay as set.
 
+# ----------------------------------------------------------------- random transform
+# Foliage varies plant by plant: jitter = {"seed": n, "scale": [min, max],
+# "rotate": [min, max] (degrees, clockwise), "offset": [min, max] (metres),
+# "overlap": true or false}. Each copy, by its row and column, has its own
+# random numbers, so it keeps its scale, turn and offset (a distance in a random
+# direction) whatever the length of its row. With overlap on, the copies keep
+# their spots and vary on them, so big plants may overlap; with it off, each
+# copy takes the room of its scaled and turned outline with its offset on every
+# side, so none can overlap.
+
+def jitter_of(jitter, r, i):
+    """
+    A copy's random scale, turn (degrees), offset distance, and the offset's
+    direction (radians, from the copy's X towards its back), by its row and
+    column (from 0).
+    """
+    if not jitter:
+        return 1.0, 0.0, 0.0, 0.0
+    seed = row_seed((int(jitter.get("seed", 1)) ^ 0x3C6EF372) & _M32, r)
+    rnd = _rng((seed ^ (((i + 1) * 0x85EBCA6B) & _M32)) & _M32)
+    s0, s1 = sorted(max(0.01, float(x)) for x in jitter.get("scale", (1, 1)))
+    a0, a1 = sorted(float(x) for x in jitter.get("rotate", (0, 0)))
+    o0, o1 = sorted(max(0.0, float(x)) for x in jitter.get("offset", (0, 0)))
+    return s0 + rnd() * (s1 - s0), a0 + rnd() * (a1 - a0), o0 + rnd() * (o1 - o0), rnd() * 2 * math.pi
+
+
+def _room(jitter):
+    """Whether copies take the room of their random size (overlap off)."""
+    return bool(jitter) and not jitter.get("overlap", True)
+
+
+def _size(w, d, deg, jitter, r, i):
+    """
+    A copy's room along its row and across it: its outline turned by deg, or,
+    with overlap off, its scaled outline with its random turn too, and its
+    offset on every side.
+    """
+    if not _room(jitter):
+        return turned(w, d, deg)
+    s, rot, off, _ = jitter_of(jitter, r, i)
+    ww, dd = turned(w * s, d * s, deg + rot)
+    return ww + 2 * off, dd + 2 * off
+
+
 def _aligned(align):
     return bool(align) and any(align.get(k) for k in ("rows", "last", "columns"))
 
@@ -183,7 +227,8 @@ def _auto(align, r, i, n, ny, flip):
     return 180.0 if _round(align, r, ny) else 0.0
 
 
-def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None, turns=None, align=None):
+def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, layout=None, turns=None, align=None,
+           jitter=None):
     """
     Where the copies go along the line through the points.
 
@@ -192,14 +237,16 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
     size along the line, d across it. With random spaces (see spacer) or
     turned copies (turns: {id: degrees}) each row has its own gaps and sizes,
     so its own number of copies, as has each row on a line of its own length.
-    The alignment (align, see above) turns rows round and the ends of rows.
-    Returns the copies as (x, y, angle), the angle in radians being the
-    direction of the copy's own X with the alignment's turn (without its own
-    turn); the copies in each row; and the (first) line's length. A layout
-    dict, if given, is filled in (see new_layout).
+    The alignment (align, see above) turns rows round and the ends of rows;
+    a random transform with overlap off (jitter, see above) gives each copy
+    the room of its random size. Returns the copies as (x, y, angle), the
+    angle in radians being the direction of the copy's own X with the
+    alignment's turn (without its own turn or random transform); the copies in
+    each row; and the (first) line's length. A layout dict, if given, is
+    filled in (see new_layout).
     """
     lines, rpts = row_lines(points, ny)
-    if not spaces and not turns and not _aligned(align):
+    if not spaces and not turns and not _aligned(align) and not _room(jitter):
         fronts, Ly = row_fronts(d, ny, row_gaps(spaces, ny - 1, gap_y))
         lay = new_layout(layout, points, flip, fronts, [d] * ny, rpts)
         step = max(w + gap_x, 1e-9)
@@ -226,10 +273,10 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
         L = lines[r][3]
         gap = spacer(spaces, r, gap_x)
         tt = lambda i, n=None: _auto(align, r, i, n, ny, flip) + _turn(turns, r, i)
-        sizes = [turned(w, d, tt(0))]
+        sizes = [_size(w, d, tt(0), jitter, r, 0)]
         gaps, used = [0.0], max(sizes[0][0], 1e-6)
         while len(gaps) < 5000:
-            nxt = turned(w, d, tt(len(gaps)))
+            nxt = _size(w, d, tt(len(gaps)), jitter, r, len(gaps))
             g = gap()
             if used + g + max(nxt[0], 1e-6) > L + 1e-9:
                 break                                   # the row is full: always at least one
@@ -240,7 +287,7 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
             # the last one faces out of its end too: turned, and as many as still fit
             while True:
                 n = len(sizes)
-                sizes[-1] = turned(w, d, tt(n - 1, n))
+                sizes[-1] = _size(w, d, tt(n - 1, n), jitter, r, n - 1)
                 used = max(sizes[0][0], 1e-6)
                 for g, z in zip(gaps[1:], sizes[1:]):
                     used += g + max(z[0], 1e-6)
@@ -277,7 +324,7 @@ def copies(points, w, d, gap_x=0.0, gap_y=0.0, ny=1, flip=False, spaces=None, la
 
 
 def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, layout=None, turns=None,
-                mirror=False, align=None):
+                mirror=False, align=None, jitter=None):
     """
     A rectangle of copies: nx along its width in each of ny rows, centred on
     centre, the rows running along angle (radians, image axes). With random
@@ -285,8 +332,9 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, 
     length (each row centred), and each row is as deep as its deepest copy.
     Mirrored, the rows are laid out from the other end: the mirror image, the
     copies still facing the same way. The alignment (align, see above) turns
-    rows round and the ends of rows. Returns the copies as (x, y, angle),
-    each row's length, and the depth.
+    rows round and the ends of rows; a random transform with overlap off
+    (jitter) gives each copy the room of its random size. Returns the copies
+    as (x, y, angle), each row's length, and the depth.
     """
     u = np.array([math.cos(angle), math.sin(angle)])
     v = np.array([-u[1], u[0]])
@@ -296,7 +344,7 @@ def grid_copies(centre, angle, w, d, nx, ny, gap_x=0.0, gap_y=0.0, spaces=None, 
     for r in range(ny):
         gap = spacer(spaces, r, gap_x)
         gaps = [0.0] + [gap() for _ in range(nx - 1)]
-        sizes = [turned(w, d, _auto(align, r, i, nx, ny, mirror) + _turn(turns, r, i)) for i in range(nx)]
+        sizes = [_size(w, d, _auto(align, r, i, nx, ny, mirror) + _turn(turns, r, i), jitter, r, i) for i in range(nx)]
         Lr = 0.0
         for g, (ww, _) in zip(gaps, sizes):
             Lr += g                                     # summed in the same order as ui/app.js
@@ -430,13 +478,14 @@ def row_fronts(depth, ny, gaps, base=None):
 
 
 def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1, spaces=None, layout=None,
-                   turns=None, align=None):
+                   turns=None, align=None, jitter=None):
     """
     A package along the line through the points (one line, or several curve
     lines: see row_lines). slots: (w, d, weight) per object, w along the line
     and d across, in the points' unit. Turned copies (turns: {id: degrees})
-    take their turned size, and the alignment (align, see above) turns rows
-    round and the ends of rows. Returns the copies as (x, y, angle, slot), the
+    take their turned size, the alignment (align, see above) turns rows
+    round and the ends of rows, and a random transform with overlap off
+    (jitter) gives each copy the room of its random size. Returns the copies as (x, y, angle, slot), the
     copies in each row, and the (first) line's length.
     """
     lines, rpts = row_lines(points, ny)
@@ -452,7 +501,7 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
         picks, gaps, sizes, used, prev = [], [], [], 0.0, None
         while len(picks) < 5000:
             k = _pick(rnd, weights, prev)
-            ww, dd = turned(slots[k][0], slots[k][1], tt(len(picks)))
+            ww, dd = _size(slots[k][0], slots[k][1], tt(len(picks)), jitter, r, len(picks))
             g = gap() if picks else 0.0
             need = max(ww, 1e-6) + g
             if picks and used + need > L + 1e-9:
@@ -466,7 +515,7 @@ def package_copies(points, slots, gap_x=0.0, gap_y=0.0, ny=1, flip=False, seed=1
             # the last one faces out of its end too: turned, and as many as still fit
             while True:
                 n = len(picks)
-                sizes[-1] = turned(slots[picks[-1]][0], slots[picks[-1]][1], tt(n - 1, n))
+                sizes[-1] = _size(slots[picks[-1]][0], slots[picks[-1]][1], tt(n - 1, n), jitter, r, n - 1)
                 used = 0.0
                 for g, z in zip(gaps, sizes):
                     used += max(z[0], 1e-6) + g

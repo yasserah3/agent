@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -56,6 +56,8 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     }
   }
 
+  $('#uiVersion').textContent = 'v' + UI_VERSION;
+
   /* ------------------------------------------------ tabs */
   $$('.tab').forEach(t => t.addEventListener('click', () => {
     S.tab = t.dataset.tab;
@@ -63,10 +65,12 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     $('#pane-train').hidden = S.tab !== 'train';
     $('#pane-generate').hidden = S.tab !== 'generate';
     $('#pane-memory').hidden = S.tab !== 'memory';
+    $('#pane-view3d').hidden = S.tab !== 'view3d';
+    window.dispatchEvent(new CustomEvent('view3d', { detail: S.tab === 'view3d' }));   // ui/view3d.js draws only while showing
     if(S.tab === 'memory') renderPairs2();
     $('#clickHint').hidden = true;
     renderInfo();
-    if(S.tab !== 'memory') requestAnimationFrame(() => (S.tab === 'train' ? trainVp : genVp).fit());
+    if(S.tab === 'train' || S.tab === 'generate') requestAnimationFrame(() => (S.tab === 'train' ? trainVp : genVp).fit());
   }));
 
   /* ------------------------------------------------ files */
@@ -1042,7 +1046,17 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
   // An object is a layer. A placement is a rectangle of copies of one object:
   // nx copies along the object's width (X), ny along its depth (Y), with a gap
   // between neighbours. Rectangles are kept in mask pixels, sizes in metres.
-  S.gen.objects = []; S.gen.objSel = null; S.gen.placements = []; S.gen.plSel = -1;
+  S.gen.objects = []; S.gen.objSel = null; S.gen.folSel = null; S.gen.placements = []; S.gen.plSel = -1;
+  // Objects and foliage work alike: layers (one object or plant each), packages
+  // (several mixed) and placements, foliage ones marked foliage. Each has its own
+  // panel; the placement panel moves to the panel of the selected placement
+  const KIND = {
+    objects: { foliage: false, list: '#objList', count: '#objCount', add: '#btnAddObj', pkgList: '#pkgList', pkgCount: '#pkgCount',
+               sel: 'objSel', host: '#objPlHost', dup: '#btnDupPl', flip: '#btnMirrorPl', word: 'object', words: 'objects' },
+    foliage: { foliage: true, list: '#folList', count: '#folCount', add: '#btnAddFol', pkgList: '#folPkgList', pkgCount: '#folPkgCount',
+               sel: 'folSel', host: '#folPlHost', dup: '#btnDupFol', flip: '#btnMirrorFol', word: 'plant', words: 'plants' },
+  };
+  const kindOf = x => x && x.foliage ? KIND.foliage : KIND.objects;
   let maskPixels = null;
 
   function objById(id){ return S.gen.objects.find(o => o.id === id); }
@@ -1178,15 +1192,36 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     return turnedRound(al, r, ny) ? 180 : 0;
   }
   const DEG = Math.PI / 180;
+  // Random transform (foliage), as in app/curves.py: jitter = { seed, scale:[min,max],
+  // rotate:[min,max] (degrees, clockwise), offset:[min,max] (metres), overlap }. Each
+  // copy, by its row and column, has its own random numbers: its scale, turn, and
+  // offset (a distance in a random direction). With overlap off each copy takes the
+  // room of its scaled and turned outline with its offset on every side
+  function jitterOf(jitter, r, i){
+    if(!jitter) return [1, 0, 0, 0];
+    const seed = rowSeed(((jitter.seed ?? 1) >>> 0 ^ 0x3C6EF372) >>> 0, r);
+    const rnd = rng((seed ^ Math.imul(i + 1, 0x85EBCA6B)) >>> 0);
+    const [s0, s1] = (jitter.scale || [1, 1]).map(x => Math.max(0.01, +x)).sort((a, b) => a - b);
+    const [a0, a1] = (jitter.rotate || [0, 0]).map(x => +x).sort((a, b) => a - b);
+    const [o0, o1] = (jitter.offset || [0, 0]).map(x => Math.max(0, +x)).sort((a, b) => a - b);
+    return [s0 + rnd() * (s1 - s0), a0 + rnd() * (a1 - a0), o0 + rnd() * (o1 - o0), rnd() * 2 * Math.PI];
+  }
+  const roomy = jitter => !!jitter && jitter.overlap === false;
+  function sizeOf(w, d, deg, jitter, r, i){
+    // a copy's room along its row and across it (see app/curves.py _size)
+    if(!roomy(jitter)) return turned(w, d, deg);
+    const [s, rot, off] = jitterOf(jitter, r, i), [ww, dd] = turned(w * s, d * s, deg + rot);
+    return [ww + 2 * off, dd + 2 * off];
+  }
   // copies fill the line at the gap, centred on it; each turns with the curve:
   // its X along the line, its front (+Y) to the left of the line's direction,
   // or the right when flipped. With random spaces or turned copies each row has
   // its own gaps and sizes. Returns [x, y, angle] per copy (angle: its X, without
   // its own turn) and the copies in each row.
-  function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout, turns, align){
+  function curveCopies(P, w, d, gx, gy, ny, flip, spaces, layout, turns, align, jitter){
     const { lines, pts } = rowLines(P, ny), spots = [];
     const hasTurns = turns && Object.keys(turns).length;
-    if(!spaces && !hasTurns && !aligned(align)){
+    if(!spaces && !hasTurns && !aligned(align) && !roomy(jitter)){
       const { fronts, Ly } = rowFronts(d, ny, rowGaps(spaces, ny - 1, gy));
       const lay = newLayout(layout, P, flip, fronts, Array(ny).fill(d), pts);
       const step = Math.max(w + gx, 1e-9), counts = [];
@@ -1211,10 +1246,10 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     for(let r = 0; r < ny; r++){
       const L = lines[r].L;
       const tt = (i, n = null) => autoTurn(align, r, i, n, ny, flip) + turnAt(turns, r, i);
-      const gap = spacer(spaces, r, gx), sizes = [turned(w, d, tt(0))], gaps = [0];
+      const gap = spacer(spaces, r, gx), sizes = [sizeOf(w, d, tt(0), jitter, r, 0)], gaps = [0];
       let used = Math.max(sizes[0][0], 1e-6);
       while(gaps.length < 5000){
-        const nxt = turned(w, d, tt(gaps.length)), g = gap();
+        const nxt = sizeOf(w, d, tt(gaps.length), jitter, r, gaps.length), g = gap();
         if(used + g + Math.max(nxt[0], 1e-6) > L + 1e-9) break;   // the row is full: always at least one
         gaps.push(g); sizes.push(nxt); used += g + Math.max(nxt[0], 1e-6);
       }
@@ -1222,7 +1257,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
         // the last one faces out of its end too: turned, and as many as still fit
         for(;;){
           const n = sizes.length;
-          sizes[n - 1] = turned(w, d, tt(n - 1, n));
+          sizes[n - 1] = sizeOf(w, d, tt(n - 1, n), jitter, r, n - 1);
           used = Math.max(sizes[0][0], 1e-6);
           for(let i = 1; i < n; i++) used += gaps[i] + Math.max(sizes[i][0], 1e-6);
           if(n === 1 || used <= L + 1e-9) break;
@@ -1258,13 +1293,13 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
   // rows along angle a. With random spaces or turned copies each row has its own
   // gaps, sizes and length, and each row is as deep as its deepest copy.
   // Mirrored, the rows are laid out from the other end, the copies facing the same way
-  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns, mirror, align){
+  function gridCopies(c, a, w, d, nx, ny, gx, gy, spaces, layout, turns, mirror, align, jitter){
     const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], du = mirror ? [-u[0], -u[1]] : u;
     const rows = [];
     for(let r = 0; r < ny; r++){
       const gap = spacer(spaces, r, gx), gaps = [0];
       for(let i = 1; i < nx; i++) gaps.push(gap());
-      const sizes = gaps.map((_, i) => turned(w, d, autoTurn(align, r, i, nx, ny, !!mirror) + turnAt(turns, r, i)));
+      const sizes = gaps.map((_, i) => sizeOf(w, d, autoTurn(align, r, i, nx, ny, !!mirror) + turnAt(turns, r, i), jitter, r, i));
       let Lr = 0;
       gaps.forEach((g, i) => { Lr += g; Lr += sizes[i][0]; });
       rows.push([gaps, sizes, Lr]);
@@ -1358,7 +1393,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     return { fronts, Ly };
   }
   // slots: [w, d, weight] per object. Returns [x, y, angle, slot] per copy
-  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout, turns, align){
+  function packageCopies(P, slots, gx, gy, ny, flip, seed, spaces, layout, turns, align, jitter){
     const { lines, pts } = rowLines(P, ny);
     let weights = slots.map(q => Math.max(0, +q[2] || 0));
     if(!weights.some(w => w > 0)) weights = slots.map(() => 1);
@@ -1371,7 +1406,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
       let used = 0, prev = null;
       while(picks.length < 5000){
         const k = pickSlot(rnd, weights, prev);
-        const [ww, dd] = turned(slots[k][0], slots[k][1], tt(picks.length));
+        const [ww, dd] = sizeOf(slots[k][0], slots[k][1], tt(picks.length), jitter, r, picks.length);
         const g = picks.length ? gap() : 0;
         const need = Math.max(ww, 1e-6) + g;
         if(picks.length && used + need > L + 1e-9) break;      // the row is full: always at least one
@@ -1381,7 +1416,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
         // the last one faces out of its end too: turned, and as many as still fit
         for(;;){
           const n = picks.length, k = picks[n - 1];
-          sizes[n - 1] = turned(slots[k][0], slots[k][1], tt(n - 1, n));
+          sizes[n - 1] = sizeOf(slots[k][0], slots[k][1], tt(n - 1, n), jitter, r, n - 1);
           used = 0;
           for(let i = 0; i < n; i++) used += Math.max(sizes[i][0], 1e-6) + gaps[i];
           if(n === 1 || used <= L + 1e-9) break;
@@ -1523,6 +1558,13 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     const m = mppMask();
     // one copy: its footprint in mask pixels (w, d in metres), turned so its X points along a
     const copyAt = (cx, cy, a, w, d, slot, id) => {
+      if(p.jitter){
+        // a plant's random offset across its row's frame, its random turn and scale
+        const [r, i] = id.split('-').map(x => +x - 1), [s, rot, off, th] = jitterOf(p.jitter, r, i);
+        cx += off * (Math.cos(th) * Math.cos(a) - Math.sin(th) * Math.sin(a)) / m;
+        cy += off * (Math.cos(th) * Math.sin(a) + Math.sin(th) * Math.cos(a)) / m;
+        a += rot * DEG; w *= s; d *= s;
+      }
       a += turnOf(p, id);                                   // a single object turned on its own
       const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], hw = w / m / 2, hd = d / m / 2;
       const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
@@ -1586,7 +1628,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
       const straight = [[p.cx - Math.cos(a)*Lx/2, p.cy - Math.sin(a)*Lx/2], [p.cx + Math.cos(a)*Lx/2, p.cy + Math.sin(a)*Lx/2]].map(q => [q[0]*m, q[1]*m]);
       const P = curve ? curvePoints(p, m) : p.mirror ? straight.reverse() : straight;
       const r = packageCopies(P, slots.map(s => [s.w, s.d, s.weight]),
-                              p.gap_x, p.gap_y, p.ny, curve ? !!p.flip : !!p.mirror, p.seed >>> 0, spacesOf(p), null, p.turns, p.align);
+                              p.gap_x, p.gap_y, p.ny, curve ? !!p.flip : !!p.mirror, p.seed >>> 0, spacesOf(p), null, p.turns, p.align, p.jitter);
       const copies = r.spots.map(([x, y, ang, k], n) => copyAt(x / m, y / m, ang, slots[k].w, slots[k].d, slots[k], r.layout.ids[n]));
       const Ly = r.Ly / m;
       const base = { pkg: true, slots, copies, counts: r.counts, length_m: r.L, layout: r.layout };
@@ -1597,14 +1639,14 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     const [w, d] = objSize(o);
     if(isCurve(p)){
       // worked out in metres, as the 3D export does, then back to mask pixels
-      const r = curveCopies(curvePoints(p, m), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns, p.align);
+      const r = curveCopies(curvePoints(p, m), w, d, p.gap_x, p.gap_y, p.ny, !!p.flip, spacesOf(p), null, p.turns, p.align, p.jitter);
       return { curve: true, copies: r.spots.map(([x, y, a], n) => copyAt(x / m, y / m, a, w, d, null, r.layout.ids[n])),
                counts: r.counts, along: r.n, length_m: r.L, w: w/m, d: d/m, layout: r.layout, ...curveShape(r) };
     }
     // a rectangle of copies, in metres as the 3D export does; with random spaces
     // each row has its own length, and the rectangle is as long as the longest
     const a = p.angle * Math.PI / 180;
-    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns, !!p.mirror, p.align);
+    const r = gridCopies([p.cx*m, p.cy*m], a, w, d, p.nx, p.ny, p.gap_x, p.gap_y, spacesOf(p), null, p.turns, !!p.mirror, p.align, p.jitter);
     const copies = r.spots.map(([x, y, ang], n) => copyAt(x / m, y / m, ang, w, d, null, r.layout.ids[n]));
     return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m, front0(r.layout)), w: w/m, d: d/m, copies, layout: r.layout };
   }
@@ -1714,7 +1756,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
       if(ed === 'streets') drawCells(g, p, g0, f, hr, P);
       g0.copies.forEach(c => {
         // a package's copies in their slot's colour, so the mix shows
-        const col = c.slot ? c.slot.colour : '216,96,76';
+        const col = c.slot ? c.slot.colour : p.foliage ? '76,163,107' : '216,96,76';
         const picked = ed === 'objects' && S.gen.edit.sel.has(c.id);
         const poly = el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`,
           stroke: picked ? '#FFD23F' : c.onRoad ? '#999' : `rgb(${col})`, 'stroke-width': picked ? hr*0.7 : hr*0.25,
@@ -1732,8 +1774,9 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
         g0.curveLines.forEach(cl => el('polyline', { points: cl.samples.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
           'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g));
       }
-      if((g0.curve || g0.pkg) && ed !== 'objects'){
+      if((g0.curve || g0.pkg) && ed !== 'objects' && !p.foliage){
         // a small arrow on each copy's front: Blender's +Y, turned with the curve and the object
+        // (not on plants, whose random turns would make them point every way)
         g0.copies.forEach(c => {
           const th = c.a + (c.slot ? c.slot.turn : turn) * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
           const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * c.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * c.d/2;
@@ -1921,9 +1964,15 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
   function renderPlacementBox(){
     const box = $('#plBox');
     const p = S.gen.placements[S.gen.plSel];
-    $('#btnDupPl').disabled = $('#btnMirrorPl').disabled = !p;           // they act on the selected placement
+    // duplicate and flip act on the selected placement, from its own panel
+    Object.values(KIND).forEach(K => { $(K.dup).disabled = $(K.flip).disabled = !p || kindOf(p) !== K; });
     if(!p){ box.hidden = true; S.gen.edit = null; return; }
     box.hidden = false;
+    // in the panel of its kind; foliage has no random spaces, curve lines, inner
+    // streets, single turns or alignment, and objects have no random transform
+    if(box.parentElement !== $(kindOf(p).host)) $(kindOf(p).host).appendChild(box);
+    $$('[data-only]', box).forEach(e => { e.hidden = e.dataset.only !== (p.foliage ? 'foliage' : 'objects'); });
+    if(p.foliage) S.gen.edit = null;
     // the edit modes belong to the selected placement
     if(S.gen.edit && S.gen.edit.i !== S.gen.plSel) S.gen.edit = null;
     const ed = S.gen.edit ? S.gen.edit.kind : null;
@@ -1937,6 +1986,19 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     $('#stMarkings').checked = !!st.markings;
     $('#stInfo').textContent = st.cells.length
       ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets${st.markings ? '' : ', without markings'}. Press Generate to build them.` : '';
+    // a plant's random transform: the ranges, overlap, and what they do
+    if(p.foliage){
+      const jt = jitterSet(p);
+      [['#jScMin', jt.scale[0]], ['#jScMax', jt.scale[1]], ['#jRotMin', jt.rotate[0]], ['#jRotMax', jt.rotate[1]],
+       ['#jOffMin', jt.offset[0]], ['#jOffMax', jt.offset[1]]].forEach(([id, v]) => { if(document.activeElement !== $(id)) $(id).value = v; });
+      $('#jOverlap').checked = jt.overlap !== false;
+      const rg = (r, u) => `${Math.min(...r)}${u}–${Math.max(...r)}${u}`, parts = [];
+      if(jt.scale[0] !== 1 || jt.scale[1] !== 1) parts.push(`scaled ${rg(jt.scale, '×')}`);
+      if(+jt.rotate[0] || +jt.rotate[1]) parts.push(`turned ${rg(jt.rotate, '°')}`);
+      if(+jt.offset[0] || +jt.offset[1]) parts.push(`moved ${rg(jt.offset, ' m')} from its spot`);
+      $('#jInfo').textContent = parts.length ? `Each plant ${parts.join(', ')}; ${jt.overlap !== false ? 'big ones may overlap' : 'none overlap: each takes the room it needs'}.`
+        : 'No random transform: set a min and a max above.';
+    }
     // objects alignment: three switches and the checkbox, and which way each row faces
     const al = alignOf(p);
     [['#btnAlignRows', 'rows'], ['#btnAlignLast', 'last'], ['#btnAlignCols', 'columns']].forEach(([id, key]) =>
@@ -1954,7 +2016,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     const g0 = placementGeom(p);
     const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
     const curve = isCurve(p);
-    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: `
+    $('#plTitle').textContent = `${p.foliage ? 'Foliage placement' : 'Placement'} ${S.gen.plSel + 1}: `
       + (p.package ? (pk ? `package ${pk.name}` : 'missing package') : (o ? o.name : 'missing object')) + (curve ? ', curved' : '');
     $('#btnShuffle').hidden = !p.package;
     $('#gapXLabel').textContent = curve ? 'Gap along the line (m)' : 'Gap along X (m)';
@@ -2044,6 +2106,27 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
   $('#btnTurnR').addEventListener('click', () => turnPicked(t => t + 90));
   $('#btnTurnReset').addEventListener('click', () => turnPicked(() => 0));
   addEventListener('keydown', e => { if(e.key === 'Escape' && S.gen.edit){ S.gen.edit = null; drawBridges(); } });
+  // Foliage: random scale, rotation and offset per plant, between a min and a max
+  // (app/curves.py); the random values are kept with the placement until New random set
+  const jitterSet = p => ({ seed: 1, scale: [1, 1], rotate: [0, 0], offset: [0, 0], overlap: true, ...(p.jitter || {}) });
+  [['#jScMin', 'scale', 0, 0.01], ['#jScMax', 'scale', 1, 0.01], ['#jRotMin', 'rotate', 0, null], ['#jRotMax', 'rotate', 1, null],
+   ['#jOffMin', 'offset', 0, 0], ['#jOffMax', 'offset', 1, 0]].forEach(([id, key, k, lo]) => $(id).addEventListener('input', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.foliage) return;
+    const v = parseFloat($(id).value); if(!Number.isFinite(v)) return;
+    const jt = jitterSet(p);
+    jt[key] = jt[key].slice(); jt[key][k] = lo === null ? v : Math.max(lo, v);
+    p.jitter = jt; drawBridges(); clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);
+  }));
+  $('#jOverlap').addEventListener('change', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.foliage) return;
+    p.jitter = { ...jitterSet(p), overlap: $('#jOverlap').checked };
+    log(p.jitter.overlap ? 'Overlap on: the plants keep their spots and vary on them.' : 'Overlap off: each plant takes the room of its size, turn and offset, so none overlap.');
+    saveScatter();
+  });
+  $('#btnJitter').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.foliage) return;
+    p.jitter = { ...jitterSet(p), seed: (Math.random() * 4294967296) >>> 0 }; log('New random set.'); saveScatter();
+  });
   // Objects alignment: on/off switches kept with the placement (app/curves.py)
   const alignOf = p => ({ rows: false, last: false, columns: false, exclude: false, ...(p.align || {}) });
   function setAlign(p, key, on){
@@ -2093,7 +2176,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     spreadLines(p, k - 1); log(k === 2 ? 'One curve line again: the rows run beside it.' : `${k - 1} curve lines.`); saveScatter();
   });
   // Duplicate: the same placement with all its settings, just behind the original, selected to drag
-  $('#btnDupPl').addEventListener('click', () => {
+  ['#btnDupPl', '#btnDupFol'].forEach(id => $(id).addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     const g0 = placementGeom(p), q = JSON.parse(JSON.stringify(p)), m = mppMask();
     if(g0){
@@ -2114,11 +2197,11 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     S.gen.placements.push(q); S.gen.plSel = S.gen.placements.length - 1; S.gen.edit = null;
     log(`Placement ${S.gen.plSel + 1}: a copy of placement ${S.gen.placements.indexOf(p) + 1}, just behind it. Drag it where it goes.`);
     saveScatter();
-  });
+  }));
   // Flip: the mirror image along the rows. The order of the objects reverses, a
   // curve bends the other way, single turns mirror (30° becomes -30°); fronts
   // still face the same side and the models themselves are not mirrored
-  $('#btnMirrorPl').addEventListener('click', () => {
+  ['#btnMirrorPl', '#btnMirrorFol'].forEach(id => $(id).addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     if(isCurve(p)){
       // every curve line mirrored across the line square to the first one's ends,
@@ -2139,7 +2222,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
     Object.keys(p.turns || {}).forEach(id => setTurn(p, id, -p.turns[id]));
     log('Placement flipped: its mirror image, left to right along the rows.');
     saveScatter();
-  });
+  }));
   $('#btnCurve').addEventListener('click', () => {
     // the rectangle's middle line, end to end: the same copies, now on a line that can bend
     const p = S.gen.placements[S.gen.plSel]; if(!p || isCurve(p)) return;
@@ -2213,9 +2296,13 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
   });
 
   function renderObjList(){
-    const layers = S.gen.objects.filter(o => !o.package);            // objects in a package show in its slots
-    $('#objCount').textContent = layers.length ? `${layers.length}` : '';
-    const list = $('#objList'); list.innerHTML = '';
+    renderLayers(KIND.objects); renderLayers(KIND.foliage); renderPkgList();
+  }
+  function renderLayers(K){
+    // objects (or plants) in a package show in its slots
+    const layers = S.gen.objects.filter(o => !o.package && !!o.foliage === K.foliage);
+    $(K.count).textContent = layers.length ? `${layers.length}` : '';
+    const list = $(K.list); list.innerHTML = '';
     layers.forEach(o => {
       const [w, d, hgt] = objSize(o);
       const big = Math.max(w, d, hgt) > 60;
@@ -2226,11 +2313,11 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
           ${big ? '<span style="color:var(--amber)"> · very large: check the scale</span>' : ''}</span>
         <span style="display:flex;align-items:center;gap:4px"><span style="color:var(--muted);font-size:11.5px">scale</span>
           <input type="number" value="${o.scale || 1}" step="0.01" min="0.0001" style="width:62px;background:var(--field);border:1px solid var(--line);border-radius:4px;padding:2px 4px" title="Scale">
-          <button class="x turn" title="Turn the object a quarter turn within its rectangle" aria-label="Turn ${o.name}" style="font-size:13px">↻ ${90 * ((o.turn || 0) % 4)}°</button>
-          <button class="x" title="Delete object" aria-label="Delete ${o.name}">×</button></span>`;
+          <button class="x turn" title="Turn the ${K.word} a quarter turn within its rectangle" aria-label="Turn ${o.name}" style="font-size:13px">↻ ${90 * ((o.turn || 0) % 4)}°</button>
+          <button class="x" title="Delete ${K.word}" aria-label="Delete ${o.name}">×</button></span>`;
       row.addEventListener('click', e => {
         if(e.target.tagName === 'INPUT' || e.target.classList.contains('x')) return;
-        S.gen.objSel = o.id; $('#btnAddObj').disabled = !S.gen.mask; renderObjList();
+        S.gen[K.sel] = o.id; $(K.add).disabled = !S.gen.mask; renderObjList();
       });
       row.querySelector('input').addEventListener('change', async ev => {
         const sc = Math.max(0.0001, +ev.target.value || 1);
@@ -2255,15 +2342,14 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
           await api('/api/objects/' + o.id, { method:'DELETE' });
           S.gen.objects = S.gen.objects.filter(x => x.id !== o.id);
           S.gen.placements = S.gen.placements.filter(p => p.object !== o.id);
-          if(S.gen.objSel === o.id) S.gen.objSel = null;
+          if(S.gen[K.sel] === o.id) S.gen[K.sel] = null;
           S.gen.plSel = -1; log(`Deleted ${o.name} and its placements.`);
           renderObjList(); saveScatter();
         }catch(err){ log(err.message, 'bad'); }
       });
       list.appendChild(row);
     });
-    $('#btnAddObj').disabled = !(S.gen.objSel && S.gen.mask);
-    renderPkgList();
+    $(K.add).disabled = !(S.gen[K.sel] && S.gen.mask);
   }
 
   async function loadObjects(){
@@ -2277,10 +2363,12 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
 
   /* ------------------------------------------------ packages */
   const jsonPost = (url, body) => api(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  function renderPkgList(){
-    const list = $('#pkgList'); list.innerHTML = '';
-    $('#pkgCount').textContent = S.gen.packages.length ? `${S.gen.packages.length}` : '';
-    S.gen.packages.forEach(pk => {
+  function renderPkgList(){ renderPkgs(KIND.objects); renderPkgs(KIND.foliage); }
+  function renderPkgs(K){
+    const list = $(K.pkgList); list.innerHTML = '';
+    const pkgs = S.gen.packages.filter(pk => !!pk.foliage === K.foliage);
+    $(K.pkgCount).textContent = pkgs.length ? `${pkgs.length}` : '';
+    pkgs.forEach(pk => {
       const slots = pkgSlots(pk);
       const box = document.createElement('div');
       box.className = 'pkg';
@@ -2291,9 +2379,9 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
             style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:15px">×</button>
         </div>
         <div class="pkg-slots"></div>
-        ${slots.length ? '' : '<div class="note">No objects yet: import some into this package.</div>'}
+        ${slots.length ? '' : `<div class="note">No ${K.words} yet: import some into this package.</div>`}
         <div class="btn-row">
-          <button class="btn secondary pkg-import">Import object</button>
+          <button class="btn secondary pkg-import">Import ${K.word}</button>
           <button class="btn secondary pkg-place" ${S.gen.mask && slots.length ? '' : 'disabled'}
             title="${S.gen.mask ? '' : 'Load a street mask first'}">Place on the map</button>
         </div>`;
@@ -2378,7 +2466,7 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
         const cy = ((r.top + r.height/2) - c.top) / c.height * genVp.canvas.height / f;
         S.gen.placements.push({ package: pk.id, cx: Math.min(Math.max(cx, 0), S.gen.mask.width), cy: Math.min(Math.max(cy, 0), S.gen.mask.height),
           angle: 0, length: 3 * Math.max(...slots.map(s => s.w)) / mppMask(), nx: 1, ny: 1, gap_x: 0, gap_y: 0,
-          seed: (Math.random() * 4294967296) >>> 0 });
+          seed: (Math.random() * 4294967296) >>> 0, ...(K.foliage ? newFoliage() : {}) });
         S.gen.plSel = S.gen.placements.length - 1;
         log(`Placed ${pk.name}. Drag a corner to make it longer or add rows; Shuffle the mix for another random order.`);
         saveScatter();
@@ -2386,26 +2474,29 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
       list.appendChild(box);
     });
   }
-  $('#btnCreatePkg').addEventListener('click', async () => {
+  [['#btnCreatePkg', KIND.objects], ['#btnCreateFolPkg', KIND.foliage]].forEach(([id, K]) => $(id).addEventListener('click', async () => {
     try{
-      const res = await jsonPost('/api/packages', {});
-      S.gen.packages.push(res); log(`Created ${res.name}. Import objects into it, then place it on the map.`);
+      const res = await jsonPost('/api/packages', { foliage: K.foliage });
+      S.gen.packages.push(res); log(`Created ${res.name}. Import ${K.words} into it, then place it on the map.`);
       renderPkgList();
     }catch(err){ log(err.message, 'bad'); }
-  });
+  }));
 
-  $('#btnImportObj').addEventListener('click', () => {
+  // a new foliage placement: no random transform until its ranges are set
+  const newFoliage = () => ({ foliage: true, jitter: { seed: (Math.random() * 4294967296) >>> 0, scale: [1, 1], rotate: [0, 0], offset: [0, 0], overlap: true } });
+  [['#btnImportObj', KIND.objects], ['#btnImportFol', KIND.foliage]].forEach(([id, K]) => $(id).addEventListener('click', () => {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.accept = '.glb,.obj,.fbx';
     inp.addEventListener('change', async () => {
       const f = inp.files[0]; if(!f) return;
-      status('Importing object…'); log(`Importing ${f.name}…`);
+      status(`Importing ${K.word}…`); log(`Importing ${f.name}…`);
       try{
         const fd = new FormData(); fd.append('file', f);
+        if(K.foliage) fd.append('foliage', '1');
         const r = await fetch(API + '/api/objects/import', { method:'POST', body: fd });
         const res = await r.json();
         if(!r.ok) throw new Error(res.detail || 'import failed');
-        S.gen.objects.push(res); S.gen.objSel = res.id;
+        S.gen.objects.push(res); S.gen[K.sel] = res.id;
         log(`Imported ${res.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m, ${res.triangles.toLocaleString()} triangles.`, 'ok');
         if(res.frame) log(`  Kept ${res.frame}: the arrow on the map points to its +Y.`);
         if(Math.max(res.width_m, res.depth_m, res.height_m) > 60)
@@ -2415,19 +2506,21 @@ const UI_VERSION = '2026.10.03-align1';   // must match VERSION in server.py
       status('Ready.');
     });
     inp.click();
-  });
+  }));
 
-  $('#btnAddObj').addEventListener('click', () => {
-    if(!S.gen.objSel || !S.gen.mask) return;
+  [['#btnAddObj', KIND.objects], ['#btnAddFol', KIND.foliage]].forEach(([id, K]) => $(id).addEventListener('click', () => {
+    const oid = S.gen[K.sel];
+    if(!oid || !S.gen.mask) return;
     const r = $('#genVp').getBoundingClientRect(), c = genVp.canvas.getBoundingClientRect(), f = shown();
     const cx = ((r.left + r.width/2) - c.left) / c.width * genVp.canvas.width / f;
     const cy = ((r.top + r.height/2) - c.top) / c.height * genVp.canvas.height / f;
-    S.gen.placements.push({ object: S.gen.objSel, cx: Math.min(Math.max(cx, 0), S.gen.mask.width),
-                            cy: Math.min(Math.max(cy, 0), S.gen.mask.height), angle: 0, nx: 1, ny: 1, gap_x: 0, gap_y: 0 });
+    S.gen.placements.push({ object: oid, cx: Math.min(Math.max(cx, 0), S.gen.mask.width),
+                            cy: Math.min(Math.max(cy, 0), S.gen.mask.height), angle: 0, nx: 1, ny: 1, gap_x: 0, gap_y: 0,
+                            ...(K.foliage ? newFoliage() : {}) });
     S.gen.plSel = S.gen.placements.length - 1;
-    log(`Placed ${objById(S.gen.objSel).name}. Drag a corner to add copies; set the gaps in the panel.`);
+    log(`Placed ${objById(oid).name}. Drag a corner to add copies; set the gaps in the panel.`);
     saveScatter();
-  });
+  }));
 
   /* ------------------------------------------------ memory panel */
   async function renderMemory(){

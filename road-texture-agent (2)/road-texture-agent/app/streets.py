@@ -118,15 +118,15 @@ def inner_streets(road, mpp, placements, objects, packages):
     report = []
     k = max(1, int(math.ceil(mpp / FINE_M - 1e-9)))
     fr = mpp / k                                              # metres per fine pixel
-    # every placement's objects, streets or not: nothing may run through them
+    # every placement's objects (and plants), streets or not: nothing may run through them
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
     all_feet = []
     for p in placements:
         try:
-            for oid, cc, a, cid in PL.copies_of(p, objects, packages, mpp)[0]:
+            for oid, cc, a, cid, sc in PL.copies_of(p, objects, packages, mpp)[0]:
                 _, _, w, d = PL.sized(objects[oid]["meta"])
-                all_feet.append([tuple(q) for q in PL.footprint(cc, a, w, d)])
+                all_feet.append([tuple(q) for q in PL.footprint(cc, a, w * sc, d * sc)])
         except Exception:
             continue
     objects_area = unary_union([Polygon(f) for f in all_feet]) if all_feet else None

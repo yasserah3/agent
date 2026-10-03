@@ -4,8 +4,9 @@ the 3D export, and the inner streets drawn between them.
 
 A placement is one object or a package, as a rectangle (rows along its middle
 line, mirrored or not) or a curve (one or more curve lines), with even or
-random spaces and its objects aligned (rows turned round, row ends facing out:
-app/curves.py). Each copy has an
+random spaces and its objects aligned (rows turned round, row ends facing out),
+and, for foliage, a random scale, turn and offset per copy (app/curves.py).
+Each copy has an
 id, "row-column" from the top left, and can be given its own extra rotation in
 the placement's "turns": {id: degrees, clockwise on the map}. A turned copy
 takes its turned outline in its row, so the spaces around it stay as set.
@@ -42,12 +43,14 @@ def copies_of(p, objects, packages, mpp_mask):
     A placement's copies and layout, in metres in image axes (x right, y down).
 
     objects: {id: {"meta": ...}}, packages: {id: package}. Returns a list of
-    (object id, centre, angle, copy id), the angle (radians) being the
+    (object id, centre, angle, copy id, scale), the angle (radians) being the
     direction of the copy's own X with its extra rotation, and the layout
     (app/curves.py), whose distances and offsets are in metres too. The
-    angle includes the alignment's turns (rows turned round, row ends).
+    angle includes the alignment's turns (rows turned round, row ends), and,
+    with a random transform (foliage), the centre its random offset, the angle
+    its random turn, and scale its random scale (1 without).
     """
-    layout, spaces, align = {}, spaces_of(p), p.get("align")
+    layout, spaces, align, jitter = {}, spaces_of(p), p.get("align"), p.get("jitter")
     if "package" in p:
         pk = packages[p["package"]]
         slots = [sl for sl in pk["slots"] if sl["object"] in objects]
@@ -64,22 +67,31 @@ def copies_of(p, objects, packages, mpp_mask):
                 pts, flip = pts[::-1], True                     # laid out from the other end, facing the same way
         spots, _, _ = CV.package_copies(pts, [(z[2], z[3], sl.get("weight", 1.0)) for z, sl in zip(sizes, slots)],
                                         p["gap_x"], p["gap_y"], p["ny"], flip, p["seed"], spaces, layout,
-                                        p.get("turns"), align)
+                                        p.get("turns"), align, jitter)
         spots = [(slots[si]["object"], np.array([x, y]), ang) for x, y, ang, si in spots]
     else:
         k, turn, w, d = sized(objects[p["object"]]["meta"])
         if p.get("path"):
             spots, _, _ = CV.copies(curve_points(p, mpp_mask), w, d,
                                     p["gap_x"], p["gap_y"], p["ny"], p.get("flip", False), spaces, layout, p.get("turns"),
-                                    align)
+                                    align, jitter)
         else:
             spots, _, _ = CV.grid_copies(np.array([p["cx"], p["cy"]]) * mpp_mask, math.radians(p["angle"]), w, d,
                                          p["nx"], p["ny"], p["gap_x"], p["gap_y"], spaces, layout, p.get("turns"),
-                                         bool(p.get("mirror")), align)
+                                         bool(p.get("mirror")), align, jitter)
         spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
     turns = p.get("turns") or {}
-    out = [(oid, cc, a + math.radians(float(turns.get(cid, 0.0))), cid)
-           for (oid, cc, a), cid in zip(spots, layout["ids"])]
+    out = []
+    for (oid, cc, a), cid in zip(spots, layout["ids"]):
+        s = 1.0
+        if jitter:
+            # its random offset across its own row's frame, then its random turn
+            r, i = (int(x) - 1 for x in cid.split("-"))
+            s, rot, off, th = CV.jitter_of(jitter, r, i)
+            x_, v_ = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
+            cc = cc + off * (math.cos(th) * x_ + math.sin(th) * v_)
+            a = a + math.radians(rot)
+        out.append((oid, cc, a + math.radians(float(turns.get(cid, 0.0))), cid, s))
     return out, layout
 
 
