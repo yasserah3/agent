@@ -353,12 +353,15 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     mesh.fill_polys = [_scale_poly(q, scale) for q in cluster_fill_polys(mesh.clusters, cov_mask, 1)]
     # roads given exactly (the inner streets): laid as they are, so their straight
     # edges stay straight in the kerb line and sidewalks, with their markings
-    # along their centrelines
+    # along their centrelines. A marked one also gets a strip of road of its own
+    # down the middle, a street like the others, so its markings can be painted
+    # into it or laid as strips, whichever the export uses
     exact_n = 0
     if exact:
         # their edges stay exactly where they are when the kerb line is smoothed
         from shapely.ops import unary_union
         mesh.exact_edges = unary_union([ex["road"].boundary for ex in exact if not ex["road"].is_empty])
+    built = None
     for ex in exact or []:
         road = ex["road"]
         for g in (road.geoms if hasattr(road, "geoms") else [road]):
@@ -367,15 +370,25 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                 exact_n += 1
         if not (dashes and ex.get("markings")):
             continue
+        if built is None:
+            built = _built_index(mesh, scale)
         for pts, hw in ex["lines"]:
-            pts = np.asarray(pts, float)
+            # the street up to the roads already built: one that goes on to a street
+            # stops at its edge, so its road and markings never lie over that street's
+            pts = _outside(np.asarray(pts, float), built, 0.25 / mpp, float(hw))
+            if pts is None:
+                continue
             arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
             tg = np.gradient(pts, axis=0)
             tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
+            side = np.column_stack([-tg[:, 1], tg[:, 0]])
             n0 = len(mesh.dashes)
-            _dash_strips(mesh, pts, np.column_stack([-tg[:, 1], tg[:, 0]]), arc, np.full(len(pts), float(hw)),
-                         mpp, scale, dashes)
-            mesh.dash_owner.extend([None] * (len(mesh.dashes) - n0))
+            layout = _dash_strips(mesh, pts, side, arc, np.full(len(pts), float(hw)), mpp, scale, dashes)
+            if layout is None:
+                continue
+            sid = INNER_OWNER + len(mesh.streets) + 1
+            mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
+            _inner_band(mesh, sid, pts, side, arc, float(hw), layout, road, mpp, scale)
     if mesh.sw_cfg and mesh.sw_mode == "kerb_line":
         _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_)
 
@@ -462,6 +475,115 @@ def _patch(mesh, mouths, centre, spacing, owner=0):
     if m % 2 == 1:
         mesh.tris.append((c_idx, inner[m - 1], inner[0]))
     return True
+
+
+INNER_OWNER = 900_000       # owner ids for the inner streets' marked roads (below BRIDGE_OWNER)
+
+
+def _built_index(mesh, scale):
+    """The road built so far (street strips and junction patches), in mask pixels, to look up by area."""
+    from shapely import STRtree
+    from shapely.geometry import Polygon
+    V = np.array(mesh.v, float) / scale
+    polys = []
+    for ring in list(mesh.quads) + list(mesh.tris):
+        q = Polygon(V[list(ring)])
+        q = q if q.is_valid else q.buffer(0)
+        if not q.is_empty:
+            polys.append(q)
+    return (STRtree(polys), polys) if polys else None
+
+
+def _outside(pts, built, margin, hw):
+    """
+    The longest part of a line (mask pixels) along which a strip hw to either
+    side of it stays margin clear of the road built so far: where it meets a
+    street at a slant, it stops where the strip's corner reaches it.
+    """
+    from shapely.geometry import LineString, Point
+    from shapely.ops import substring, unary_union
+    if len(pts) < 2:
+        return None
+    line = LineString(pts)
+    L = line.length
+    cut = []
+    if built is not None:
+        tree, polys = built
+        near = [polys[i] for i in tree.query(line.buffer(hw + margin))]
+        if near:
+            hit = line.buffer(hw, cap_style=2, join_style=2).intersection(unary_union(near).buffer(margin))
+            for g in (hit.geoms if hasattr(hit, "geoms") else [hit]):
+                if g.is_empty or g.geom_type != "Polygon":
+                    continue
+                t = [line.project(Point(c)) for c in g.exterior.coords]
+                cut.append((min(t), max(t)))
+    # what is left between the pieces cut out: the longest stretch
+    free, at = [], 0.0
+    for a, b in sorted(cut):
+        if a > at:
+            free.append((at, a))
+        at = max(at, b)
+    if at < L:
+        free.append((at, L))
+    if not free:
+        return None
+    a, b = max(free, key=lambda ab: ab[1] - ab[0])
+    if b - a < 1e-6:
+        return None
+    return np.array(substring(line, a, b).coords, float)
+
+
+def _reach(road, P, S, hw):
+    """How far the road reaches from P along S, up to hw (mask pixels)."""
+    from shapely.geometry import LineString, Point
+    seg = road.intersection(LineString([P, P + S * hw]))
+    p0 = Point(P)
+    for g in (seg.geoms if hasattr(seg, "geoms") else [seg]):
+        if g.geom_type == "LineString" and not g.is_empty and g.distance(p0) < 1e-6:
+            return g.length
+    return 0.0
+
+
+def _inner_band(mesh, sid, pts, side, arc, hw, layout, road, mpp, scale, max_gap_m=1.0):
+    """
+    An inner street's road along its centreline, as a street of its own (owner
+    sid): one quad across, a row at each point of the line, at least every
+    max_gap_m, and just inside each end of its dashes' run, so painted markings
+    (app/model3d.py) can lie in it as they do in any street. Each row reaches
+    hw to either side, or as far as the street's exact road (road) does, so it
+    never shows beyond it; that shape is laid underneath too, so the corners
+    and junctions around it stay as drawn.
+    """
+    L = arc[-1] * mpp
+    at = set(np.round(arc * mpp, 6))
+    start = layout["setback_m"] - (1 - layout["share"]) * layout["step_m"] + 0.05
+    stop = layout["setback_m"] + layout["n"] * layout["step_m"] - 0.05
+    at |= {a for a in (start, stop) if 0 < a < L}
+    a_sorted = sorted(at)
+    extra = []
+    for a, b in zip(a_sorted, a_sorted[1:]):
+        k = int(math.ceil((b - a) / max_gap_m))
+        extra += [a + (b - a) * j / k for j in range(1, k)]
+    A = np.array(sorted(at | set(extra)))                  # metres along
+    t = A / mpp
+    cx, cy = np.interp(t, arc, pts[:, 0]), np.interp(t, arc, pts[:, 1])
+    sx, sy = np.interp(t, arc, side[:, 0]), np.interp(t, arc, side[:, 1])
+    nrm = np.hypot(sx, sy)
+    nrm[nrm == 0] = 1
+    S = np.column_stack([sx / nrm, sy / nrm])
+    P = np.column_stack([cx, cy])
+    edge = 0.02 / mpp                                       # a hair inside the road's edge
+    rows, HW = [], []
+    for k in range(len(A)):
+        wl = max(min(hw, _reach(road, P[k], S[k], hw + edge) - edge), 0.0)
+        wr = max(min(hw, _reach(road, P[k], -S[k], hw + edge) - edge), 0.0)
+        rows.append([mesh.add((P[k, 0] + S[k, 0] * off) * scale, (P[k, 1] + S[k, 1] * off) * scale,
+                              (float(A[k]), -off * mpp), "open") for off in (wl, -wr)])
+        HW.append((wl + wr) / 2)
+    for k in range(len(rows) - 1):
+        mesh.quad((rows[k][0], rows[k][1], rows[k + 1][1], rows[k + 1][0]), "open", sid)
+    mesh.streets[sid] = {"pts": P, "arc": t, "rows": rows, "hw": np.array(HW), "side": S, "sw": {},
+                         "length_m": float(L), "dash": layout, "half_width_m": float(hw * mpp), "inner": True}
 
 
 def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg):
@@ -1273,6 +1395,8 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     blocks = list(blocks.geoms) if hasattr(blocks, "geoms") else [blocks]
     cen, cw = [], []
     for st in mesh.streets.values():
+        if st.get("inner"):
+            continue                                   # an inner street's marked road: not a street of the mask
         cen.append(st["pts"]); cw.append(2 * st["hw"])
     cen = np.vstack(cen) if cen else np.zeros((1, 2))
     cw = np.concatenate(cw) if cw else np.array([8.0])
@@ -1329,6 +1453,9 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             # the next road, narrowed on tight inside curves
             free = _free_space(mesh, K, nrm, maxd)
             w = np.minimum(target, free / 2)
+            # the same widths without the narrowing below, for an inner edge that
+            # follows the block round its corners (_open_inner), where nothing folds
+            w_rule = ndi.uniform_filter1d(ndi.minimum_filter1d(w, 5, mode="wrap"), 5, mode="wrap")
             for _ in range(12):
                 O = K + nrm * w[:, None]
                 dk = np.roll(K, -1, axis=0) - K
@@ -1356,13 +1483,14 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                 if keep[-1] != len(sub) - 1:
                     keep = np.append(keep, len(sub) - 1)
                 pts = sub[keep]
-                ws = np.array([w[i] if not on_frame[i] else w[idxs[1] if k == 0 else idxs[-2]]
-                               for k, i in enumerate(np.array(idxs)[keep])])
+                at = [i if not on_frame[i] else idxs[1] if k == 0 else idxs[-2]
+                      for k, i in enumerate(np.array(idxs)[keep])]
+                ws, wr = w[at], w_rule[at]
                 ns = nrm[np.array(idxs)[keep]]
                 run_len = float(np.sum(np.hypot(*np.diff(pts, axis=0).T))) * mpp
                 if run_len < cfg.get("min_run_m", 8.0):
                     continue
-                O = _open_inner(pts, ns, ws, blocks)
+                O = _open_inner(pts, ns, wr, blocks)
                 if O is None:
                     O = pts + ns * ws[:, None]
                 O[:, 0] = np.clip(O[:, 0], 0, W - 1.0)
@@ -1474,8 +1602,11 @@ def _runs_circular(ok):
 def _open_inner(pts, ns, ws, blocks):
     """
     The inner edge for an open run of sidewalk: the block beside it shrunk by
-    the sidewalk width, paired with the kerb points moving only forwards, so
-    rows cannot cross or leave gaps at corners. None if that is not possible.
+    the widest sidewalk, paired with the kerb points moving only forwards, so
+    rows cannot cross or leave gaps at corners, each row then cut to its own
+    width (ws). Round a corner of the block the rows fan out to the corner of
+    its shrunk edge, so the sidewalk keeps its width all round it instead of
+    tapering away. None if that is not possible.
     """
     from shapely.geometry import Point
     mid = len(pts) // 2
@@ -1483,14 +1614,19 @@ def _open_inner(pts, ns, ws, blocks):
     block = next((b for b in blocks if b.contains(probe)), None)
     if block is None:
         return None
-    w = float(np.median(ws))
+    w = float(np.max(ws))
     inner = block.buffer(-w, join_style=1)
     if inner.is_empty:
         return None
     parts = inner.geoms if hasattr(inner, "geoms") else [inner]
     target = Point(*(pts[mid] + ns[mid] * w))
-    part = min(parts, key=lambda g: g.distance(target))
-    ring = part.exterior
+    # the edge of the shrunk block along this kerb: its outline, or the outline of
+    # a hole in it (the block all round the street network has the network as its
+    # hole, so the kerbs facing it are an inner ring)
+    rings = [r for g in parts if g.geom_type == "Polygon" for r in [g.exterior] + list(g.interiors)]
+    if not rings:
+        return None
+    ring = min(rings, key=lambda r: r.distance(target))
     L = ring.length
     s = np.array([ring.project(Point(x, y)) for x, y in pts])
     u = np.unwrap(s * 2 * np.pi / L) * L / (2 * np.pi)
@@ -1502,7 +1638,9 @@ def _open_inner(pts, ns, ws, blocks):
     # a pairing that jumps far from the kerb means the shape was not simple here
     if np.any(np.hypot(*(O - pts).T) > 3 * w + 2):
         return None
-    return O
+    # each row cut to its own width: shortened towards the kerb, so rows that
+    # fan out to one corner still never cross
+    return pts + (O - pts) * (np.asarray(ws, float) / max(w, 1e-9))[:, None]
 
 
 

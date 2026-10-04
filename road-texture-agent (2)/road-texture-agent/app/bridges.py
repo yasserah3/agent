@@ -117,6 +117,8 @@ def plan(mesh, bridges, scale, mpp, height_m=5.0, ramp_m=120.0):
             # mask does not show, such as water. Take the street lying along it
             best = None
             for sid, st in mesh.streets.items():
+                if st.get("inner"):
+                    continue                           # inner streets' marked roads carry no bridges
                 inside = inside_rect(st["pts"], b)
                 if inside.sum() < 2:
                     continue

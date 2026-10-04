@@ -9,8 +9,8 @@ paved like the sidewalks.
 
 Per placement, on a fine grid (about 0.25 m) around it:
   1. the drawn cells; where one reaches the edge of the placement it continues
-     straight on to the nearest street, up to 50 m, unless it would cross an
-     object of any placement (else it stops there);
+     straight on to the nearest street, at either end, up to 200 m, unless it
+     would cross an object of any placement (else it stops there);
   2. the road of each drawn space is a straight strip down its middle, a
      sidewalk in from either side, along the space as drawn: a street across
      the rows runs straight on through each drawn junction, a street along
@@ -40,7 +40,7 @@ from scipy import ndimage as ndi
 from app import curves as CV
 from app import placements as PL
 
-REACH_M = 50.0      # how far an inner street goes on to meet a street
+REACH_M = 200.0     # how far an inner street goes on to meet a street
 FINE_M = 0.25       # the grid the streets are shaped on, at most this coarse
 SPECK_M2 = 40.0     # islands smaller than this, left between streets, become road
 ROAD_M = 6.0        # an inner street's road width before its sidewalks get any room (two lanes)
@@ -257,8 +257,9 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
     Drawn cells on the edge of the placement, continued straight on to the
     nearest street: (polygon in metres, reached, the cell, its side: front,
     back, left or right) per open edge. One that would cross an object
-    (objects_area: shapely, metres) stops at the edge instead. cache: the
-    rows' lines (app/curves.py row_line).
+    (objects_area: shapely, metres) stops at the edge instead, as does one
+    with no street straight ahead within REACH_M: then the polygon is why
+    not, "objects" or "far". cache: the rows' lines (app/curves.py row_line).
     """
     from shapely.geometry import Polygon
     rows = layout["rows"]
@@ -313,12 +314,12 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
                 hit = k * 0.5
                 break
         if hit is None:
-            out.append((None, False, c, side))
+            out.append(("far", False, c, side))
             continue
         far = hit + 1.0                                       # a little into the street, so they join
         poly = [tuple(A), tuple(B), tuple(B + d * far), tuple(A + d * far)]
         if objects_area is not None and Polygon(poly).intersection(objects_area).area > 0.5:
-            out.append((None, False, c, side))                # it would run through an object
+            out.append(("objects", False, c, side))           # it would run through an object
             continue
         out.append((poly, True, c, side))
     return out
@@ -473,6 +474,7 @@ def inner_streets(road, mpp, placements, objects, packages):
         roads = [width_of(c) - 2 * fit[c["id"]] for c in streets_]
         report.append({"placement": idx + 1, "name": name, "cells": len(sel),
                        "connected": sum(1 for _, ok, _, _ in ext if ok), "dead_ends": sum(1 for _, ok, _, _ in ext if not ok),
+                       "blocked": sum(1 for e, ok, _, _ in ext if not ok and e == "objects"), "reach_m": REACH_M,
                        "narrowed": len(narrowed), "sidewalk_m": sw, "road_m": road_m,
                        "sidewalk_min": round(min(narrowed), 2) if narrowed else sw,
                        "road_min": round(min(roads), 2) if roads else 0.0,

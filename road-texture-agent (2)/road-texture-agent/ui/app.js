@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-streets3';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-streets4';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -616,7 +616,10 @@ const UI_VERSION = '2026.10.04-streets3';   // must match VERSION in server.py
       (res.inner_streets || []).forEach(r => {
         if(r.problem){ log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.problem}.`, 'bad'); return; }
         log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.cells} space(s), ${r.road_m2} m² of road`
-          + (r.connected ? `, ${r.connected} joined to a street` : '') + (r.dead_ends ? `, ${r.dead_ends} edge(s) with no street within 50 m` : '') + '.');
+          + (r.connected ? `, ${r.connected} joined to a street` : '') + '.');
+        const far = (r.dead_ends || 0) - (r.blocked || 0);
+        if(far > 0) log(`    ${far} street end(s) at the edge of the placement have no street straight ahead within ${r.reach_m || 200} m: they end there.`, 'bad');
+        if(r.blocked) log(`    ${r.blocked} street end(s) at the edge of the placement would run through objects on the way to the street: they end there.`, 'bad');
         if(r.narrowed) log(`    ${r.narrowed} space(s) had less room than a ${r.road_m} m road and two ${r.sidewalk_m} m sidewalks: the road came first, the sidewalks were narrowed${r.sidewalk_min > 0 ? ` (down to ${r.sidewalk_min} m)` : ' or left out'}.`);
         if(r.thin) log(`    ${r.thin} street(s) are narrower than ${r.thin_m} m (3 pixels at this scale, the narrowest ${r.road_min} m): they show only faintly in the texture. The 3D model has them as drawn. Wider gaps give wider streets.`, 'bad');
         if(!r.road_m2) log('    No road came out of these spaces: check that they are drawn between objects and not under them.', 'bad');

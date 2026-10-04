@@ -518,6 +518,10 @@ and island:
 - **Same width rules**: 30% of the nearby road, 1.5 to 2.5 m, never more than
   half the space to the next road, and narrowed on the inside of tight curves
   until the outer edge no longer folds over.
+- **Full width round sharp corners**: where a block has a sharp corner, such as
+  where an inner street meets a main street, the sidewalk keeps its width all
+  the way round it and its inner edge turns a square corner, instead of
+  tapering to nothing at the corner.
 - **Runs to the image border**: where the kerb line meets the edge of the image,
   the sidewalk is carried right to it and cut there.
 - **No sidewalks** on highway interchanges (unchanged, for a later decision) or
@@ -848,8 +852,9 @@ street mask, so everything after it treats them like the main streets:
 - **Rounded corners** to the **Corner radius** (4 m by default, at most three
   sidewalk widths, never closer to an object than half a sidewalk).
 - **Joining the streets**: a street reaching the edge of the placement goes on
-  straight to the nearest street, up to 50 m, unless that would run through an
-  object of any placement; otherwise it ends at the edge.
+  straight to the nearest street, at both ends, up to 200 m, unless that would
+  run through an object of any placement; otherwise it ends at the edge, and
+  Generate says which ends did not join and why.
 - **Islands**: the areas between streets become islands, like any city block:
   raised to sidewalk height and paved like the sidewalks, the objects standing
   on them. Specks of island under 40 m² left between streets become road.
@@ -864,6 +869,9 @@ street mask, so everything after it treats them like the main streets:
   streets' kerbs are smoothed as before). With markings ticked, each street
   gets its dashes along its centre, running on past side streets and stopping
   where streets cross or end (a stretch too short for a dash gets none).
+  They follow the 3D panel's markings setting like the main streets' dashes:
+  strips, or painted into the road texture, each marked inner street then
+  carrying them in a strip of road down its middle that reaches its edges.
 
 After changing inner streets (or moving a placement that has them), press
 Generate again: the 3D export says so if you forget.
