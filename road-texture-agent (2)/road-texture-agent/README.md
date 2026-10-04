@@ -829,9 +829,12 @@ and curved, with even or random spaces.
 When you press **Generate**, the drawn streets become streets in a copy of the
 street mask, so everything after it treats them like the main streets:
 
-- **Road, kerbs and sidewalks**: the road runs down the middle of each space,
-  with a sidewalk of the **Sidewalk width** (2 m by default) between it and the
-  objects, wrapping round each object's corner on a curve. Where two full
+- **Road, kerbs and sidewalks**: the road is a straight strip down the middle
+  of each space, with a sidewalk of the **Sidewalk width** (2 m by default)
+  between it and the objects on either side. A street across the rows runs
+  straight on through each junction drawn on its way, and so does one along the
+  rows; at a T or a corner the street stops at the far side of the one it
+  meets, and the corners between them are rounded. Where two full
   sidewalks would leave less than a 3 m lane, they are narrowed so the road
   keeps a lane, or half of a space narrower than 6 m: every drawn street
   shows, however tight the objects (in a 2.5 m space, a 1.25 m road between
@@ -849,6 +852,12 @@ street mask, so everything after it treats them like the main streets:
   streets, as strips or painted in, whichever the 3D model is set to; untick it
   for inner streets with no markings at all.
 - Inner streets never run over an object, even where placements overlap.
+- **In the 3D model** the inner streets are laid exactly as drawn, not traced
+  back from the mask: straight edges, the kerb line and sidewalks along them,
+  islands with rounded corners, and where they meet a main street, a junction
+  like any other. With markings ticked, each street gets its dashes along its
+  centre between junctions (a stretch too short for a dash gets none, as on
+  the main streets).
 
 After changing inner streets (or moving a placement that has them), press
 Generate again: the 3D export says so if you forget.

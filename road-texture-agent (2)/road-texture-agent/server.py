@@ -50,7 +50,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-streets1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-streets2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1162,7 +1162,7 @@ def _inner_streets(rec, mpp):
     {"mask": the new mask's image record or None, "nomark": where they carry no
     markings, its file, a signature of what was added, and a report}.
     """
-    out = {"mask": None, "nomark": None, "nomark_path": None, "sig": None, "report": []}
+    out = {"mask": None, "nomark": None, "nomark_path": None, "sig": None, "report": [], "shapes": []}
     f = ARTIFACTS / f"scatter_{rec['id']}.json"
     if not f.exists():
         return out
@@ -1171,7 +1171,8 @@ def _inner_streets(rec, mpp):
         return out
     import hashlib
     gray = np.array(Image.open(rec["path"]).convert("L"))
-    add, nomark, out["report"] = ST.inner_streets(gray > 127, mpp, sc["placements"], sc["objects"], sc["packages"])
+    add, nomark, out["report"], out["shapes"] = ST.inner_streets(gray > 127, mpp, sc["placements"], sc["objects"],
+                                                                 sc["packages"])
     if not add.any():
         return out
     out["sig"] = hashlib.sha1(np.packbits(add).tobytes()).hexdigest()
@@ -1307,13 +1308,16 @@ def export3d(payload: dict):
     dash_cfg = dict(art["meta"].get("dashes") or {})
     if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
         dash_cfg["nomark"] = np.array(Image.open(art["meta"]["nomark"]).convert("L")) > 127
-    stale = None
+    stale, inner = None, None
     base = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
     if base:
-        now = _inner_streets(base, float(art["meta"]["scale"]))["sig"]
-        if now != art["meta"].get("streets_sig"):
+        streets_now = _inner_streets(base, float(art["meta"]["scale"]))
+        if streets_now["sig"] != art["meta"].get("streets_sig"):
             stale = ("the inner streets have changed since this was generated: press Generate again "
                      "to build them into the streets")
+        elif streets_now["shapes"] and base["id"] != rec["id"]:
+            # the inner streets as they were drawn, laid exactly; the other roads from the mask without them
+            inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
     try:
         if mode == "tiled":
             row = mem.latest_artifact("tileset")
@@ -1347,7 +1351,8 @@ def export3d(payload: dict):
                 scatter=_scatter_for_export(payload.get("scatter")),
                 bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
-                            "deck_m": float(payload.get("bridge_deck_m", 1.0))})
+                            "deck_m": float(payload.get("bridge_deck_m", 1.0))},
+                inner=inner)
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None
@@ -1361,7 +1366,7 @@ def export3d(payload: dict):
                 int(art["meta"].get("output_scale", 1)), out,
                 straightness=float(payload.get("straightness", 70)) / 100.0,
                 spacing_m=float(payload.get("spacing_m", 2.0)),
-                optimise=payload.get("mesh_detail") == "optimised")
+                optimise=payload.get("mesh_detail") == "optimised", inner=inner)
     except ValueError as e:
         raise HTTPException(400, str(e))
     aid = f"{gid}_glb"

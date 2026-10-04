@@ -136,10 +136,14 @@ def _kerbs(coverage, pts, side, guess):
 
 def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, across=2,
           divider_limit=J.DIVIDER_LIMIT_PX, coverage=None, kerb_band=False, dashes=None,
-          sidewalk=None, bridges=None, optimise=False):
+          sidewalk=None, bridges=None, optimise=False, exact=None):
     """
     gray_mask: the road mask at its own size (already smooth-thresholded is fine)
     scale:     texture size / mask size (the output scale)
+    exact:     roads given as exact shapes, laid as they are instead of traced:
+               the inner streets (app/streets.py), each {"road": shapely shape,
+               "lines": [(centreline points, half width)], "markings": bool} in
+               mask pixels. The mask then holds only the other roads.
     Returns the mesh in texture pixels, and a short report.
     """
     det = J.detect(gray_mask, divider_limit)
@@ -347,6 +351,27 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     holes = _cover_bare(mesh, coverage if coverage is not None else (gray_mask > 127).astype(float), scale)
     cov_mask = coverage if coverage is not None else (gray_mask > 127).astype(float)
     mesh.fill_polys = [_scale_poly(q, scale) for q in cluster_fill_polys(mesh.clusters, cov_mask, 1)]
+    # roads given exactly (the inner streets): laid as they are, so their straight
+    # edges stay straight in the kerb line and sidewalks, with their markings
+    # along their centrelines
+    exact_n = 0
+    for ex in exact or []:
+        road = ex["road"]
+        for g in (road.geoms if hasattr(road, "geoms") else [road]):
+            if g.geom_type == "Polygon" and not g.is_empty:
+                mesh.fill_polys.append(_scale_poly(g, scale))
+                exact_n += 1
+        if not (dashes and ex.get("markings")):
+            continue
+        for pts, hw in ex["lines"]:
+            pts = np.asarray(pts, float)
+            arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
+            tg = np.gradient(pts, axis=0)
+            tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
+            n0 = len(mesh.dashes)
+            _dash_strips(mesh, pts, np.column_stack([-tg[:, 1], tg[:, 0]]), arc, np.full(len(pts), float(hw)),
+                         mpp, scale, dashes)
+            mesh.dash_owner.extend([None] * (len(mesh.dashes) - n0))
     if mesh.sw_cfg and mesh.sw_mode == "kerb_line":
         _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_)
 
@@ -357,7 +382,7 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         "interchanges_flagged": len(flagged), "flagged": flagged, "crossings": crossings,
         "clusters": [{"centre": [round(c["centre"][0]), round(c["centre"][1])], "junctions": len(c["members"]),
                       "islands": c["islands"]} for c in clusters],
-        "straightness": round(s_, 2), "spacing_m": spacing_m,
+        "straightness": round(s_, 2), "spacing_m": spacing_m, "exact_shapes": exact_n,
     }
 
 

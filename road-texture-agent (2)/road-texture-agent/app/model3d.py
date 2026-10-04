@@ -252,16 +252,18 @@ def _extend_road_colour(tex_arr, coverage, px):
 
 
 def export_road_quads_glb(mask_path, texture_path, metres_per_pixel, output_scale, out_path,
-                          straightness=0.7, spacing_m=2.0, optimise=False):
+                          straightness=0.7, spacing_m=2.0, optimise=False, inner=None):
     """
     The road as quads with straightened edges. Each quad is written as two
     triangles split along the same diagonal, so Blender's Triangles to Quads
-    (Alt+J) joins every pair back into the quad it came from.
+    (Alt+J) joins every pair back into the quad it came from. inner: the inner
+    streets as exact shapes (see export_road_tiled_glb).
     """
     gray = np.array(Image.open(mask_path).convert("L"))
-    mask1, cov1 = prepare_mask(gray, 1)
+    exact = inner["shapes"] if inner and inner.get("shapes") else None
+    mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
     mesh, det, rep = QM.build(mask1, output_scale, metres_per_pixel, straightness, spacing_m,
-                              coverage=cov1, optimise=optimise)
+                              coverage=cov1, optimise=optimise, exact=exact)
 
     _, coverage = prepare_mask(gray, output_scale)
     H, W = coverage.shape
@@ -460,18 +462,22 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           output_scale, out_path, straightness=0.7, spacing_m=2.0,
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
-                          optimise=False, blocks=None, scatter=None):
+                          optimise=False, blocks=None, scatter=None, inner=None):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
+    inner: the inner streets as exact shapes, {"base_mask_path": the mask
+    without them, "shapes": app/streets.py's shapes}: the other roads are
+    built from the mask without them, and they are laid as they are.
     """
     from scipy.ndimage import map_coordinates
     gray = np.array(Image.open(mask_path).convert("L"))
-    mask1, cov1 = prepare_mask(gray, 1)
+    exact = inner["shapes"] if inner and inner.get("shapes") else None
+    mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
     mesh, det, rep = QM.build(mask1, output_scale, metres_per_pixel, straightness, spacing_m,
                               coverage=cov1, kerb_band=True, dashes=dash_cfg or {},
                               sidewalk=sidewalk if sidewalk and tileset["tiles"].get("sidewalk") else None,
-                              bridges=bridges or None, optimise=optimise)
+                              bridges=bridges or None, optimise=optimise, exact=exact)
     _, coverage = prepare_mask(gray, output_scale)
     H, W = coverage.shape
     mpp_out = metres_per_pixel / output_scale
