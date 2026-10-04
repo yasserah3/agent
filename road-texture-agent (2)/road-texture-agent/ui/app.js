@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-streets3';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -617,7 +617,8 @@ const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
         if(r.problem){ log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.problem}.`, 'bad'); return; }
         log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.cells} space(s), ${r.road_m2} m² of road`
           + (r.connected ? `, ${r.connected} joined to a street` : '') + (r.dead_ends ? `, ${r.dead_ends} edge(s) with no street within 50 m` : '') + '.');
-        if(r.narrowed) log(`    ${r.narrowed} space(s) had no room for a 3 m road between two ${r.sidewalk_m} m sidewalks: their sidewalks were narrowed (down to ${r.sidewalk_min} m) so the road shows.`);
+        if(r.narrowed) log(`    ${r.narrowed} space(s) had less room than a ${r.road_m} m road and two ${r.sidewalk_m} m sidewalks: the road came first, the sidewalks were narrowed${r.sidewalk_min > 0 ? ` (down to ${r.sidewalk_min} m)` : ' or left out'}.`);
+        if(r.thin) log(`    ${r.thin} street(s) are narrower than ${r.thin_m} m (3 pixels at this scale, the narrowest ${r.road_min} m): they show only faintly in the texture. The 3D model has them as drawn. Wider gaps give wider streets.`, 'bad');
         if(!r.road_m2) log('    No road came out of these spaces: check that they are drawn between objects and not under them.', 'bad');
       });
       log('Done. Use the layer buttons to see each part on its own.', 'ok');
@@ -1867,14 +1868,13 @@ const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
       poly.addEventListener('pointerenter', paint);
     });
   }
-  const streetsOf = p => ({ cells: [], sidewalk_m: 2, corner_m: 4, markings: true, ...(p.streets || {}) });
-  // a space's width across the street it makes, and the sidewalk it gets: as set
-  // while the road keeps a 3 m lane, else narrowed (as app/streets.py)
+  const streetsOf = p => ({ cells: [], sidewalk_m: 2, road_m: 6, corner_m: 4, markings: true, ...(p.streets || {}) });
+  // a space's width across the street it makes, and the sidewalk it gets: the road
+  // comes first, up to its road width, then the sidewalks (as app/streets.py)
   const spaceWidth = c => { const along = c.s[1] - c.s[0], across = c.o[1] - c.o[0]; return c.kind === 'x' ? along : c.kind === 'y' ? across : Math.min(along, across); };
-  function fittedSidewalk(sw, width){
+  function fittedSidewalk(sw, width, road){
     width = Math.max(width, 0);
-    const road = Math.max(width - 2 * sw, Math.min(3, width / 2));
-    return Math.min(sw, (width - road) / 2);
+    return Math.min(sw, (width - Math.min(road, width)) / 2);
   }
   addEventListener('pointerup', () => {
     if(S.gen.edit && S.gen.edit.paint){ S.gen.edit.paint = null; saveScatter(); }
@@ -1991,6 +1991,7 @@ const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
     $('#objEditBox').hidden = ed !== 'objects';
     const st = streetsOf(p);
     if(document.activeElement !== $('#stSidewalk')) $('#stSidewalk').value = st.sidewalk_m;
+    if(document.activeElement !== $('#stRoad')) $('#stRoad').value = st.road_m;
     if(document.activeElement !== $('#stCorner')) $('#stCorner').value = st.corner_m;
     $('#stMarkings').checked = !!st.markings;
     // a plant's random transform: the ranges, overlap, and what they do
@@ -2026,9 +2027,10 @@ const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
     if(st.cells.length && g0 && g0.layout){
       const drawn = cellsOf(g0.layout).filter(c => st.cells.includes(c.id) && c.kind !== 'j');
       if(drawn.length){
-        const w = Math.min(...drawn.map(spaceWidth)), f = fittedSidewalk(st.sidewalk_m, w);
-        stNote = ` The narrowest is ${w.toFixed(1)} m: a ${(w - 2*f).toFixed(1)} m road`
-          + (f < st.sidewalk_m ? ` between ${f.toFixed(2)} m sidewalks, narrowed to fit.` : ` between ${f} m sidewalks.`);
+        const w = Math.min(...drawn.map(spaceWidth)), f = fittedSidewalk(st.sidewalk_m, w, st.road_m), m = mppMask();
+        stNote = ` The narrowest is ${w.toFixed(1)} m: ${f > 0 ? `a ${(w - 2*f).toFixed(1)} m road between ${f.toFixed(f < st.sidewalk_m ? 2 : 1)} m sidewalks`
+          : `road from side to side, no room for sidewalks`}.`
+          + (w - 2*f < 3 * m ? ` Roads under ${(3 * m).toFixed(1)} m (3 pixels at this scale) show only faintly in the texture; the 3D model has them as drawn.` : '');
       }
     }
     $('#stInfo').textContent = st.cells.length
@@ -2094,7 +2096,7 @@ const UI_VERSION = '2026.10.04-streets2';   // must match VERSION in server.py
     }
     drawBridges();
   });
-  [['#stSidewalk', 'sidewalk_m', 0.5], ['#stCorner', 'corner_m', 0]].forEach(([id, key, lo]) => $(id).addEventListener('input', () => {
+  [['#stSidewalk', 'sidewalk_m', 0.5], ['#stRoad', 'road_m', 1], ['#stCorner', 'corner_m', 0]].forEach(([id, key, lo]) => $(id).addEventListener('input', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     p.streets = { ...streetsOf(p), [key]: Math.max(lo, +$(id).value || 0) };
     clearTimeout(gapTimer); gapTimer = setTimeout(saveScatter, 300);

@@ -14,14 +14,16 @@ Per placement, on a fine grid (about 0.25 m) around it:
   2. the road of each drawn space is a straight strip down its middle, a
      sidewalk in from either side, along the space as drawn: a street across
      the rows runs straight on through each drawn junction, a street along
-     the rows too, and the ones going on to a street keep their width. Where
-     full sidewalks would leave less road than a lane (3 m), the sidewalks are
-     narrowed: the road keeps a lane, or half of a space narrower than two
-     lanes, so every drawn street shows;
+     the rows too, and the ones going on to a street keep their width. The
+     road comes first: it gets its road width (6 m by default) before the
+     sidewalks get any room, then the sidewalks their width, and any more
+     space widens the road. A space narrower than the road is road from side
+     to side, so every drawn street shows, as wide as its space;
   3. the corners where streets meet are rounded to the corner radius, never
      closer to an object than half a sidewalk; specks of island left between
      streets, too small to stand on, become road;
-  4. back to the mask's own size, a pixel being road when at least half of it is.
+  4. back to the mask's own size, a pixel being road when at least half of it is,
+     and every street at least a pixel wide along its middle, so none breaks up.
 
 For the 3D model the same road also comes as exact shapes, the strips as
 drawn and the rounded corners, with the centreline of each street between
@@ -41,7 +43,8 @@ from app import placements as PL
 REACH_M = 50.0      # how far an inner street goes on to meet a street
 FINE_M = 0.25       # the grid the streets are shaped on, at most this coarse
 SPECK_M2 = 40.0     # islands smaller than this, left between streets, become road
-LANE_M = 3.0        # the road a narrow space keeps before its sidewalks are narrowed
+ROAD_M = 6.0        # an inner street's road width before its sidewalks get any room (two lanes)
+THIN_PX = 3.0       # roads narrower than this many mask pixels show only faintly in the texture
 
 
 def width_of(cell):
@@ -50,15 +53,14 @@ def width_of(cell):
     return along if cell["kind"] == "x" else across if cell["kind"] == "y" else min(along, across)
 
 
-def fitted_sidewalk(sw, width):
+def fitted_sidewalk(sw, width, road_m=ROAD_M):
     """
-    The sidewalk a space gets: as set while the road keeps at least a lane,
-    else narrower, so the road keeps a lane, or half the space when that is
-    narrower than two lanes.
+    The sidewalk a space gets. The road comes first: it takes its road width,
+    or the whole space when that is narrower; the sidewalks get their width
+    from what is left, or what there is; any more space widens the road.
     """
     width = max(width, 0.0)
-    road = max(width - 2 * sw, min(LANE_M, width / 2))
-    return min(sw, (width - road) / 2)
+    return min(sw, (width - min(road_m, width)) / 2)
 
 
 def _road_strips(layout, cache, sel, fit):
@@ -151,10 +153,11 @@ def _junction_bands(layout, cache, sel):
 
 def _centrelines(layout, cache, sel, fit, ext):
     """
-    The middle of each drawn street between junctions, for its markings:
-    (points in metres, road half-width in metres). A street runs on through a
-    drawn junction that no other street meets; one that ends at the edge and
-    goes on to a street takes its extension with it.
+    The middle of each drawn street, for its markings: (points in metres,
+    road half-width in metres). A street runs on through each drawn junction
+    it goes straight through, past a side street joining it, and stops where
+    two streets cross or where it ends; one that ends at the edge and goes on
+    to a street takes its extension with it.
     """
     sign = -1.0 if layout["flip"] else 1.0
     bands = _junction_bands(layout, cache, sel)
@@ -181,9 +184,11 @@ def _centrelines(layout, cache, sel, fit, ext):
     xs = sorted([c for c in sel if c["kind"] == "x"], key=lambda c: (c["row"], c["s"][0]))
     nxt = {}
     for jid, (across, along) in bands.items():
-        if along:
-            continue                                  # a crossing or a T: the street stops here
         j = byid[jid]
+        left = [i for i in along if abs(byid[i]["s"][1] - j["s"][0]) < 1e-6]
+        right = [i for i in along if abs(byid[i]["s"][0] - j["s"][1]) < 1e-6]
+        if left and right:
+            continue                                  # streets cross here: the markings stop
         up = [byid[i] for i in across if byid[i]["row"] == j["row"]]
         down = [byid[i] for i in across if byid[i]["row"] == j["row"] + 1]
         if len(up) == 1 and len(down) == 1:
@@ -210,9 +215,9 @@ def _centrelines(layout, cache, sel, fit, ext):
     ys = sorted([c for c in sel if c["kind"] == "y"], key=lambda c: (c["row"], c["s"][0]))
     nxt = {}
     for jid, (across, along) in bands.items():
-        if across:
-            continue
         j = byid[jid]
+        if any(byid[i]["row"] == j["row"] for i in across) and any(byid[i]["row"] == j["row"] + 1 for i in across):
+            continue                                  # streets cross here: the markings stop
         left = [byid[i] for i in along if abs(byid[i]["s"][1] - j["s"][0]) < 1e-6]
         right = [byid[i] for i in along if abs(byid[i]["s"][0] - j["s"][1]) < 1e-6]
         if len(left) == 1 and len(right) == 1:
@@ -364,9 +369,10 @@ def inner_streets(road, mpp, placements, objects, packages):
             report.append({"placement": idx + 1, "name": name, "problem": "its drawn spaces no longer exist"})
             continue
         sw = float(st.get("sidewalk_m", 2.0))
+        road_m = float(st.get("road_m", ROAD_M))
         radius = min(float(st.get("corner_m", 4.0)), 3.0 * sw)     # rounder would reach the objects
-        # each drawn space with its sidewalk: as set, or narrowed to fit the space
-        fit = {c["id"]: round(fitted_sidewalk(sw, width_of(c)), 3) for c in sel}
+        # each drawn space with its sidewalk: the road first, then the sidewalks
+        fit = {c["id"]: round(fitted_sidewalk(sw, width_of(c), road_m), 3) for c in sel}
         polys = [CV.cell_polygon(layout, c, 0.5, cache) for c in sel]
         ext = _edge_extensions(layout, cache, sel, all_cells, road, mpp, objects_area)
         polys += [e for e, ok, c, _ in ext if ok]
@@ -451,15 +457,25 @@ def inner_streets(road, mpp, placements, objects, packages):
         shape = sscale(shape, 1 / mpp, 1 / mpp, origin=(0, 0)).intersection(box(0, 0, W, H))
         lines = [(pts / mpp, hw / mpp) for pts, hw in _centrelines(layout, cache, sel, fit, ext)]
         shapes.append({"placement": idx + 1, "road": shape, "lines": lines, "markings": bool(st.get("markings", True))})
-        # 4. back to the mask's pixels
+        # 4. back to the mask's pixels, every street at least a pixel wide along its
+        # middle, so a street narrower than a pixel still runs unbroken
         block = R.reshape(y1 - y0, k, x1 - x0, k).mean(axis=(1, 3)) >= 0.5
+        if R.any():
+            from skimage.morphology import skeletonize
+            block |= skeletonize(R).reshape(y1 - y0, k, x1 - x0, k).any(axis=(1, 3))
         add[y0:y1, x0:x1] |= block
         if not st.get("markings", True):
             nomark[y0:y1, x0:x1] |= ndi.binary_dilation(block, iterations=1)
-        # spaces too narrow for a road between two full sidewalks: theirs were narrowed
-        narrowed = [fit[c["id"]] for c in sel if c["kind"] != "j" and fit[c["id"]] < sw]
+        # spaces with less room than the road and two sidewalks: their sidewalks were
+        # narrowed or left out; roads a few pixels wide show only faintly in the texture
+        streets_ = [c for c in sel if c["kind"] != "j"]
+        narrowed = [fit[c["id"]] for c in streets_ if fit[c["id"]] < sw]
+        roads = [width_of(c) - 2 * fit[c["id"]] for c in streets_]
         report.append({"placement": idx + 1, "name": name, "cells": len(sel),
                        "connected": sum(1 for _, ok, _, _ in ext if ok), "dead_ends": sum(1 for _, ok, _, _ in ext if not ok),
-                       "narrowed": len(narrowed), "sidewalk_m": sw, "sidewalk_min": round(min(narrowed), 2) if narrowed else sw,
+                       "narrowed": len(narrowed), "sidewalk_m": sw, "road_m": road_m,
+                       "sidewalk_min": round(min(narrowed), 2) if narrowed else sw,
+                       "road_min": round(min(roads), 2) if roads else 0.0,
+                       "thin": sum(1 for w in roads if w < THIN_PX * mpp), "thin_m": round(THIN_PX * mpp, 1),
                        "road_m2": round(float(block.sum()) * mpp * mpp, 1)})
     return add & ~road, nomark, report, shapes

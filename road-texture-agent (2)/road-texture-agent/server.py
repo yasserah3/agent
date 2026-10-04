@@ -50,7 +50,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-streets2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-streets3"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -911,6 +911,7 @@ def _placement_list(raw):
                 q["streets"] = {"cells": [c for c in map(str, st.get("cells") or [])
                                           if re.fullmatch(r"[xyj]\d{1,4}-\d{1,4}", c)][:5000],
                                 "sidewalk_m": min(10.0, max(0.5, float(st.get("sidewalk_m", 2.0)))),
+                                "road_m": min(30.0, max(1.0, float(st.get("road_m", 6.0)))),
                                 "corner_m": min(30.0, max(0.0, float(st.get("corner_m", 4.0)))),
                                 "markings": bool(st.get("markings", True))}
             # a curved placement: copies along the smooth line through these points;

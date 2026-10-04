@@ -355,6 +355,10 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     # edges stay straight in the kerb line and sidewalks, with their markings
     # along their centrelines
     exact_n = 0
+    if exact:
+        # their edges stay exactly where they are when the kerb line is smoothed
+        from shapely.ops import unary_union
+        mesh.exact_edges = unary_union([ex["road"].boundary for ex in exact if not ex["road"].is_empty])
     for ex in exact or []:
         road = ex["road"]
         for g in (road.geoms if hasattr(road, "geoms") else [road]):
@@ -1149,17 +1153,21 @@ def _road_surface(mesh):
     return unary_union([q.buffer(0.02) for q in polys]).buffer(-0.02)
 
 
-def _smooth_ring(P, frame_w, frame_h, iterations):
+def _smooth_ring(P, frame_w, frame_h, iterations, keep=None):
     """
     Straighten a closed kerb line the way the roads were straightened.
 
     Taubin smoothing: a step that pulls each point towards its neighbours and a
     slightly larger step back out. Wobble and pixel steps disappear, but a curve
     keeps its size, where plain smoothing would shrink islands a little every
-    pass. Points on the image border stay put, so the border stays straight.
+    pass. Points on the image border stay put, so the border stays straight, and
+    so do points on an exact edge (keep: an inner street's edge, already exact).
     """
     Q = P.copy()
     fixed = (Q[:, 0] < 0.6) | (Q[:, 1] < 0.6) | (Q[:, 0] > frame_w - 0.6) | (Q[:, 1] > frame_h - 0.6)
+    if keep is not None and not keep.is_empty:
+        import shapely
+        fixed |= shapely.dwithin(keep, shapely.points(Q), 0.05)
     for _ in range(iterations):
         for lam in (0.5, -0.53):
             avg = (np.roll(Q, 1, axis=0) + np.roll(Q, -1, axis=0)) / 2
@@ -1220,9 +1228,10 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     fine = max(0.35, 0.5 / mpp)                            # 0.5 m spacing for smoothing
     rings_out = []
     geoms = raw.geoms if hasattr(raw, "geoms") else [raw]
+    keep = getattr(mesh, "exact_edges", None)
     for g in geoms:
-        ext = _smooth_ring(_resample_ring(np.array(g.exterior.coords)[:-1] / scale, fine), W, H, iters)
-        holes = [_smooth_ring(_resample_ring(np.array(r.coords)[:-1] / scale, fine), W, H, iters)
+        ext = _smooth_ring(_resample_ring(np.array(g.exterior.coords)[:-1] / scale, fine), W, H, iters, keep)
+        holes = [_smooth_ring(_resample_ring(np.array(r.coords)[:-1] / scale, fine), W, H, iters, keep)
                  for r in g.interiors if r.length / scale > 4 * fine]
         q = Polygon(ext, [h for h in holes if len(h) >= 4])
         if not q.is_valid:
