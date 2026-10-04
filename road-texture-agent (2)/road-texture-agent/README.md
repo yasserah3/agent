@@ -818,6 +818,8 @@ objects split into cells:
 - **j**: a junction, the small cell where a space in a row meets the space
   between the rows.
 
+**Sidewalk width**, **Corner radius** and **Markings on inner streets** are
+under Draw inner streets, kept with the placement, whether drawing or not.
 Click a cell to make it a street (green), or press and drag across several;
 whatever the first cell becomes, the others do too, so the same drag can take
 streets back (grey). Press **Done drawing streets** (or Esc) to leave; outside
@@ -829,8 +831,12 @@ street mask, so everything after it treats them like the main streets:
 
 - **Road, kerbs and sidewalks**: the road runs down the middle of each space,
   with a sidewalk of the **Sidewalk width** (2 m by default) between it and the
-  objects, wrapping round each object's corner on a curve. A space needs room
-  for its road between two sidewalks; the console names spaces too narrow.
+  objects, wrapping round each object's corner on a curve. Where two full
+  sidewalks would leave less than a 3 m lane, they are narrowed so the road
+  keeps a lane, or half of a space narrower than 6 m: every drawn street
+  shows, however tight the objects (in a 2.5 m space, a 1.25 m road between
+  0.6 m sidewalks). The panel gives the narrowest space and the road it gets,
+  and Generate says which spaces had their sidewalks narrowed.
 - **Rounded corners** to the **Corner radius** (4 m by default, at most three
   sidewalk widths, never closer to an object than half a sidewalk).
 - **Joining the streets**: a street reaching the edge of the placement goes on

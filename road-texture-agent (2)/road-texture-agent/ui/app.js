@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-streets1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -617,7 +617,8 @@ const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
         if(r.problem){ log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.problem}.`, 'bad'); return; }
         log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.cells} space(s), ${r.road_m2} m² of road`
           + (r.connected ? `, ${r.connected} joined to a street` : '') + (r.dead_ends ? `, ${r.dead_ends} edge(s) with no street within 50 m` : '') + '.');
-        if(r.too_narrow) log(`    ${r.too_narrow} space(s) are too narrow for a road between two sidewalks: widen the gap, or make the sidewalks narrower.`, 'bad');
+        if(r.narrowed) log(`    ${r.narrowed} space(s) had no room for a 3 m road between two ${r.sidewalk_m} m sidewalks: their sidewalks were narrowed (down to ${r.sidewalk_min} m) so the road shows.`);
+        if(!r.road_m2) log('    No road came out of these spaces: check that they are drawn between objects and not under them.', 'bad');
       });
       log('Done. Use the layer buttons to see each part on its own.', 'ok');
       S.review = null;
@@ -1867,6 +1868,14 @@ const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
     });
   }
   const streetsOf = p => ({ cells: [], sidewalk_m: 2, corner_m: 4, markings: true, ...(p.streets || {}) });
+  // a space's width across the street it makes, and the sidewalk it gets: as set
+  // while the road keeps a 3 m lane, else narrowed (as app/streets.py)
+  const spaceWidth = c => { const along = c.s[1] - c.s[0], across = c.o[1] - c.o[0]; return c.kind === 'x' ? along : c.kind === 'y' ? across : Math.min(along, across); };
+  function fittedSidewalk(sw, width){
+    width = Math.max(width, 0);
+    const road = Math.max(width - 2 * sw, Math.min(3, width / 2));
+    return Math.min(sw, (width - road) / 2);
+  }
   addEventListener('pointerup', () => {
     if(S.gen.edit && S.gen.edit.paint){ S.gen.edit.paint = null; saveScatter(); }
   });
@@ -1984,8 +1993,6 @@ const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
     if(document.activeElement !== $('#stSidewalk')) $('#stSidewalk').value = st.sidewalk_m;
     if(document.activeElement !== $('#stCorner')) $('#stCorner').value = st.corner_m;
     $('#stMarkings').checked = !!st.markings;
-    $('#stInfo').textContent = st.cells.length
-      ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets${st.markings ? '' : ', without markings'}. Press Generate to build them.` : '';
     // a plant's random transform: the ranges, overlap, and what they do
     if(p.foliage){
       const jt = jitterSet(p);
@@ -2014,6 +2021,18 @@ const UI_VERSION = '2026.10.03-foliage1';   // must match VERSION in server.py
       + (turned ? `${turned} object${turned > 1 ? 's' : ''} turned on their own.` : '');
     const o = p.package ? null : objById(p.object), pk = p.package ? pkgById(p.package) : null;
     const g0 = placementGeom(p);
+    // the drawn streets, and the road the narrowest of them gets
+    let stNote = '';
+    if(st.cells.length && g0 && g0.layout){
+      const drawn = cellsOf(g0.layout).filter(c => st.cells.includes(c.id) && c.kind !== 'j');
+      if(drawn.length){
+        const w = Math.min(...drawn.map(spaceWidth)), f = fittedSidewalk(st.sidewalk_m, w);
+        stNote = ` The narrowest is ${w.toFixed(1)} m: a ${(w - 2*f).toFixed(1)} m road`
+          + (f < st.sidewalk_m ? ` between ${f.toFixed(2)} m sidewalks, narrowed to fit.` : ` between ${f} m sidewalks.`);
+      }
+    }
+    $('#stInfo').textContent = st.cells.length
+      ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets, ${st.markings ? 'with' : 'without'} markings.${stNote} Press Generate to build them.` : '';
     const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
     const curve = isCurve(p);
     $('#plTitle').textContent = `${p.foliage ? 'Foliage placement' : 'Placement'} ${S.gen.plSel + 1}: `

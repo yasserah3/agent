@@ -14,7 +14,9 @@ Per placement, on a fine grid (about 0.25 m) around it:
   2. the road is that area kept a sidewalk's width away from everything that is
      not street (the objects, the spaces not drawn, the block around), so a
      sidewalk runs between road and objects and wraps round each object's
-     corner on a curve;
+     corner on a curve. Where full sidewalks would leave less road than a
+     lane (3 m), the sidewalks are narrowed: the road keeps a lane, or half
+     of a space narrower than two lanes, so every drawn street shows;
   3. the corners are rounded further to the corner radius, never closer to an
      object than half a sidewalk; specks of island left between streets, too
      small to stand on, become road;
@@ -33,14 +35,32 @@ from app import placements as PL
 REACH_M = 50.0      # how far an inner street goes on to meet a street
 FINE_M = 0.25       # the grid the streets are shaped on, at most this coarse
 SPECK_M2 = 40.0     # islands smaller than this, left between streets, become road
+LANE_M = 3.0        # the road a narrow space keeps before its sidewalks are narrowed
+
+
+def width_of(cell):
+    """A space's width across the street it makes: a junction, its narrower side."""
+    along, across = cell["s"][1] - cell["s"][0], cell["o"][1] - cell["o"][0]
+    return along if cell["kind"] == "x" else across if cell["kind"] == "y" else min(along, across)
+
+
+def fitted_sidewalk(sw, width):
+    """
+    The sidewalk a space gets: as set while the road keeps at least a lane,
+    else narrower, so the road keeps a lane, or half the space when that is
+    narrower than two lanes.
+    """
+    width = max(width, 0.0)
+    road = max(width - 2 * sw, min(LANE_M, width / 2))
+    return min(sw, (width - road) / 2)
 
 
 def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_area):
     """
     Drawn cells on the edge of the placement, continued straight on to the
-    nearest street: (polygon in metres, reached) per open edge. One that would
-    cross an object (objects_area: shapely, metres) stops at the edge instead.
-    cache: the rows' lines (app/curves.py row_line).
+    nearest street: (polygon in metres, reached, the cell) per open edge. One
+    that would cross an object (objects_area: shapely, metres) stops at the
+    edge instead. cache: the rows' lines (app/curves.py row_line).
     """
     from shapely.geometry import Polygon
     rows = layout["rows"]
@@ -72,9 +92,9 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
             v = frame(r, (s0 + s1) / 2)[2]                    # straight on, square to the row
             pa, pb = frame(r, s0), frame(r, s1)
             if r == 0:              # the front row: open towards the front
-                edges.append((pa[0] + pa[2] * o0, pb[0] + pb[2] * o0, -v))
+                edges.append((pa[0] + pa[2] * o0, pb[0] + pb[2] * o0, -v, c))
             if r == last:           # the back row: open towards the back
-                edges.append((pa[0] + pa[2] * o1, pb[0] + pb[2] * o1, v))
+                edges.append((pa[0] + pa[2] * o1, pb[0] + pb[2] * o1, v, c))
         else:
             # the space between two rows is open at its ends
             pair = c["id"][1:].split("-")[0]
@@ -82,12 +102,12 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
             lo, hi = min(x["s"][0] for x in same), max(x["s"][1] for x in same)
             if abs(s0 - lo) < 1e-6:
                 pos, t, v = frame(r, s0)
-                edges.append((pos + v * o0, far(r, s0, o1), -t))
+                edges.append((pos + v * o0, far(r, s0, o1), -t, c))
             if abs(s1 - hi) < 1e-6:
                 pos, t, v = frame(r, s1)
-                edges.append((pos + v * o0, far(r, s1, o1), t))
+                edges.append((pos + v * o0, far(r, s1, o1), t, c))
     out = []
-    for A, B, d in edges:
+    for A, B, d, c in edges:
         mid = (A + B) / 2
         hit = None
         for k in range(1, int(REACH_M / 0.5) + 1):
@@ -95,14 +115,14 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
                 hit = k * 0.5
                 break
         if hit is None:
-            out.append((None, False))
+            out.append((None, False, c))
             continue
         far = hit + 1.0                                       # a little into the street, so they join
         poly = [tuple(A), tuple(B), tuple(B + d * far), tuple(A + d * far)]
         if objects_area is not None and Polygon(poly).intersection(objects_area).area > 0.5:
-            out.append((None, False))                         # it would run through an object
+            out.append((None, False, c))                      # it would run through an object
             continue
-        out.append((poly, True))
+        out.append((poly, True, c))
     return out
 
 
@@ -150,12 +170,14 @@ def inner_streets(road, mpp, placements, objects, packages):
             continue
         sw = float(st.get("sidewalk_m", 2.0))
         radius = min(float(st.get("corner_m", 4.0)), 3.0 * sw)     # rounder would reach the objects
-        polys = [CV.cell_polygon(layout, c, 0.5, cache) for c in sel]
+        # each drawn space with its sidewalk: as set, or narrowed to fit the space
+        fit = {c["id"]: round(fitted_sidewalk(sw, width_of(c)), 3) for c in sel}
+        polys = [(CV.cell_polygon(layout, c, 0.5, cache), fit[c["id"]]) for c in sel]
         ext = _edge_extensions(layout, cache, sel, all_cells, road, mpp, objects_area)
-        polys += [e for e, ok in ext if ok]
+        polys += [(e, fit[c["id"]]) for e, ok, c in ext if ok]   # an extension, as the space it continues
 
         # the window: the drawn streets with room around them, on the mask's pixel grid
-        pts = np.array([q for poly in polys for q in poly]) / mpp
+        pts = np.array([q for poly, _ in polys for q in poly]) / mpp
         margin = (sw + radius + 3.0) / mpp
         x0 = int(max(0, math.floor(pts[:, 0].min() - margin)))
         y0 = int(max(0, math.floor(pts[:, 1].min() - margin)))
@@ -173,12 +195,18 @@ def inner_streets(road, mpp, placements, objects, packages):
             return np.array(img, bool)
 
         O = raster(all_feet)                                  # every placement's objects
-        C = raster(polys) & ~O                                # the drawn streets and their extensions,
-                                                              # never over an object (placements may overlap)
+        # the drawn streets and their extensions, never over an object (placements
+        # may overlap), by the sidewalk they get
+        parts = {w: raster([poly for poly, f in polys if f == w]) & ~O for w in sorted({f for _, f in polys})}
+        C = np.zeros((fh, fw), bool)
+        for part in parts.values():
+            C |= part
         M = np.repeat(np.repeat(road[y0:y1, x0:x1], k, 0), k, 1)   # the streets already there
         # 2. a sidewalk's width away from everything that is not street
         inside = ndi.distance_transform_edt(C | M) * fr
-        R = C & (inside >= sw)
+        R = np.zeros_like(C)
+        for w, part in parts.items():
+            R |= part & (inside >= w)
         # 3. corners rounded to the radius: the street network closed by it,
         # added only near the drawn streets and never near the objects
         if radius > 0 and R.any():
@@ -205,10 +233,10 @@ def inner_streets(road, mpp, placements, objects, packages):
         add[y0:y1, x0:x1] |= block
         if not st.get("markings", True):
             nomark[y0:y1, x0:x1] |= ndi.binary_dilation(block, iterations=1)
-        # a street needs room for its road between two sidewalks
-        narrow = sum(1 for c in sel if c["kind"] != "j" and
-                     (c["s"][1] - c["s"][0] if c["kind"] == "x" else c["o"][1] - c["o"][0]) < 2 * sw + 2.0)
+        # spaces too narrow for a road between two full sidewalks: theirs were narrowed
+        narrowed = [fit[c["id"]] for c in sel if c["kind"] != "j" and fit[c["id"]] < sw]
         report.append({"placement": idx + 1, "name": name, "cells": len(sel),
-                       "connected": sum(1 for _, ok in ext if ok), "dead_ends": sum(1 for _, ok in ext if not ok),
-                       "too_narrow": narrow, "road_m2": round(float(block.sum()) * mpp * mpp, 1)})
+                       "connected": sum(1 for _, ok, _ in ext if ok), "dead_ends": sum(1 for _, ok, _ in ext if not ok),
+                       "narrowed": len(narrowed), "sidewalk_m": sw, "sidewalk_min": round(min(narrowed), 2) if narrowed else sw,
+                       "road_m2": round(float(block.sum()) * mpp * mpp, 1)})
     return add & ~road, nomark, report
