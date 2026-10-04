@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -39,6 +39,7 @@ from app import images as I
 from app import generation as G
 from app import junctions as J
 from app import model3d as M3
+from app import library as LIB
 from app import tiles as TL
 from app import objects as OB
 from app import quadmesh as QMB
@@ -50,7 +51,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-materials1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-materials2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -646,6 +647,56 @@ def delete_pair(pair_id: str):
                {"pair_id": pair_id})
     rebuilt = _rebuild_libraries("pair deleted")
     return {"ok": True, "deleted": pair_id, "rebuilt": rebuilt}
+
+
+# the parts a library material can stand in for, and the tiles each replaces
+MATERIAL_PARTS = {"street": ("open", "edge", "junction"), "sidewalk": ("sidewalk",), "kerb": ("kerbstone",)}
+
+
+def _apply_materials(tileset, choice, match_tone):
+    """
+    Put the chosen library materials (app/scans) in place of the trained tiles:
+    for each part (street, sidewalk, kerb) its id, or "tiles" to keep yours.
+    With match_tone, a material's colour takes on the mean colour of the tile it
+    replaces. Returns {part: material name} for what was replaced.
+    """
+    used = {}
+    tile_m = float(tileset["settings"]["tile_m"])
+    px = int(tileset["settings"].get("px", 1024))
+    for part, tile_parts in MATERIAL_PARTS.items():
+        mid = choice.get(part)
+        if not mid or mid == "tiles":
+            continue
+        e = LIB.entry(mid)
+        if not e or e["kind"] not in LIB.KINDS_FOR_PART[part]:
+            raise ValueError(f"{mid} is not a {part} material in the library")
+        own = next((tileset["tiles"][t][0] for t in tile_parts if tileset["tiles"].get(t)), None)
+        if own is None and part == "kerb":
+            own = (tileset["tiles"].get("sidewalk") or [None])[0]
+        tone = None
+        if match_tone and own is not None:
+            tone = np.asarray(Image.open(own["path"]).convert("RGB")).reshape(-1, 3).mean(axis=0).tolist()
+        rec = LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone)
+        for t in tile_parts:
+            tileset["tiles"][t] = [rec]
+        used[part] = e["name"] + (" (toned to your tiles)" if tone is not None else "")
+    return used
+
+
+@app.get("/api/materials")
+def list_materials():
+    """The scanned material library: what each part (street, sidewalk, kerb) can use."""
+    return {"parts": {p: list(k) for p, k in LIB.KINDS_FOR_PART.items()},
+            "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence")}
+                          for e in LIB.materials()]}
+
+
+@app.get("/api/materials/{mid}/thumb")
+def material_thumb(mid: str):
+    data = LIB.thumbnail(mid)
+    if data is None:
+        raise HTTPException(404, "no such material")
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
 
 def _surface_choice(v):
@@ -1337,6 +1388,8 @@ def export3d(payload: dict):
             for part, lst in tileset["tiles"].items():
                 for tile in lst:
                     tile["path"] = mem.artifact(tile["id"])["path"]
+            used_materials = _apply_materials(tileset, payload.get("materials") or {},
+                                              bool(payload.get("match_tone", True)))
             markings = mem.artifact(f"{gid}_markings")
             info = M3.export_road_tiled_glb(
                 rec["path"], result["path"], markings["path"] if markings else None, tileset,
@@ -1365,6 +1418,7 @@ def export3d(payload: dict):
                 inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")))
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
+            info["materials_used"] = used_materials
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None
         elif mode == "traced":
             info = M3.export_road_glb(rec["path"], result["path"], float(art["meta"]["scale"]),

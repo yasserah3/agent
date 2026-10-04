@@ -4,26 +4,25 @@ and a roughness map, worked out from each tile's own grain, so the sun and the
 street lamps catch the surface, in the 3D tab, the photo render and in Blender
 or any glTF viewer.
 
-Two sources:
-- scanned: measured bump and roughness of real asphalt and concrete (CC0
-  scans in app/scans, see its README), laid over the tile at their real size.
-  Only for surfaces without a pattern of their own (asphalt, plain concrete):
-  the joints of paving must line up with the paving in the colour, so paving
-  always uses its own grain.
+Three sources:
+- the tile's own: a material from the scanned library (app/library.py) comes
+  with its own measured bump and roughness, made with its colour so they line
+  up exactly.
+- scanned over your tiles: the library's default scan for asphalt and for
+  concrete, laid over the tile at its real size. Only for surfaces without a
+  pattern of their own: the joints of paving must line up with the paving in
+  the colour, so paving uses its own grain.
 - grain: worked out from the tile's own colour. The bump comes from the fine
   grain only, the pores and stones a few millimetres across: lighter grain
   stands proud, darker sinks. Larger tone changes (stains, patches, wear) are
   not relief and are left out; their edges are softened so a stain does not
   grow a rim. The roughness follows the tone gently (lighter, polished parts a
   little smoother).
-Either way, road paint found in the colour is smoother than the road and
+Whatever the source, road paint found in the colour is smoother than the road and
 slightly raised at its edges.
 """
 import hashlib
 import io
-import json
-import os
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -40,7 +39,6 @@ PAINT_ROUGH = 0.55          # road paint: smoother than asphalt
 PAINT_THICK_M = 0.0004      # its thickness, a slight step at its edges
 GRAIN_M = 0.007             # the grain: features finer than about this
 SCAN_KINDS = ("asphalt", "concrete")   # kinds a scan may stand in for (no pattern of their own)
-SCANS_DIR = Path(os.environ.get("RTA_SCANS") or Path(__file__).with_name("scans"))
 
 _cache = {}
 _scans = {}
@@ -48,26 +46,29 @@ _scans = {}
 
 def scan_for(kind):
     """
-    The scanned maps bundled for a kind of surface, or None: app/scans/<kind>.json
-    names the normal map (OpenGL convention, as glTF), the roughness map, the size
-    they cover in metres and where they come from.
+    The library's default scan for a kind of surface (app/scans/library.json,
+    the entry marked bump_default), or None: its normal map (OpenGL convention,
+    as glTF), roughness, the size it covers in metres and its name.
     """
     if kind not in SCAN_KINDS:
         return None
-    meta_path = SCANS_DIR / f"{kind}.json"
-    if not meta_path.exists():
+    from app import library as LIB
+    e = LIB.default_for(kind)
+    if not e:
         return None
-    stamp = meta_path.stat().st_mtime
+    files = [LIB.DIR / e["normal"], LIB.DIR / e["roughness"]]
+    if not all(f.exists() for f in files):
+        return None
+    stamp = (e["id"], tuple(f.stat().st_mtime for f in files))
     hit = _scans.get(kind)
     if hit and hit["stamp"] == stamp:
         return hit
-    meta = json.loads(meta_path.read_text())
-    nrm = np.asarray(Image.open(SCANS_DIR / meta["normal"]).convert("RGB")).astype(np.float32) / 127.5 - 1.0
-    rgh = np.asarray(Image.open(SCANS_DIR / meta["roughness"]).convert("L")).astype(np.float32) / 255.0
+    nrm = np.asarray(Image.open(files[0]).convert("RGB")).astype(np.float32) / 127.5 - 1.0
+    rgh = np.asarray(Image.open(files[1]).convert("L")).astype(np.float32) / 255.0
     if nrm.shape[:2] != rgh.shape:
         rgh = np.asarray(Image.fromarray(rgh).resize((nrm.shape[1], nrm.shape[0]), Image.BILINEAR))
-    hit = {"stamp": stamp, "normal": nrm, "rough": rgh, "size_m": [float(v) for v in meta["size_m"]],
-           "name": meta.get("name", kind), "source": meta.get("source", "")}
+    hit = {"stamp": stamp, "normal": nrm, "rough": rgh, "size_m": [float(v) for v in e["size_m"]],
+           "name": e["name"], "source": e.get("source", "")}
     _scans[kind] = hit
     return hit
 
@@ -96,7 +97,7 @@ def _scan_layer(scan, size_m, w_px, h_px):
     return -n[..., 0] / nz * fx, n[..., 1] / nz * fy, np.clip(r, 0.02, 1.0)
 
 
-def maps(img, size_m, kind="asphalt", quality=90, source="scan"):
+def maps(img, size_m, kind="asphalt", quality=90, source="scan", own=None):
     """
     The normal map and the roughness map of a tile, as JPEG bytes, and what they
     came from ("scan: <name>" or "grain").
@@ -104,14 +105,21 @@ def maps(img, size_m, kind="asphalt", quality=90, source="scan"):
     img: the tile (PIL image), repeating seamlessly; size_m: (width, height)
     it covers in metres; kind: one of KINDS; source: "scan" uses a bundled scan
     where there is one for the kind, else the tile's grain; "grain" always the
-    grain. Normal map: glTF's convention (+X right, +Y up in the picture, +Z out
-    of the surface). Roughness: in the green channel as glTF's metallicRoughness
-    texture wants it (grey picture).
+    grain. own: the tile's own (normal, roughness, name) pictures, made with
+    its colour (library materials): used whatever the source. Normal map:
+    glTF's convention (+X right, +Y up in the picture, +Z out of the surface).
+    Roughness: in the green channel as glTF's metallicRoughness texture wants
+    it (grey picture).
     """
     rgb = np.asarray(img.convert("RGB"))
-    scan = scan_for(kind) if source == "scan" else None
+    scan = scan_for(kind) if source == "scan" and own is None else None
+    own_key = None
+    if own is not None:
+        own_n = np.asarray(own[0].convert("RGB"))
+        own_r = np.asarray(own[1].convert("L"))
+        own_key = (hashlib.sha1(own_n.tobytes() + own_r.tobytes()).hexdigest(), own[2])
     key = (hashlib.sha1(rgb.tobytes()).hexdigest(), rgb.shape, tuple(round(float(s), 4) for s in size_m), kind, quality,
-           (scan["name"], scan["stamp"]) if scan else None)
+           (scan["name"], scan["stamp"]) if scan else None, own_key)
     if key in _cache:
         return _cache[key]
     k = KINDS[kind]
@@ -136,7 +144,18 @@ def maps(img, size_m, kind="asphalt", quality=90, source="scan"):
 
     # the paint's own edge: a slight step
     pdx, pdy = slopes(paint * PAINT_THICK_M)
-    if scan:
+    if own is not None:
+        # the material's own measured relief and roughness, made with its colour
+        if own_n.shape[:2] != (h_px, w_px):
+            own_n = np.asarray(Image.fromarray(own_n).resize((w_px, h_px), Image.BILINEAR))
+            own_r = np.asarray(Image.fromarray(own_r).resize((w_px, h_px), Image.BILINEAR))
+        on = own_n.astype(np.float32) / 127.5 - 1.0
+        onz = np.maximum(on[..., 2], 0.05)
+        odx, ody = -on[..., 0] / onz, on[..., 1] / onz
+        dx, dy_down = odx * (1.0 - 0.8 * paint) + pdx, ody * (1.0 - 0.8 * paint) + pdy
+        rough = own_r.astype(np.float32) / 255.0
+        used = "scan: " + own[2]
+    elif scan:
         # measured relief and roughness, flattened under paint (paint fills the pores)
         sdx, sdy, rough = _scan_layer(scan, size_m, w_px, h_px)
         dx, dy_down = sdx * (1.0 - 0.8 * paint) + pdx, sdy * (1.0 - 0.8 * paint) + pdy

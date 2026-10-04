@@ -443,6 +443,8 @@ app/junctions.py     junction detection and classification
 app/curves.py        placements' maths: curves and curve lines, mirroring, alignment, packages, random spaces, ids, space cells
 app/placements.py    where each copy of a placement goes, for the 3D model and inner streets
 app/streets.py       inner streets drawn between objects, built into the street mask
+app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
+app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
@@ -618,29 +620,65 @@ Rarely, an update changes what is measured during training; the update notes
 say so when it happens, usually for specific pairs only. When tiles change,
 press Rebuild tiles once in the Memory tab.
 
+## Street, sidewalk and kerb materials
+
+Under 3D model, three pickers choose what each part is made of:
+
+- **Street surface**, **Sidewalk surface**, **Kerb surface**: *Your tiles*
+  (the material tiles built from your training, as before) or a **scanned
+  material** from the bundled library (`app/scans`): real surfaces scanned
+  by Poly Haven, free to use (CC0), each with its own measured colour, bump
+  and roughness. A small preview shows the one chosen.
+  - Streets: three asphalts (fine grey, new and dark, old and worn).
+  - Sidewalks: four pavings (grey blocks, square slabs, hexagons, red brick),
+    the concretes or the asphalts. Blocks and islands use the sidewalk's.
+  - Kerbs: two concretes (exposed aggregate, brushed). Bridge decks use it too.
+- A scanned material's colour, bump and roughness are laid over the 4 m
+  material tile together: repeated a whole number of times each way (a 2 m
+  scan twice), stretched by the little it takes to fit, all three the same
+  way, so **every stone and joint has its bump exactly on it**. Checked: the
+  colour's edges and the bump line up at zero pixels of offset, on the tiles
+  and on the painted-dash textures made from them.
+- **Match the tone of your tiles** (on by default): a scanned material takes
+  on the mean colour of the tile it replaces, so it fits the generated
+  texture. The large-scale variation (stains, wear) still comes from your
+  generated texture either way. Untick it for the material's own colour.
+- Painted dashes are painted on the scanned asphalt too, smoother and
+  slightly raised.
+- The export log names the materials used. Each material in the GLB also
+  records where its bump came from (glTF extras).
+
 ## Surface detail
 
-Under 3D model, **Surface detail** (on by default) gives every road, sidewalk,
-kerb, block and bridge material a bump map and a roughness map, worked out
-from the grain of its own material tile (`app/surface.py`), so the sun and the
-lamps catch the surface: the asphalt's stones and pores, the joints of paving.
+Under 3D model, **Surface detail** gives every road, sidewalk, kerb, block
+and bridge material a bump map and a roughness map, so the sun and the lamps
+catch the surface: the asphalt's stones and pores, the joints of paving.
 
-- The bump comes from the fine grain only: details up to about 7 mm, about
-  0.8 mm deep on asphalt. Lighter grain stands proud, darker sinks. Larger
-  changes of tone (stains, patches, wear) are not relief and are left out,
-  and their edges are softened so a stain does not grow a rim.
-- Roughness follows the tone gently: asphalt about 0.86, a little smoother
-  where it is lighter. Paving is about 0.78 and concrete kerbs 0.80. Road
-  paint is smoother at 0.55 (also the paint strips), and painted dashes have
-  a slight raised edge.
+- **Scanned** (the default): scanned materials use their own measured maps.
+  Your own tiles get the library's scanned bump and roughness where they have
+  no pattern of their own (asphalt: the fine grey asphalt; plain concrete:
+  the exposed-aggregate concrete), laid at the scan's real size. Its stones
+  do not line up with the stones in your tile's colour; from street height
+  that is hard to see. Paving tiles never take a scan, since its joints
+  would fall in the wrong places: they use their own grain.
+- **From each tile's grain**: your tiles' maps are worked out from their own
+  colour (`app/surface.py`): the bump from the fine grain only, details up to
+  about 7 mm, about 0.8 mm deep on asphalt, lighter grain proud and darker
+  sunk; larger changes of tone (stains, patches, wear) are not relief and are
+  left out, their edges softened so a stain does not grow a rim. Roughness
+  follows the tone gently: asphalt about 0.86, paving 0.78, concrete 0.80.
+  An estimate from the colour, lined up with it, not a measurement.
+- **Off**: colour only, a smaller file.
+- Road paint is smoother (0.55, also the paint strips) and painted dashes have
+  a slight raised edge, whatever the source.
 - The maps go into the GLB as standard glTF normal and metallic-roughness
   textures, with tangents, so Blender, the 3D tab and the photo render all
   read them the same way. This was checked with raised test dots lit from the
   east and from the north: the side facing the light is brighter in three.js,
   in the path tracer and in Blender 5.
-- Pictures used by several materials are now stored once in the GLB. In a
-  990 × 770 m test the model is 5.1 MB with surface detail and 2.2 MB without
-  (2.9 MB before). Untick Surface detail for colour only and a smaller file.
+- Pictures used by several materials are stored once in the GLB. In a
+  990 × 770 m test the model is about 3.4 to 5 MB with surface detail and
+  2.2 MB without.
 
 ## Blocks and islands
 
@@ -1070,6 +1108,8 @@ needs installing:
   `ui/sky_blender.js` (MIT, and Apache 2.0 for Cycles' sky lookup);
 - `oidn`: Open Image Denoise's trained weights (Apache 2.0), run by
   `ui/denoise.js`, a port of OIDN 2.4's network (Apache 2.0).
+- `app/scans` (server side): nine scanned materials from Poly Haven, CC0
+  (public domain), listed with their authors in `app/scans/README.md`.
 
 A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox or
 Safari); the photo render and its denoising are much faster on a real

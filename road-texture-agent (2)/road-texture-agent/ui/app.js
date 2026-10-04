@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-materials2';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -50,6 +50,7 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
         log('This workspace is new and empty. If you expected your earlier training, stop the server and copy your old workspace folder here, or put its path in workspace.txt next to server.py.', 'bad');
       renderMemory();
       try{ S.corrections = (await api('/api/corrections')).corrections; }catch(_){}
+      loadMaterials();
     }catch(e){
       $('.engine').innerHTML = '<i style="background:var(--red)"></i>Server not running';
       log('No server. Start it with: python server.py', 'bad');
@@ -57,6 +58,30 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
   }
 
   $('#uiVersion').textContent = 'v' + UI_VERSION;
+
+  // the scanned material library (app/scans): what streets, sidewalks and kerbs can use
+  async function loadMaterials(){
+    let lib;
+    try{ lib = await api('/api/materials'); }catch(_){ return; }
+    const kindName = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete' };
+    for(const [id, part] of [['#matStreet', 'street'], ['#matSidewalk', 'sidewalk'], ['#matKerb', 'kerb']]){
+      const sel = $(id), kinds = lib.parts[part] || [];
+      for(const kind of kinds){
+        const group = document.createElement('optgroup');
+        group.label = `Scanned ${(kindName[kind] || kind).toLowerCase()}`;
+        for(const m of lib.materials.filter(m => m.kind === kind)){
+          const o = document.createElement('option');
+          o.value = m.id; o.textContent = m.name;
+          o.title = `${m.title} by ${(m.authors || []).join(', ')}, Poly Haven, ${m.licence}; ${m.size_m[0]} m across`;
+          group.appendChild(o);
+        }
+        if(group.children.length) sel.appendChild(group);
+      }
+      const thumb = $(id + 'Thumb');
+      const show = () => { const v = sel.value; thumb.style.visibility = v === 'tiles' ? 'hidden' : 'visible'; if(v !== 'tiles') thumb.src = API + `/api/materials/${v}/thumb`; };
+      sel.addEventListener('change', show); show();
+    }
+  }
 
   /* ------------------------------------------------ tabs */
   $$('.tab').forEach(t => t.addEventListener('click', () => {
@@ -654,6 +679,8 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
           mesh_detail: $('#meshDetail').value,
           blocks: $('#blocksOn').checked,
           surface_detail: $('#surfDetail').value,
+          materials: { street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value },
+          match_tone: $('#matTone').checked,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
@@ -693,6 +720,8 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
             + `${res.marked_textures.length} marked texture(s) (${res.marked_textures.map(m => m.width_cm + ' cm lines').join(', ')}).`
             + (res.strip_dashes ? ` ${res.strip_dashes} dashes on bridge crossings stay as strips.` : ''));
         else log(`  Markings: ${res.dashes} dashes as separate strips.`);
+        if(res.materials_used && Object.keys(res.materials_used).length)
+          log('  Scanned materials: ' + Object.entries(res.materials_used).map(([p, n]) => `${p} ${n}`).join(', ') + '.', 'ok');
         if(res.surface && res.surface.length)
           log(`  Surface detail (bump and roughness): ${res.surface.map(s => s === 'grain' ? 'from the tiles\' grain' : s.replace(/^scan: /, 'scanned ')).join(', ')}.`);
         if(res.sidewalk) log(`  Sidewalks: ${res.sidewalk.top_quads.toLocaleString()} quads on top, raised ${Math.round(res.sidewalk.height_m*100)} cm, with ${res.sidewalk.kerb_faces.toLocaleString()} kerb faces.`);

@@ -1,0 +1,169 @@
+{
+  "materials": [
+    {
+      "id": "asphalt_pit_lane",
+      "name": "Asphalt, fine grey",
+      "kind": "asphalt",
+      "size_m": [
+        2.0,
+        2.0
+      ],
+      "colour": "asphalt_pit_lane_diff.jpg",
+      "normal": "asphalt_pit_lane_normal.jpg",
+      "roughness": "asphalt_pit_lane_rough.jpg",
+      "source": "https://polyhaven.com/a/asphalt_pit_lane",
+      "title": "Asphalt Pit Lane",
+      "authors": [
+        "Dimitrios Savva"
+      ],
+      "licence": "CC0 1.0",
+      "bump_default": "asphalt"
+    },
+    {
+      "id": "clean_asphalt",
+      "name": "Asphalt, new and dark",
+      "kind": "asphalt",
+      "size_m": [
+        2.1,
+        2.1
+      ],
+      "colour": "clean_asphalt_diff.jpg",
+      "normal": "clean_asphalt_normal.jpg",
+      "roughness": "clean_asphalt_rough.jpg",
+      "source": "https://polyhaven.com/a/clean_asphalt",
+      "title": "Clean Asphalt",
+      "authors": [
+        "Dimitrios Savva"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "asphalt_04",
+      "name": "Asphalt, old and worn",
+      "kind": "asphalt",
+      "size_m": [
+        4.04,
+        4.04
+      ],
+      "colour": "asphalt_04_diff.jpg",
+      "normal": "asphalt_04_normal.jpg",
+      "roughness": "asphalt_04_rough.jpg",
+      "source": "https://polyhaven.com/a/asphalt_04",
+      "title": "Asphalt 04",
+      "authors": [
+        "Jenelle van Heerden",
+        "Sergej Majboroda"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "concrete_pavers_02",
+      "name": "Concrete pavers, grey blocks",
+      "kind": "paving",
+      "size_m": [
+        2.0,
+        2.0
+      ],
+      "colour": "concrete_pavers_02_diff.jpg",
+      "normal": "concrete_pavers_02_normal.jpg",
+      "roughness": "concrete_pavers_02_rough.jpg",
+      "source": "https://polyhaven.com/a/concrete_pavers_02",
+      "title": "Concrete Pavers 02",
+      "authors": [
+        "Amal Kumar"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "square_concrete_pavers",
+      "name": "Square concrete slabs",
+      "kind": "paving",
+      "size_m": [
+        1.8,
+        1.8
+      ],
+      "colour": "square_concrete_pavers_diff.jpg",
+      "normal": "square_concrete_pavers_normal.jpg",
+      "roughness": "square_concrete_pavers_rough.jpg",
+      "source": "https://polyhaven.com/a/square_concrete_pavers",
+      "title": "Square Concrete Pavers",
+      "authors": [
+        "Amal Kumar"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hexagonal_concrete_paving",
+      "name": "Hexagonal concrete paving",
+      "kind": "paving",
+      "size_m": [
+        1.6,
+        1.6
+      ],
+      "colour": "hexagonal_concrete_paving_diff.jpg",
+      "normal": "hexagonal_concrete_paving_normal.jpg",
+      "roughness": "hexagonal_concrete_paving_rough.jpg",
+      "source": "https://polyhaven.com/a/hexagonal_concrete_paving",
+      "title": "Hexagonal Concrete Paving",
+      "authors": [
+        "Stephan Seeliger"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "brick_pavement",
+      "name": "Red brick pavement",
+      "kind": "paving",
+      "size_m": [
+        2.0,
+        2.0
+      ],
+      "colour": "brick_pavement_diff.jpg",
+      "normal": "brick_pavement_normal.jpg",
+      "roughness": "brick_pavement_rough.jpg",
+      "source": "https://polyhaven.com/a/brick_pavement",
+      "title": "Brick Pavement",
+      "authors": [
+        "Charlotte Baglioni"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "concrete_floor_01",
+      "name": "Concrete, exposed aggregate",
+      "kind": "concrete",
+      "size_m": [
+        2.0,
+        2.0
+      ],
+      "colour": "concrete_floor_01_diff.jpg",
+      "normal": "concrete_floor_01_normal.jpg",
+      "roughness": "concrete_floor_01_rough.jpg",
+      "source": "https://polyhaven.com/a/concrete_floor_01",
+      "title": "Concrete Floor 01",
+      "authors": [
+        "Rob Tuytel"
+      ],
+      "licence": "CC0 1.0",
+      "bump_default": "concrete"
+    },
+    {
+      "id": "brushed_concrete_03",
+      "name": "Concrete, brushed",
+      "kind": "concrete",
+      "size_m": [
+        2.0,
+        2.0
+      ],
+      "colour": "brushed_concrete_03_diff.jpg",
+      "normal": "brushed_concrete_03_normal.jpg",
+      "roughness": "brushed_concrete_03_rough.jpg",
+      "source": "https://polyhaven.com/a/brushed_concrete_03",
+      "title": "Brushed Concrete 03",
+      "authors": [
+        "Amal Kumar"
+      ],
+      "licence": "CC0 1.0"
+    }
+  ]
+}

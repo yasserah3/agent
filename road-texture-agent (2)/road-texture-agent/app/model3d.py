@@ -25,6 +25,7 @@ from shapely.geometry import Polygon
 
 from app.generation import prepare_mask
 from app import surface as SF
+from app import library as LIB
 from app import quadmesh as QM
 from app import placements as PL
 from scipy import ndimage as ndi
@@ -363,17 +364,23 @@ def _image_index(images, data, mime):
 
 
 def _sidewalk_kind(tile):
-    """Paving (a pattern whose joints must line up with the colour) or plain concrete."""
-    return "concrete" if (tile or {}).get("method") == "placeholder concrete" else "paving"
+    """Paving (a pattern whose joints must line up with the colour), plain concrete, or a library material's kind."""
+    tile = tile or {}
+    if tile.get("library"):
+        e = LIB.entry(tile["library"])
+        return e["kind"] if e else "paving"
+    return "concrete" if tile.get("method") == "placeholder concrete" else "paving"
 
 
-def tile_material(name, img, images, materials, size_m, kind, roughness, surface="scan"):
+def tile_material(name, img, images, materials, size_m, kind, roughness, surface="scan", own=None):
     """
     A material for a repeating tile: its colour, and with surface, the bump
     (normal map) and roughness (app/surface.py): "scan" from a bundled scan of
     the kind where there is one, else from the tile's grain; "grain" always from
-    the grain; False: colour only. size_m: the width and height the picture
-    covers; kind: asphalt, paving or concrete. Returns the material's index.
+    the grain; False: colour only. own: the tile's own (normal, roughness, name)
+    pictures, made with its colour (library materials), used unless surface is
+    off. size_m: the width and height the picture covers; kind: asphalt, paving
+    or concrete. Returns the material's index.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=92)
@@ -381,7 +388,7 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
            "metallicFactor": 0.0, "roughnessFactor": roughness}
     mat = {"name": name, "doubleSided": True, "pbrMetallicRoughness": pbr}
     if surface:
-        nrm, rgh, used = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan")
+        nrm, rgh, used = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan", own=own)
         mat["extras"] = {"surface": used}
         mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
         pbr["metallicRoughnessTexture"] = {"index": _image_index(images, rgh, "image/jpeg")}
@@ -612,6 +619,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     width_class = {"centres": []}
     marked = {}                  # width class (cm) -> index into the marked textures
     mark_tex = []
+    mark_own = {}                # width class -> the marked texture's own maps (library street material)
     E = None
     mark_size = None
     if painted:
@@ -632,6 +640,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                 img = marked_texture(tiles["open"][0]["path"], tile_m, cycle, share, E, w_cm / 100.0, paint_rgb)
                 marked[w_cm] = len(mark_tex)
                 mark_tex.append((w_cm, img))
+                mark_own[w_cm] = marked_maps(tiles["open"][0], tile_m, cycle, E)
 
     def mark_class(owner):
         st = mesh.streets.get(owner) if 0 < owner < 1_000_000 else None
@@ -672,11 +681,11 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     for (part, vk), quads in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
         if part == "marked":
             tile_material(f"Road_marked_{vk}cm", mark_tex[marked[vk]][1], images, materials,
-                          mark_size, "asphalt", 0.9, surface)
+                          mark_size, "asphalt", 0.9, surface, own=mark_own.get(vk))
         else:
             tile_material(f"Road_{'street' if part == 'open' else part}_{vk + 1}",
                           Image.open(tiles[part][vk]["path"]), images, materials,
-                          (tile_m, tile_m), "asphalt", 0.9, surface)
+                          (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles[part][vk]))
         remap, pos, uv, col, idx = {}, [], [], [], []
 
         def vid(vi, owner, qpart, _marked=(part == "marked")):
@@ -723,7 +732,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             dk = shapely.distance(ks.boundary, shapely.points(fv[:, 0], fv[:, 1])) * mpp_out
             ff = ff * (role_f["kerb"] + (1.0 - role_f["kerb"]) * np.clip(dk / 1.5, 0.0, 1.0))
         tile_material("Road_fill", Image.open(tiles["open"][0]["path"]), images, materials,
-                      (tile_m, tile_m), "asphalt", 0.9, surface)
+                      (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles["open"][0]))
         primitives.append({"positions": Pf, "normals": np.tile([0, 1, 0], (len(Pf), 1)),
                            "uv0": np.column_stack([Pf[:, 0] / tile_m, Pf[:, 2] / tile_m]),
                            "colors": np.column_stack([ff, ff, ff, np.ones_like(ff)]),
@@ -752,7 +761,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             t2 = t2[np.abs(ny) * 0.5 > 1e-3]
             f = map_coordinates(fac, [v2[:, 1], v2[:, 0]], order=1, mode="nearest")
             tile_material("Road_interchange", Image.open(tiles["open"][0]["path"]), images, materials,
-                          (tile_m, tile_m), "asphalt", 0.9, surface)
+                          (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles["open"][0]))
             primitives.append({"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
                                "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
                                "colors": np.column_stack([f, f, f, np.ones_like(f)]),
@@ -951,8 +960,9 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             u, v = v, -u
         return (-u if L["flip"] else u), v
 
-    def add_tile_material(name, path, kind="paving"):
-        return tile_material(name, Image.open(path), images, materials, (tile_m, tile_m), kind, 0.85, surface)
+    def add_tile_material(name, tile, kind="paving"):
+        return tile_material(name, Image.open(tile["path"]), images, materials, (tile_m, tile_m), kind, 0.85, surface,
+                             own=LIB.own_maps(tile))
 
     # top surface: paving grouped by variant, kerb stone on its own material
     groups = {}
@@ -968,11 +978,10 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
     prims = []
     for (part, vk), quads in sorted(groups.items()):
         if part == "paving":
-            mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk]["path"],
+            mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk],
                                     _sidewalk_kind(tiles["sidewalk"][vk]))
         else:
-            kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-            mat = add_tile_material("Kerb_stone", kt, "concrete")
+            mat = add_tile_material("Kerb_stone", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
 
         def vid(vi, owner):
@@ -1014,7 +1023,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                 row.append(remap[vi])
             idx.append(row)
         if idx:
-            mat = add_tile_material("Sidewalk_island", tiles["sidewalk"][0]["path"], _sidewalk_kind(tiles["sidewalk"][0]))
+            mat = add_tile_material("Sidewalk_island", tiles["sidewalk"][0], _sidewalk_kind(tiles["sidewalk"][0]))
             prims.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
                           "uv0": np.array(uvs), "colors": np.array(col), "indices": np.array(idx),
                           "material": mat})
@@ -1022,8 +1031,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
         meshes.append({"name": "Sidewalk", "primitives": prims})
 
     # the vertical kerb face, facing the road
-    kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-    mat = add_tile_material("Kerb_face", kt, "concrete")
+    mat = add_tile_material("Kerb_face", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
     pos, nrm, uvs, col, idx = [], [], [], [], []
     for q, facing in zip(mesh.kerb_quads, mesh.kerb_facing):
         b0, b1, t1, t0 = q
@@ -1128,13 +1136,38 @@ def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, me
                     face(lb0, lb1, rb1, rb0, np.array([0.0, -1.0, 0.0]))
     if not idx:
         return {"faces": 0}
-    kt = (tiles.get("kerbstone") or tiles.get("sidewalk") or tiles["open"])[0]["path"]
-    tile_material("Bridge_deck", Image.open(kt), images, materials, (tile_m, tile_m), "concrete", 0.9, surface)
+    kt = (tiles.get("kerbstone") or tiles.get("sidewalk") or tiles["open"])[0]
+    tile_material("Bridge_deck", Image.open(kt["path"]), images, materials, (tile_m, tile_m), "concrete", 0.9, surface,
+                  own=LIB.own_maps(kt))
     meshes.append({"name": "BridgeDeck", "primitives": [{
         "positions": np.array(pos), "normals": np.array(nrm), "uv0": np.array(uvs),
         "indices": np.array(idx), "material": len(materials) - 1}]})
     return {"faces": int(len(idx) // 2), "thickness_m": deck_m}
 
+
+
+def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
+    """
+    For a tile with its own bump and roughness (a library material): those maps
+    laid exactly as marked_texture lays its colour (the same repeats, stretch
+    and size), without the paint, which app/surface.py adds from the colour.
+    (normal, roughness, name) pictures, or None.
+    """
+    own = LIB.own_maps(tile)
+    if own is None:
+        return None
+    n = np.asarray(own[0]).astype(np.float32) / 127.5 - 1.0
+    r = np.asarray(own[1]).astype(np.float32) / 255.0
+    k_along = max(1, int(round(cycle_m / tile_m)))
+    k_across = max(1, int(round(across_m / tile_m)))
+    h, w = n.shape[0] * k_across, n.shape[1] * k_along
+    f = min(1.0, max_px / max(h, w))
+    out_w, out_h = max(8, int(w * f)), max(8, int(h * f))
+    nn = LIB._resize(np.tile(n, (k_across, k_along, 1)), out_w, out_h)
+    rr = LIB._resize(np.tile(r, (k_across, k_along)), out_w, out_h)
+    nn = LIB.squeeze_normals(nn, (k_along * tile_m / cycle_m, k_across * tile_m / across_m))
+    return (Image.fromarray(np.clip((nn * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)),
+            Image.fromarray(np.clip(rr * 255 + 0.5, 0, 255).astype(np.uint8)), own[2])
 
 
 def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_rgb, max_px=2048):
@@ -1243,7 +1276,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     f = map_coordinates(fb, [np.clip(v2[:, 1], 0, H - 1), np.clip(v2[:, 0], 0, W - 1)], order=1, mode="nearest")
     f = 1.0 + (f - 1.0) * 0.33
     tile_material("Block_paving", Image.open(tiles["sidewalk"][0]["path"]), images, materials,
-                  (tile_m, tile_m), _sidewalk_kind(tiles["sidewalk"][0]), 0.85, surface)
+                  (tile_m, tile_m), _sidewalk_kind(tiles["sidewalk"][0]), 0.85, surface, own=LIB.own_maps(tiles["sidewalk"][0]))
     prims = [{"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
               "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
               "colors": np.column_stack([f, f, f, np.ones_like(f)]),
@@ -1292,8 +1325,9 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
                     idx.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
                     faces += 1
         if idx:
-            kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-            tile_material("Block_kerb", Image.open(kt), images, materials, (tile_m, tile_m), "concrete", 0.9, surface)
+            kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]
+            tile_material("Block_kerb", Image.open(kt["path"]), images, materials, (tile_m, tile_m), "concrete", 0.9, surface,
+                          own=LIB.own_maps(kt))
             prims.append({"positions": np.array(pos), "normals": np.array(nrm), "uv0": np.array(uvs),
                           "indices": np.array(idx), "material": len(materials) - 1})
     meshes.append({"name": "Blocks", "primitives": prims})

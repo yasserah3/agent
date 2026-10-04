@@ -526,6 +526,14 @@
               <option value="off">Off (colour only, smaller file)</option>
             </select></div>
           <div class="note" style="margin:-2px 0 6px">Scanned: measured bump and roughness of real asphalt and concrete where bundled (paving always follows its own joints); the rest from each tile's grain</div>
+          <div class="field"><label for="matStreet">Street surface</label>
+            <div style="display:flex;gap:6px;align-items:center"><select id="matStreet" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles: the material tiles built from your training. Or a scanned material (CC0, Poly Haven) with its own measured bump and roughness, lined up with its colour"><option value="tiles">Your tiles</option></select><img id="matStreetThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
+          <div class="field"><label for="matSidewalk">Sidewalk surface</label>
+            <div style="display:flex;gap:6px;align-items:center"><select id="matSidewalk" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles, or a scanned paving, concrete or asphalt; blocks and islands use it too"><option value="tiles">Your tiles</option></select><img id="matSidewalkThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
+          <div class="field"><label for="matKerb">Kerb surface</label>
+            <div style="display:flex;gap:6px;align-items:center"><select id="matKerb" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles, or a scanned concrete; bridge decks use it too"><option value="tiles">Your tiles</option></select><img id="matKerbThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
+          <div class="field"><label for="matTone">Match the tone of your tiles</label><input type="checkbox" id="matTone" checked style="justify-self:start;accent-color:var(--blue)" title="A scanned material takes on the mean colour of the tile it replaces, so it fits the generated texture's tone. Unticked: its own colour"></div>
+          <div class="note" style="margin:-2px 0 6px" id="matNote">Scanned materials keep their bump and roughness exactly on their stones and joints</div>
           <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
           <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
           <div class="note" id="genNote">Load a street mask.</div>
