@@ -769,7 +769,14 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             ic_tris = int(len(t2))
 
     meshes = [{"name": "Road", "primitives": primitives}]
-    sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface)
+    # one paving layout per paved area between roads, shared by its sidewalks,
+    # islands and block, so they meet with no jump in pattern or tone
+    frames = None
+    if (sidewalk or blocks) and tiles.get("sidewalk"):
+        regions = QM.block_polygons(mesh, (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale),
+                                    output_scale, mpp_out * output_scale, min_area_m2=0.5)
+        frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac)
+    sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface, frames)
     scatter_info = None
     if scatter:
         stand = (float(blocks.get("height_m", 0.10)) if blocks else
@@ -783,7 +790,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                     fac, tiles, tile_m, images, materials, meshes,
                                     height_m=float(blocks.get("height_m", 0.10)),
                                     with_sidewalks=bool(mesh.sw_quads),
-                                    cell_m=16.0 if optimise else 8.0, surface=surface)
+                                    cell_m=16.0 if optimise else 8.0, surface=surface, frames=frames)
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
     feet = scatter_info.pop("_feet", None) if scatter_info else None
@@ -925,7 +932,76 @@ def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
 
 
 
-def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan"):
+class PavedFrames:
+    """
+    One paving layout per paved area between roads: its sidewalks, block and
+    islands share one pattern grid, turned to the area's main street direction,
+    one tile variant and one gentle weathering, so the paving runs on across
+    every edge between them with no jump in pattern or tone.
+
+    regions: the areas (shapely polygons in texture pixels, QM.block_polygons);
+    fac: the variation layer (texture pixels).
+    """
+
+    def __init__(self, regions, mpp_out, W, H, tile_m, n_variants, seed, fac):
+        import shapely
+        from scipy import ndimage as _ndi
+        self.regions, self.mpp, self.W, self.H, self.tile_m = list(regions), mpp_out, W, H, tile_m
+        self.tree = shapely.STRtree(self.regions) if self.regions else None
+        self.theta, self.off, self.variant = [], [], []
+        for k, g in enumerate(self.regions):
+            # the main direction of its kerbs (not the image border): edge directions
+            # averaged four-fold, so streets at right angles agree
+            c = np.asarray(g.exterior.coords)
+            d = np.diff(c, axis=0)
+            mid = (c[:-1] + c[1:]) / 2
+            inner = ~((mid[:, 0] < 1) | (mid[:, 1] < 1) | (mid[:, 0] > W - 1) | (mid[:, 1] > H - 1))
+            ln = np.hypot(d[:, 0], d[:, 1]) * inner
+            a = np.arctan2(d[:, 1], d[:, 0])
+            th = np.arctan2((ln * np.sin(4 * a)).sum(), (ln * np.cos(4 * a)).sum()) / 4 if ln.sum() > 0 else 0.0
+            r = np.random.default_rng([seed, k + 500000])
+            self.theta.append(float(th))
+            self.off.append(r.uniform(0, tile_m, 2))
+            self.variant.append(int(r.integers(0, 10 ** 6)) % max(1, n_variants))
+        # weathering: the variation layer blurred over about 25 m, at a third of its
+        # strength, the same function everywhere so it is continuous across edges
+        self.fb = _ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
+
+    def to_px(self, x, z):
+        return np.asarray(x) / self.mpp + self.W / 2, np.asarray(z) / self.mpp + self.H / 2
+
+    def region_of(self, x, z):
+        """The area each world point (x, z) lies in (the nearest one if none)."""
+        import shapely
+        px, pz = self.to_px(np.atleast_1d(x), np.atleast_1d(z))
+        pts = shapely.points(px, pz)
+        out = np.full(len(pts), -1, int)
+        if self.tree is None:
+            return np.zeros(len(pts), int)
+        hit = self.tree.query(pts, predicate="intersects")
+        out[hit[0]] = hit[1]
+        miss = np.where(out < 0)[0]
+        if len(miss):
+            near = self.tree.query_nearest(pts[miss], return_distance=False)
+            out[miss[near[0]]] = near[1]
+        return np.maximum(out, 0)
+
+    def uv(self, k, x, z):
+        th, off = (self.theta[k], self.off[k]) if self.regions else (0.0, (0.0, 0.0))
+        c, s = np.cos(th), np.sin(th)
+        return ((c * x + s * z + off[0]) / self.tile_m, (-s * x + c * z + off[1]) / self.tile_m)
+
+    def variant_of(self, k):
+        return self.variant[k] if self.regions else 0
+
+    def tone(self, x, z):
+        from scipy.ndimage import map_coordinates
+        px, pz = self.to_px(np.atleast_1d(x), np.atleast_1d(z))
+        f = map_coordinates(self.fb, [np.clip(pz, 0, self.H - 1), np.clip(px, 0, self.W - 1)], order=1, mode="nearest")
+        return 1.0 + (f - 1.0) * 0.33
+
+
+def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan", frames=None):
     """
     The sidewalk top (paving, with a kerb stone along its edge) and the vertical
     kerb face down to the road, as two meshes of quads.
@@ -964,19 +1040,28 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
         return tile_material(name, Image.open(tile["path"]), images, materials, (tile_m, tile_m), kind, 0.85, surface,
                              own=LIB.own_maps(tile))
 
-    # top surface: paving grouped by variant, kerb stone on its own material
+    # top surface: the paving and the small paved islands laid by their area's
+    # layout (frames: one grid, variant and weathering per paved area, shared with
+    # the block), the kerb stone along each kerb on its own material
+    if frames is None:
+        frames = PavedFrames([], 1.0, 0, 0, tile_m, 1, seed, np.ones((1, 1)))
+    pieces = [(list(q), mesh.sw_part[qi]) for qi, q in enumerate(mesh.sw_quads)]
+    pieces += [(list(t), "island") for t in (getattr(mesh, "sw_tris", None) or [])]
+    paved = [i for i, (_, part) in enumerate(pieces) if part != "kerbstone"]
+    region = np.zeros(len(pieces), int)
+    if paved:
+        cen = np.array([Wh[pieces[i][0]].mean(axis=0) for i in paved])
+        region[paved] = frames.region_of(cen[:, 0], cen[:, 2])
     groups = {}
-    for qi, q in enumerate(mesh.sw_quads):
-        owner, part = mesh.sw_owner[qi], mesh.sw_part[qi]
-        L = lay.setdefault(owner, layout(owner))
-        if part == "paving":
-            key = ("paving", L["variant"] % len(tiles["sidewalk"]))
+    for i, (vs, part) in enumerate(pieces):
+        if part == "kerbstone":
+            groups.setdefault(("kerbstone", 0), []).append((vs, mesh.sw_owner[i], None))
         else:
-            key = ("kerbstone", 0)
-        groups.setdefault(key, []).append((q, owner))
+            k = int(region[i])
+            groups.setdefault(("paving", frames.variant_of(k) % len(tiles["sidewalk"])), []).append((vs, None, k))
 
     prims = []
-    for (part, vk), quads in sorted(groups.items()):
+    for (part, vk), polys in sorted(groups.items()):
         if part == "paving":
             mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk],
                                     _sidewalk_kind(tiles["sidewalk"][vk]))
@@ -984,46 +1069,34 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             mat = add_tile_material("Kerb_stone", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
 
-        def vid(vi, owner):
-            key = (vi, owner)
+        def vid(vi, owner, k):
+            key = (vi, owner, k)
             if key not in remap:
                 remap[key] = len(pos)
-                pos.append(Wh[vi]); uvs.append(uv(vi, owner))
-                c = 1.0 + (float(vfac[vi]) - 1.0) * 0.5      # weathering, gentler than on asphalt
+                pos.append(Wh[vi])
+                if k is None:                                  # kerb stone: along its kerb
+                    uvs.append(uv(vi, owner))
+                    c = 1.0 + (float(vfac[vi]) - 1.0) * 0.5
+                else:                                          # paving: its area's layout
+                    uvs.append(frames.uv(k, Wh[vi, 0], Wh[vi, 2]))
+                    c = float(frames.tone(Wh[vi, 0], Wh[vi, 2])[0]) if frames.regions else 1.0 + (float(vfac[vi]) - 1.0) * 0.5
                 col.append((c, c, c, 1.0))
             return remap[key]
 
-        for q, owner in quads:
-            a, b, c, d = q
-            if up(a, b, c) + up(a, c, d) < 0:
-                a, b, c, d = a, d, c, b
-            for t in _split_quad(up, a, b, c, d, 1e-5):
-                idx.append([vid(i, owner) for i in t])
+        for vs, owner, k in polys:
+            if len(vs) == 4:
+                a, b, c, d = vs
+                if up(a, b, c) + up(a, c, d) < 0:
+                    a, b, c, d = a, d, c, b
+                tris = _split_quad(up, a, b, c, d, 1e-5)
+            else:
+                a, b, c = vs
+                if up(a, b, c) < 0:
+                    a, b, c = a, c, b
+                tris = [(a, b, c)] if up(a, b, c) > 1e-6 else []
+            for t in tris:
+                idx.append([vid(i, owner, k) for i in t])
         if idx:
-            prims.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
-                          "uv0": np.array(uvs), "colors": np.array(col), "indices": np.array(idx),
-                          "material": mat})
-    # small islands paved completely
-    if getattr(mesh, "sw_tris", None):
-        pos, uvs, col, idx = [], [], [], []
-        remap = {}
-        for tri, owner in zip(mesh.sw_tris, mesh.sw_tri_owner):
-            a, b, c = tri
-            if up(a, b, c) < 0:
-                a, b, c = a, c, b
-            if up(a, b, c) <= 1e-6:
-                continue
-            row = []
-            for vi in (a, b, c):
-                if vi not in remap:
-                    remap[vi] = len(pos)
-                    pos.append(Wh[vi]); uvs.append((Wh[vi, 0] / tile_m, Wh[vi, 2] / tile_m))
-                    cc = 1.0 + (float(vfac[vi]) - 1.0) * 0.5
-                    col.append((cc, cc, cc, 1.0))
-                row.append(remap[vi])
-            idx.append(row)
-        if idx:
-            mat = add_tile_material("Sidewalk_island", tiles["sidewalk"][0], _sidewalk_kind(tiles["sidewalk"][0]))
             prims.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
                           "uv0": np.array(uvs), "colors": np.array(col), "indices": np.array(idx),
                           "material": mat})
@@ -1224,7 +1297,7 @@ def _split_quad(up, a, b, c, d, eps):
 
 
 def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, images, materials, meshes,
-                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan"):
+                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan", frames=None):
     """
     The blocks and islands between roads as flat planes with the sidewalk's
     paving. With sidewalks, each block reaches all the way to the kerb line
@@ -1269,18 +1342,35 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     t2 = t2[np.abs(ny) * 0.5 > 1e-4]
     # the variation layer comes from the road image; inside a block there is no
     # road, only the nearest road's colour copied outwards, which makes stripes.
-    # Blocks get their own gentle, broad weathering: the layer blurred over
-    # about 25 m, at a third of its strength
-    from scipy import ndimage as _ndi
-    fb = _ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
-    f = map_coordinates(fb, [np.clip(v2[:, 1], 0, H - 1), np.clip(v2[:, 0], 0, W - 1)], order=1, mode="nearest")
-    f = 1.0 + (f - 1.0) * 0.33
-    tile_material("Block_paving", Image.open(tiles["sidewalk"][0]["path"]), images, materials,
-                  (tile_m, tile_m), _sidewalk_kind(tiles["sidewalk"][0]), 0.85, surface, own=LIB.own_maps(tiles["sidewalk"][0]))
-    prims = [{"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
-              "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
-              "colors": np.column_stack([f, f, f, np.ones_like(f)]),
-              "indices": t2, "material": len(materials) - 1}]
+    # Paved areas get a gentle, broad weathering instead (PavedFrames.tone), the
+    # same as their sidewalks; and each block is laid with its area's layout,
+    # so its paving runs on from its sidewalks with no edge
+    if frames is None:
+        frames = PavedFrames(QM.block_polygons(mesh, shape_mask, scale, mpp_out * scale), mpp_out, W, H, tile_m,
+                             len(tiles["sidewalk"]), 7, fac)
+    cen = P32[t2].mean(axis=1)
+    reg = frames.region_of(cen[:, 0], cen[:, 2])
+    prims = []
+    for vk in sorted({frames.variant_of(int(k)) % len(tiles["sidewalk"]) for k in reg}):
+        sel = np.array([frames.variant_of(int(k)) % len(tiles["sidewalk"]) == vk for k in reg])
+        remap, pos, uvs, col, idx = {}, [], [], [], []
+        for t, k in zip(t2[sel], reg[sel]):
+            row = []
+            for vi in t:
+                key = (int(vi), int(k))
+                if key not in remap:
+                    remap[key] = len(pos)
+                    pos.append(P[vi]); uvs.append(frames.uv(int(k), P[vi, 0], P[vi, 2]))
+                row.append(remap[key])
+            idx.append(row)
+        pos = np.array(pos)
+        f = frames.tone(pos[:, 0], pos[:, 2])
+        tile = tiles["sidewalk"][vk]
+        tile_material(f"Block_paving_{vk + 1}", Image.open(tile["path"]), images, materials,
+                      (tile_m, tile_m), _sidewalk_kind(tile), 0.85, surface, own=LIB.own_maps(tile))
+        prims.append({"positions": pos, "normals": np.tile([0, 1, 0], (len(pos), 1)), "uv0": np.array(uvs),
+                      "colors": np.column_stack([f, f, f, np.ones_like(f)]),
+                      "indices": np.array(idx), "material": len(materials) - 1})
 
     faces = 0
     road_edge = getattr(mesh, "kerb_surface", None)

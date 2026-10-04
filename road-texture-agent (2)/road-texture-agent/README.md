@@ -536,7 +536,8 @@ and island:
   the sidewalk is carried right to it and cut there.
 - **No sidewalks** on highway interchanges (unchanged, for a later decision) or
   on roads wider than 20 m.
-- Paving is laid along each kerb, so slabs stay parallel to it.
+- Paving is laid as one continuous pattern per paved area (see Blocks and
+  islands); the kerb stone is laid along each kerb.
 
 With bridges, sidewalks use the previous per-street method for now: roads
 crossing at two heights need sidewalks at two heights, which one ground-level
@@ -695,6 +696,15 @@ roads as a flat plane with the sidewalk paving, at the sidewalk height.
   and wherever a sidewalk run is missing (image border, runs too short). The
   image border gets no face.
 - Small uncovered gaps remain, about 0.02% of the area, where pieces meet.
+- **One paving pattern per paved area**: each area between roads (a block or
+  an island) has one layout shared by its sidewalks, its paved islands and the
+  block itself: one grid, turned to the area's main street direction, one
+  paving variant and one broad weathering tone. The pattern and the tone run
+  straight across every edge between them, with no seam, no mitred "picture
+  frame" round islands and no change of angle at corners. This holds for your
+  own tiles and for library materials. On a curved street the grid stays
+  straight (as one continuous paved area would be); the kerb stone still
+  follows the kerb.
 - Blocks are a **grid of quads** aligned across the whole map: 8 m cells at Full
   mesh detail, 16 m at Optimised. Cells cut by the kerb line are clipped and
   split into a few small triangles so the edge follows the curve exactly.
