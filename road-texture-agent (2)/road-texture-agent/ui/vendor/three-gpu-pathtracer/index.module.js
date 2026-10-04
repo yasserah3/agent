@@ -2746,7 +2746,8 @@ class LightTreeUniform {
 		this.root = items.length ? build( items ) : - 1;
 		this.nodeCount = nodes.length;
 
-		// four texels a node: min and energy, max and its light (-1: not a leaf), axis, angles and children
+		// four texels a node: min and energy; max and its light (-1: not a leaf); the cone's axis and
+		// cos theta_o; sin theta_o, cos theta_e and the children
 		const tex = this.tex;
 		const width = TREE_NODES_PER_ROW * 4, height = Math.max( 1, Math.ceil( nodes.length / TREE_NODES_PER_ROW ) );
 		if ( tex.image.width !== width || tex.image.height !== height ) {
@@ -2764,7 +2765,7 @@ class LightTreeUniform {
 
 			const o = ( Math.floor( i / TREE_NODES_PER_ROW ) * width + ( i % TREE_NODES_PER_ROW ) * 4 ) * 4;
 			data.set( [ n.min.x, n.min.y, n.min.z, n.energy, n.max.x, n.max.y, n.max.z, n.leaf,
-				n.axis.x, n.axis.y, n.axis.z, Math.cos( n.thetaO ), n.thetaO, n.thetaE, n.left, n.right ], o );
+				n.axis.x, n.axis.y, n.axis.z, Math.cos( n.thetaO ), Math.sin( n.thetaO ), Math.cos( n.thetaE ), n.left, n.right ], o );
 
 		} );
 		tex.needsUpdate = true;
@@ -6899,18 +6900,24 @@ const direct_light_contribution_function = /*glsl*/`
 		vec3 toCentre = centre - p;
 		float dist = length( toCentre );
 		vec3 dir = dist > 1e-6 ? toCentre / dist : n;
-		// the angle the node takes up as seen from the point
-		float thetaU = dist <= radius ? PI : asin( clamp( radius / dist, 0.0, 1.0 ) );
 
-		// incidence: theta_i' = max( theta_i - theta_u, 0 )
+		// the angle theta_u the node takes up as seen from the point (all round when inside it)
+		float sinU = dist <= radius ? 0.0 : radius / dist;
+		float cosU = dist <= radius ? - 1.0 : sqrt( max( 1.0 - sinU * sinU, 0.0 ) );
+
+		// incidence: cos( max( theta_i - theta_u, 0 ) ), by the angle-difference identity
 		float cosI = dot( n, dir );
 		if ( twoSided ) cosI = abs( cosI );
-		float cosIncidence = cos( max( acos( clamp( cosI, - 1.0, 1.0 ) ) - thetaU, 0.0 ) );
+		float sinI = sqrt( max( 1.0 - cosI * cosI, 0.0 ) );
+		float cosIncidence = cosI >= cosU ? 1.0 : cosI * cosU + sinI * sinU;
 
-		// emission: theta' = max( theta - theta_o - theta_u, 0 ), nothing beyond theta_e
-		float theta = acos( clamp( dot( t2.xyz, - dir ), - 1.0, 1.0 ) );
-		float thetaP = max( theta - t3.x - thetaU, 0.0 );
-		float cosEmission = thetaP < t3.y ? cos( thetaP ) : 0.0;
+		// emission: cos( max( theta - theta_u - theta_o, 0 ) ), nothing beyond theta_e
+		float cosT = dot( t2.xyz, - dir );
+		float sinT = sqrt( max( 1.0 - cosT * cosT, 0.0 ) );
+		float cosTU = cosT >= cosU ? 1.0 : cosT * cosU + sinT * sinU;
+		float sinTU = sqrt( max( 1.0 - cosTU * cosTU, 0.0 ) );
+		float cosEmission = cosTU >= t2.w ? 1.0 : cosTU * t2.w + sinTU * t3.x;
+		if ( cosEmission <= t3.y ) return 0.0;
 
 		return cosIncidence <= 0.0 ? 0.0 : t0.w * cosIncidence * cosEmission / max( dist * dist, max( radius * radius, 1e-4 ) );
 
