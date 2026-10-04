@@ -3,7 +3,10 @@
 // generated texture (the same model as the GLB export, with the 3D model
 // settings of the Generate tab) and adds street lamps along the sidewalks.
 // The live view has a sky, the sun with its shadows, soft contact shadows
-// (ambient occlusion), filmic colour and a glow around bright lights; Render
+// (ambient occlusion), filmic colour and a glow around bright lights. The sky
+// is Blender's own physical sky (ui/sky_blender.js, ported from Blender), so
+// the sky, the colour of the sunlight and the balance of sun and sky are
+// those of Blender and Cycles. Render
 // photo then traces the light properly (three-gpu-pathtracer), a still that
 // sharpens for as long as the camera stays put. Dawn, Day and Night set the
 // sun, the sky and the street lamps. Metres, Y up: the map's x is +X, its y +Z,
@@ -11,41 +14,43 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { Sky } from 'three/addons/objects/Sky.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { buildSkyMaps } from './sky_blender.js';
 
 const $ = s => document.querySelector(s);
 const host = $('#view3d'), msg = $('#view3dMsg');
 
 // ----------------------------------------------------------------- times of day
-// sun (or moon) height and compass direction in degrees (0 north, 90 east), its
-// colour and strength, the sky, exposure, how much the sky lights the scene,
-// the street lamps (0 off, 1 full), the glow, and the haze
+// sun (or moon) height and compass direction in degrees (0 north, 90 east). By
+// day and at dawn Blender's sky gives the sun's colour and strength and the
+// sky's light; the exposure is set from them like a camera's (bias: brighter or
+// darker than that). At night: the moon's colour and strength, the exposure,
+// and how much the night sky lights the scene. Then the street lamps (0 off,
+// 1 full), the glow (strength, radius, and from how bright, on screen), the
+// haze, and the land's colour
 const TIMES = {
-  dawn:  { elev: 4, azim: 100, color: 0xffb47a, sun: 2.2, sky: true, turbidity: 6, rayleigh: 2.4, mie: 0.0035, mieG: 0.8,
-           clouds: 0.35, exposure: 0.8, env: 0.45, lamps: 0.6, bloom: [0.18, 0.3, 4.0], fog: [0x8a7f7c, 0.00035],
-           ground: 0x4a4d3c },
-  day:   { elev: 52, azim: 215, color: 0xfff3e2, sun: 3.2, sky: true, turbidity: 2.2, rayleigh: 1.0, mie: 0.004, mieG: 0.8,
-           clouds: 0.3, exposure: 0.8, env: 0.4, lamps: 0, bloom: [0.1, 0.4, 6.0], fog: [0xc9d6e0, 0.00035],
-           ground: 0x5c6648 },
+  dawn:  { elev: 4, azim: 100, sky: true, bias: 0.7, env: 1, lamps: 0.6, bloom: [0.25, 0.35, 3.0],
+           fog: [0x8a7f7c, 0.00035], ground: 0x4a4d3c },
+  day:   { elev: 52, azim: 215, sky: true, bias: 1.0, env: 1, lamps: 0, bloom: [0.12, 0.4, 6.0],
+           fog: [0xc9d6e0, 0.00035], ground: 0x5c6648 },
   night: { elev: 38, azim: 300, color: 0x9fb6ff, sun: 0.12, sky: false, exposure: 0.9, env: 0.15, lamps: 1,
            bloom: [0.6, 0.5, 1.5], fog: [0x070b16, 0.0005], ground: 0x2a2e26 },
 };
 const LAMP = { height: 8.0, arm: 1.6, candela: 320, pool: 12 };
 
-// the Light panel: the sun's strength (with its glow in the sky) and the street
+// the Light panel: the sun's (or moon's) strength and the street
 // lamps' brightness and colour, kept in this browser for the next time
 const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96' };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
 
 let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, output;
-let sky, skyEnv, envScene, pmrem, envRT = null, nightTex = null, stars = null, ground;
+let envScene, pmrem, envRT = null, nightTex = null, stars = null, ground, skyNow = null, skyToken = 0, sunBase = 1;
 let sun, hemi, world = null, lamps = null, time = 'day', radius = 300, centre = new THREE.Vector3();
 let visible = false, running = false, poolAt = null, photo = null, busy = false;
 
@@ -75,15 +80,8 @@ function init(){
   controls.maxDistance = 2500;
   controls.addEventListener('start', () => { if(photo && photo.on) stopPhoto('The camera moved: back to the live view.'); });
 
-  // the sky, and the same sky without the sun's disc for the light it gives
-  sky = new Sky();
-  sky.scale.setScalar(6000);
-  scene.add(sky);
+  // the night sky's light from all round is worked out from a scene of its own
   envScene = new THREE.Scene();
-  skyEnv = new Sky();
-  skyEnv.scale.setScalar(6000);
-  skyEnv.material.uniforms.showSunDisc.value = 0;
-  envScene.add(skyEnv);
   pmrem = new THREE.PMREMGenerator(renderer);
 
   sun = new THREE.DirectionalLight(0xffffff, 3);
@@ -124,6 +122,8 @@ function init(){
   };
 
   setTime(time, false);
+  // the other skies are worked out meanwhile, so changing the time is quick
+  for(const t of Object.values(TIMES)) if(t.sky) skyFor(t);
   frame(new THREE.Vector3(), 250);
   new ResizeObserver(resize).observe(host);
   return true;
@@ -192,10 +192,54 @@ function starField(){
   return stars;
 }
 
+// Blender's sky for a time of day, worked out once (a second or two, off the page
+// in a worker where the browser allows) and kept
+const skyCache = new Map();
+let skyWorker, skyJobs = new Map(), skyJob = 0;
+function skyFor(t){
+  const key = t.elev + '/' + t.azim;
+  if(skyCache.has(key)) return skyCache.get(key);
+  const args = { elevation: THREE.MathUtils.degToRad(t.elev), azimuth: THREE.MathUtils.degToRad(t.azim),
+                 width: 2048, height: 1024, discScale: 1e-3 };
+  const job = new Promise(resolve => {
+    try{
+      if(skyWorker === undefined){
+        skyWorker = new Worker(new URL('./sky_worker.js', import.meta.url), { type: 'module' });
+        skyWorker.onmessage = e => { const done = skyJobs.get(e.data.id); skyJobs.delete(e.data.id); if(done) done(e.data); };
+        skyWorker.onerror = () => { skyWorker = null; for(const [, done] of skyJobs) done(null); skyJobs.clear(); };
+      }
+      if(!skyWorker) throw new Error('no worker');
+      const id = ++skyJob;
+      skyJobs.set(id, resolve);
+      skyWorker.postMessage({ id, ...args });
+    }catch(e){ resolve(null); }
+  }).then(d => d || buildSkyMaps(args))                               // no worker: here, on the page
+    .then(d => {
+      const tex = data => {
+        const x = new THREE.DataTexture(data, d.width, d.height, THREE.RGBAFormat, THREE.HalfFloatType);
+        x.mapping = THREE.EquirectangularReflectionMapping;
+        x.colorSpace = THREE.LinearSRGBColorSpace;
+        x.magFilter = x.minFilter = THREE.LinearFilter;
+        x.generateMipmaps = false;
+        x.needsUpdate = true;
+        return x;
+      };
+      const plain = tex(d.plain);
+      const Y = c => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+      return { plain, disc: tex(d.disc), env: pmrem.fromEquirectangular(plain),
+               horizon: new THREE.Color().setRGB(d.horizon[0], d.horizon[1], d.horizon[2], THREE.LinearSRGBColorSpace),
+               sunColor: new THREE.Color().setRGB(d.sun.color[0], d.sun.color[1], d.sun.color[2], THREE.LinearSRGBColorSpace),
+               sunIrradiance: d.sun.irradiance,
+               // the light on a level surface: the sun at its height, and the sky
+               level: d.sun.irradiance * Math.max(Math.sin(args.elevation), 0) + Y(d.skyIrradiance) };
+    });
+  skyCache.set(key, job);
+  return job;
+}
+
 function horizon(){
-  // the colour of the sky just above the horizon, all round (as the sky lights the
-  // scene: no sun disc). The middle of eight directions, so the glow round a low
-  // sun does not tint the whole haze
+  // the colour of the night sky just above the horizon, all round. The middle of
+  // eight directions, so a bright patch does not tint the whole haze
   try{
     const rt = new THREE.WebGLRenderTarget(32, 4, { type: THREE.FloatType });
     const cam = new THREE.PerspectiveCamera(4, 8, 1, 20000), px = new Float32Array(32 * 4 * 4), all = [];
@@ -226,45 +270,61 @@ function horizon(){
 function setTime(name, render = true){
   if(photo && photo.on) stopPhoto();
   time = name;
-  const t = TIMES[name];
-  const d = sunDir(t);
-  const k = LIGHT.sun;
-  for(const s of [sky, skyEnv]){
-    const u = s.material.uniforms;
-    u.sunPosition.value.copy(d);
-    if(t.sky){
-      // a weaker sun has a smaller, fainter glow round it in the sky, and a dimmer disc
-      u.turbidity.value = t.turbidity; u.rayleigh.value = t.rayleigh;
-      u.mieCoefficient.value = t.mie * Math.min(k, 1.5); u.mieDirectionalG.value = t.mieG;
-      u.cloudCoverage.value = t.clouds;
-    }
-  }
-  // the sun's disc is thousands of times brighter than the sky: still white, but
-  // dimmed so the glow round bright lights stays a halo instead of flooding the view
-  sky.material.uniforms.showSunDisc.value = 0.03 * Math.min(k, 1);
-  sky.visible = t.sky;
-  // what lights the scene from all round: the sky (without the sun's disc), or the night sky
-  envScene.background = t.sky ? null : nightSky();
-  skyEnv.visible = t.sky;
-  if(envRT) envRT.dispose();
-  envRT = pmrem.fromScene(envScene, 0, 1, 10000);
-  scene.environment = envRT.texture;
-  scene.environmentIntensity = t.env;
-  scene.background = t.sky ? null : nightSky();
-  scene.backgroundIntensity = 1;
-  // the haze takes the sky's own colour at the horizon, so the land fades into it
-  scene.fog = new THREE.FogExp2(horizon() || new THREE.Color(t.fog[0]), t.fog[1]);
+  const t = TIMES[name], token = ++skyToken;
+  document.querySelectorAll('[data-time3d]').forEach(b => b.setAttribute('aria-pressed', b.dataset.time3d === name ? 'true' : 'false'));
   ground.material.color.set(t.ground);
   const st = starField();
   if(t.sky) scene.remove(st); else scene.add(st);
-  sun.color.set(t.color);
-  sun.intensity = t.sun * k;
   hemi.intensity = t.sky ? 0 : 0.06;
-  renderer.toneMappingExposure = t.exposure;
-  bloom.strength = t.bloom[0] * (t.sky ? Math.min(k, 1) : 1); bloom.radius = t.bloom[1]; bloom.threshold = t.bloom[2];
   if(lamps) lampLevel(t.lamps);
-  document.querySelectorAll('[data-time3d]').forEach(b => b.setAttribute('aria-pressed', b.dataset.time3d === name ? 'true' : 'false'));
   if(render) poolAt = null;
+  if(!t.sky){
+    // night: the moon, and the night sky's light from all round
+    skyNow = null;
+    envScene.background = nightSky();
+    if(envRT) envRT.dispose();
+    envRT = pmrem.fromScene(envScene, 0, 1, 10000);
+    scene.environment = envRT.texture;
+    scene.environmentIntensity = t.env;
+    scene.background = nightSky();
+    scene.fog = new THREE.FogExp2(horizon() || new THREE.Color(t.fog[0]), t.fog[1]);
+    sun.color.set(t.color);
+    sunBase = t.sun;
+    sun.intensity = sunBase * LIGHT.sun;
+    renderer.toneMappingExposure = t.exposure;
+    setBloom(t, t.exposure);
+    return;
+  }
+  // dawn and day: Blender's sky, worked out the first time
+  const job = skyFor(t);
+  let ready = false;
+  job.then(sk => {
+    ready = true;
+    if(token !== skyToken) return;                                      // another time was chosen meanwhile
+    skyNow = sk;
+    scene.background = sk.disc;
+    scene.backgroundIntensity = 1;
+    scene.environment = sk.env.texture;
+    scene.environmentIntensity = t.env;
+    // the haze takes the sky's own colour at the horizon, so the land fades into it
+    scene.fog = new THREE.FogExp2(sk.horizon, t.fog[1]);
+    sun.color.copy(sk.sunColor);
+    sunBase = sk.sunIrradiance;
+    sun.intensity = sunBase * LIGHT.sun;
+    // exposed like a camera for the light falling on a level surface: a grey card shows
+    // mid grey; bias makes the time brighter or darker than that
+    const exposure = t.bias * Math.PI / Math.max(sk.level, 1e-6);
+    renderer.toneMappingExposure = exposure;
+    setBloom(t, exposure);
+    msg.textContent = '';
+    if(photo && photo.on) stopPhoto();
+  });
+  setTimeout(() => { if(!ready && token === skyToken) msg.textContent = 'Working out the sky…'; }, 150);
+}
+
+function setBloom(t, exposure){
+  // the glow starts from a brightness on screen: in the scene's own units, that over the exposure
+  bloom.strength = t.bloom[0]; bloom.radius = t.bloom[1]; bloom.threshold = t.bloom[2] / exposure;
 }
 
 // the sun's shadow covers what is in view: a small area close up (sharp
@@ -466,14 +526,19 @@ async function startPhoto(){
       pt.tiles.set(2, 2);
       photo = { pt, on: false };
     }
-    const t = TIMES[time];
-    // the sky as an environment the tracer can sample, without the sun's disc (the sun is its own light)
-    const cube = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType });
-    new THREE.CubeCamera(1, 10000, cube).update(renderer, envScene);
-    photo.cube = cube;
     photo.saved = { env: scene.environment, bg: scene.background, envI: scene.environmentIntensity };
-    scene.environment = cube.texture; scene.background = cube.texture;
-    sky.visible = false; hemi.visible = false;
+    if(skyNow){
+      // Blender's sky as the tracer's light from all round, without the sun's disc (the sun is
+      // its own light), and with the disc as what the camera sees
+      scene.environment = skyNow.plain; scene.background = skyNow.disc;
+    }else{
+      // the night sky, as a cube the tracer turns into its own all-round picture
+      const cube = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType });
+      new THREE.CubeCamera(1, 10000, cube).update(renderer, envScene);
+      photo.cube = cube;
+      scene.environment = cube.texture; scene.background = cube.texture;
+    }
+    hemi.visible = false;
     if(stars) stars.visible = false;                                    // points are not traced: the sky has its own
     // lamps: whole meshes (instances are not traced), real lights for those around the view
     const extra = new THREE.Group();
@@ -519,7 +584,7 @@ function stopPhoto(why){
   if(!photo || !photo.on) return;
   photo.on = false;
   scene.environment = photo.saved.env; scene.background = photo.saved.bg; scene.environmentIntensity = photo.saved.envI;
-  sky.visible = TIMES[time].sky; hemi.visible = true;
+  hemi.visible = true;
   if(stars) stars.visible = true;
   if(lamps) lamps.group.visible = true;
   if(photo.extra){ scene.remove(photo.extra); photo.extra.traverse(o => { if(o.geometry) o.geometry.dispose(); }); photo.extra = null; }
@@ -580,7 +645,6 @@ window.addEventListener('view3d', e => {
 });
 $('#btnScene3d').addEventListener('click', generate);
 // the Light panel
-let lightTimer = null;
 const showLight = () => {
   $('#sunStrength').value = Math.round(LIGHT.sun * 100); $('#sunStrengthVal').textContent = Math.round(LIGHT.sun * 100) + '%';
   $('#lampStrength').value = Math.round(LIGHT.lamps * 100); $('#lampStrengthVal').textContent = Math.round(LIGHT.lamps * 100) + '%';
@@ -591,9 +655,8 @@ $('#sunStrength').addEventListener('input', () => {
   LIGHT.sun = +$('#sunStrength').value / 100; showLight(); saveLight();
   if(!renderer) return;
   if(photo && photo.on) stopPhoto();
-  // the light at once; the sky's glow (which re-lights the scene) once the slider rests
-  sun.intensity = TIMES[time].sun * LIGHT.sun;
-  clearTimeout(lightTimer); lightTimer = setTimeout(() => setTime(time), 150);
+  // the sun (or moon) brighter or dimmer; the exposure stays, so the picture follows
+  sun.intensity = sunBase * LIGHT.sun;
 });
 $('#lampStrength').addEventListener('input', () => {
   LIGHT.lamps = +$('#lampStrength').value / 100; showLight(); saveLight();
