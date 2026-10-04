@@ -519,6 +519,8 @@
           <div class="note" style="margin:-2px 0 6px">Never more than half the space to the next road, so facing sidewalks cannot overlap</div>
           <div class="field"><label for="blocksOn">Blocks and islands</label><input type="checkbox" id="blocksOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="note" style="margin:-2px 0 6px">Fills the areas between roads as flat planes at sidewalk height, with the sidewalk paving</div>
+          <div class="field"><label for="surfDetail">Surface detail</label><input type="checkbox" id="surfDetail" checked style="justify-self:start;accent-color:var(--blue)" title="Bump and roughness maps from each material tile's grain, so light catches the surface (in the 3D tab, the photo render, Blender and other glTF viewers). Unticked: colour only, a smaller file"></div>
+          <div class="note" style="margin:-2px 0 6px">Bump and roughness from each material's grain: light catches the road, paint shines a little</div>
           <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
           <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
           <div class="note" id="genNote">Load a street mask.</div>
@@ -647,6 +649,7 @@
         <div class="panel-b">
           <div class="field"><label for="sunStrength">Sun strength <span id="sunStrengthVal" class="mono" style="color:var(--faint)">100%</span></label><input type="range" id="sunStrength" min="0" max="200" value="100" title="How bright the sun (or the moon at night) is"></div>
           <div class="field"><label for="lampStrength">Street lamps <span id="lampStrengthVal" class="mono" style="color:var(--faint)">100%</span></label><input type="range" id="lampStrength" min="0" max="300" value="100" title="How bright the street lamps are when they are on (at dawn and at night). 0: off"></div>
+          <div class="field"><label for="wetRoads">Wet roads <span id="wetRoadsVal" class="mono" style="color:var(--faint)">0%</span></label><input type="range" id="wetRoads" min="0" max="100" value="0" title="How wet the streets, sidewalks and kerbs are: darker, and glossy so the lamps and the sky shine in them. 0: dry"></div>
           <div class="field"><label for="lampColour">Lamp colour</label><input type="color" id="lampColour" value="#ffcf96" title="The colour of the street lamps' light" style="justify-self:start;width:52px;height:26px;padding:0;border:1px solid var(--line);background:none"></div>
           <div class="note">Kept for the next time. They also apply to Render photo.</div>
         </div>

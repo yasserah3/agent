@@ -46,10 +46,11 @@ const TIMES = {
 };
 const LAMP = { height: 8.0, arm: 1.6, candela: 320, pool: 12 };
 const PHOTO_LAMPS = 1000;
+const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'alphaMap', 'aoMap', 'bumpMap'];
 
-// the Light panel: the sun's (or moon's) strength and the street
-// lamps' brightness and colour, kept in this browser for the next time
-const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96' };
+// the Light panel: the sun's (or moon's) strength, the street lamps' brightness
+// and colour, and how wet the streets are, kept in this browser for the next time
+const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0 };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
 // Render photo's noise cleared by Open Image Denoise (on unless turned off here before)
@@ -502,7 +503,11 @@ function prepare(root){
     const part = (o.parent && o.parent.name) || o.name || '';
     o.castShadow = !/^Road|Markings/.test(part) && !/^Road|Block_paving|RoadMarkings/.test(name);
     for(const m of [].concat(o.material)){
-      if(m.map) m.map.anisotropy = aniso;
+      for(const t of [m.map, m.normalMap, m.roughnessMap]) if(t) t.anisotropy = aniso;
+      // the street surfaces, as built: what Wet roads starts from
+      if(/^(Road|Sidewalk|Kerb|Block|Bridge)/.test(m.name) && !m.userData.dry)
+        m.userData.dry = { colour: m.color.clone(), roughness: m.roughness, normalScale: m.normalScale ? m.normalScale.clone() : null,
+                           paint: /Markings/.test(m.name) };
       if(/Road_fill|Road_interchange/.test(m.name)){
         // laid just under the road strips: kept behind them, but never pushed as far as the land
         m.polygonOffset = true; m.polygonOffsetFactor = 0.5; m.polygonOffsetUnits = 2;
@@ -511,6 +516,25 @@ function prepare(root){
         m.polygonOffset = true; m.polygonOffsetFactor = -1; m.polygonOffsetUnits = -2;
       }
       m.needsUpdate = true;
+    }
+  });
+  applyWet(root);
+}
+
+// Wet roads: water darkens the surfaces (paint less, it soaks up little), makes them
+// glossy so the lamps and the sky shine in them, and fills the fine grain. Applied to
+// the materials themselves, so the photo render has it too
+function applyWet(root = world){
+  if(!root) return;
+  const w = LIGHT.wet;
+  root.traverse(o => {
+    if(!o.isMesh) return;
+    for(const m of [].concat(o.material)){
+      const d = m.userData.dry;
+      if(!d) continue;
+      m.color.copy(d.colour).multiplyScalar(1 - (d.paint ? 0.15 : 0.35) * w);
+      m.roughness = d.roughness * (1 - 0.82 * w);
+      if(d.normalScale) m.normalScale.copy(d.normalScale).multiplyScalar(1 - 0.6 * w);
     }
   });
 }
@@ -583,9 +607,11 @@ async function startPhoto(){
     }
     scene.add(extra);
     photo.extra = extra;
+    // every picture the tracer holds (colour, bump, roughness…) at one size: full while they fit
     const textures = new Set();
-    world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) if(m.map) textures.add(m.map); });
-    photo.pt.textureSize.set(textures.size > 24 ? 512 : 1024, textures.size > 24 ? 512 : 1024);
+    world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) for(const k of TEXTURE_SLOTS) if(m[k]) textures.add(m[k]); });
+    const tsize = textures.size > 48 ? 512 : 1024;
+    photo.pt.textureSize.set(tsize, tsize);
     const t0 = performance.now();
     photo.pt.setScene(scene, camera);
     photo.on = true; photo.started = performance.now();
@@ -672,7 +698,12 @@ const auxCache = new WeakMap();
 function auxMaterial(m, kind){
   let c = auxCache.get(m);
   if(!c) auxCache.set(m, c = {});
-  if(c[kind]) return c[kind];
+  if(c[kind]){
+    // as the material is now (Wet roads changes its colour and bump)
+    c[kind].color.copy(m.color);
+    if(m.normalScale) c[kind].normalScale.copy(m.normalScale);
+    return c[kind];
+  }
   const a = m.clone();
   a.fog = false; a.toneMapped = false; a.transparent = false; a.blending = THREE.NoBlending;
   a.onBeforeCompile = sh => {
@@ -799,6 +830,7 @@ const showLight = () => {
   $('#sunStrength').value = Math.round(LIGHT.sun * 100); $('#sunStrengthVal').textContent = Math.round(LIGHT.sun * 100) + '%';
   $('#lampStrength').value = Math.round(LIGHT.lamps * 100); $('#lampStrengthVal').textContent = Math.round(LIGHT.lamps * 100) + '%';
   $('#lampColour').value = LIGHT.colour;
+  $('#wetRoads').value = Math.round(LIGHT.wet * 100); $('#wetRoadsVal').textContent = Math.round(LIGHT.wet * 100) + '%';
 };
 showLight();
 $('#sunStrength').addEventListener('input', () => {
@@ -812,6 +844,11 @@ $('#lampStrength').addEventListener('input', () => {
   LIGHT.lamps = +$('#lampStrength').value / 100; showLight(); saveLight();
   if(photo && photo.on) stopPhoto();
   if(lamps) { lampLevel(TIMES[time].lamps); poolAt = null; }
+});
+$('#wetRoads').addEventListener('input', () => {
+  LIGHT.wet = +$('#wetRoads').value / 100; showLight(); saveLight();
+  if(photo && photo.on) stopPhoto();
+  applyWet();
 });
 $('#lampColour').addEventListener('input', () => {
   LIGHT.colour = $('#lampColour').value; saveLight();

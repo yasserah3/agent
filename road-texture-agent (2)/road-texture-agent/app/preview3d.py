@@ -32,11 +32,15 @@ def load_glb(path):
                             v.get("byteOffset", 0) + a.get("byteOffset", 0))
         return arr.reshape(a["count"], SIZE[a["type"]]) if SIZE[a["type"]] > 1 else arr
 
-    images = []
-    for im in gltf.get("images", []):
-        v = gltf["bufferViews"][im["bufferView"]]
-        raw = blob[v["byteOffset"]: v["byteOffset"] + v["byteLength"]]
-        images.append(np.array(Image.open(io.BytesIO(raw)).convert("RGB")).astype(np.float32))
+    decoded = {}
+
+    def image(i):
+        # only the colour pictures are drawn: the bump and roughness maps are never decoded
+        if i not in decoded:
+            v = gltf["bufferViews"][gltf["images"][i]["bufferView"]]
+            raw = blob[v["byteOffset"]: v["byteOffset"] + v["byteLength"]]
+            decoded[i] = np.array(Image.open(io.BytesIO(raw)).convert("RGB")).astype(np.float32)
+        return decoded[i]
 
     prims = []
     for m in gltf["meshes"]:
@@ -50,7 +54,7 @@ def load_glb(path):
                 "uv": acc(p["attributes"]["TEXCOORD_0"]).astype(np.float64) if "TEXCOORD_0" in p["attributes"] else None,
                 "col": acc(p["attributes"]["COLOR_0"]).astype(np.float64) if "COLOR_0" in p["attributes"] else None,
                 "idx": acc(p["indices"]).reshape(-1, 3).astype(np.int64),
-                "tex": images[gltf["textures"][tex["index"]]["source"]] if tex else None,
+                "tex": image(gltf["textures"][tex["index"]]["source"]) if tex else None,
                 "factor": np.array(pbr.get("baseColorFactor", [1, 1, 1, 1]))[:3] * 255,
             })
     return prims

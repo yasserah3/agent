@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-render1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -653,6 +653,7 @@ const UI_VERSION = '2026.10.04-render1';   // must match VERSION in server.py
           markings: $('#markMode').value,
           mesh_detail: $('#meshDetail').value,
           blocks: $('#blocksOn').checked,
+          surface_detail: $('#surfDetail').checked,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });

@@ -618,6 +618,30 @@ Rarely, an update changes what is measured during training; the update notes
 say so when it happens, usually for specific pairs only. When tiles change,
 press Rebuild tiles once in the Memory tab.
 
+## Surface detail
+
+Under 3D model, **Surface detail** (on by default) gives every road, sidewalk,
+kerb, block and bridge material a bump map and a roughness map, worked out
+from the grain of its own material tile (`app/surface.py`), so the sun and the
+lamps catch the surface: the asphalt's stones and pores, the joints of paving.
+
+- The bump comes from the fine grain only: details up to about 7 mm, about
+  0.8 mm deep on asphalt. Lighter grain stands proud, darker sinks. Larger
+  changes of tone (stains, patches, wear) are not relief and are left out,
+  and their edges are softened so a stain does not grow a rim.
+- Roughness follows the tone gently: asphalt about 0.86, a little smoother
+  where it is lighter. Paving is about 0.78 and concrete kerbs 0.80. Road
+  paint is smoother at 0.55 (also the paint strips), and painted dashes have
+  a slight raised edge.
+- The maps go into the GLB as standard glTF normal and metallic-roughness
+  textures, with tangents, so Blender, the 3D tab and the photo render all
+  read them the same way. This was checked with raised test dots lit from the
+  east and from the north: the side facing the light is brighter in three.js,
+  in the path tracer and in Blender 5.
+- Pictures used by several materials are now stored once in the GLB. In a
+  990 × 770 m test the model is 5.1 MB with surface detail and 2.2 MB without
+  (2.9 MB before). Untick Surface detail for colour only and a smaller file.
+
 ## Blocks and islands
 
 Under 3D model, **Blocks and islands** (on by default) fills every area between
@@ -1000,7 +1024,10 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
 - **Light** sets, for every time of day:
   - *Sun strength* (0 to 200%): how bright the sun is, or the moon at night;
   - *Street lamps* (0 to 300%, 0 is off) and *Lamp colour*: how bright the
-    lamps are when they are on, and the colour of their light.
+    lamps are when they are on, and the colour of their light;
+  - *Wet roads* (0 to 100%, 0 is dry): streets, sidewalks and kerbs darken
+    (paint less), turn glossy so the lamps and the sky shine in them, and their
+    fine grain fills in. At night the lamps' pools stretch into reflections.
   They are kept in the browser for the next time, and apply to Render photo too.
 - **The sky** at dawn and by day is Blender's own physical sky, the Sky
   Texture of Blender 5 (Multiple Scattering), ported to JavaScript: sunlight

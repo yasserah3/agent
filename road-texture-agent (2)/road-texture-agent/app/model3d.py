@@ -24,6 +24,7 @@ import mapbox_earcut as earcut
 from shapely.geometry import Polygon
 
 from app.generation import prepare_mask
+from app import surface as SF
 from app import quadmesh as QM
 from app import placements as PL
 from scipy import ndimage as ndi
@@ -352,6 +353,65 @@ def export_road_quads_glb(mask_path, texture_path, metres_per_pixel, output_scal
 
 
 # ------------------------------------------------------ tiled export (stage 2)
+def _image_index(images, data, mime):
+    """The index of this picture in images, added if it is not there yet (shared, not repeated)."""
+    for i, (d, m) in enumerate(images):
+        if m == mime and d == data:
+            return i
+    images.append((data, mime))
+    return len(images) - 1
+
+
+def tile_material(name, img, images, materials, size_m, kind, roughness, surface=True):
+    """
+    A material for a repeating tile: its colour, and with surface, the bump
+    (normal map) and roughness worked out from its grain (app/surface.py).
+    size_m: the width and height the picture covers; kind: asphalt, paving or
+    concrete. Returns the material's index.
+    """
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=92)
+    pbr = {"baseColorTexture": {"index": _image_index(images, buf.getvalue(), "image/jpeg")},
+           "metallicFactor": 0.0, "roughnessFactor": roughness}
+    mat = {"name": name, "doubleSided": True, "pbrMetallicRoughness": pbr}
+    if surface:
+        nrm, rgh = SF.maps(img, size_m, kind)
+        mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
+        pbr["metallicRoughnessTexture"] = {"index": _image_index(images, rgh, "image/jpeg")}
+        pbr["roughnessFactor"] = 1.0                      # the map holds it
+    materials.append(mat)
+    return len(materials) - 1
+
+
+def _tangents(pos, nrm, uv, idx):
+    """
+    glTF tangents (x, y, z, w) for a normal map: the tangent along increasing u,
+    and w such that cross(normal, tangent) * w runs up the picture (decreasing v),
+    as glTF's normal maps expect.
+    """
+    pos, nrm, uv = (np.asarray(a, np.float64) for a in (pos, nrm, uv))
+    idx = np.asarray(idx, np.int64).reshape(-1, 3)
+    p0, p1, p2 = pos[idx[:, 0]], pos[idx[:, 1]], pos[idx[:, 2]]
+    t0, t1, t2 = uv[idx[:, 0]], uv[idx[:, 1]], uv[idx[:, 2]]
+    e1, e2, d1, d2 = p1 - p0, p2 - p0, t1 - t0, t2 - t0
+    det = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+    r = np.where(np.abs(det) > 1e-12, 1.0 / np.where(det == 0, 1, det), 0.0)[:, None]
+    du = (e1 * d2[:, 1:2] - e2 * d1[:, 1:2]) * r                # dP/du
+    dv = (e2 * d1[:, 0:1] - e1 * d2[:, 0:1]) * r                # dP/dv
+    T, B = np.zeros_like(pos), np.zeros_like(pos)
+    for k in range(3):
+        np.add.at(T, idx[:, k], du)
+        np.add.at(B, idx[:, k], dv)
+    n = nrm / np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
+    T = T - n * (T * n).sum(axis=1, keepdims=True)
+    ln = np.linalg.norm(T, axis=1, keepdims=True)
+    # no usable direction (no area in the picture): any one along the surface
+    alt = np.cross(n, np.where(np.abs(n[:, 1:2]) < 0.9, [[0, 1, 0]], [[1, 0, 0]]))
+    T = np.where(ln > 1e-12, T / np.maximum(ln, 1e-12), alt / np.maximum(np.linalg.norm(alt, axis=1, keepdims=True), 1e-12))
+    w = np.where((np.cross(n, T) * -B).sum(axis=1) < 0, -1.0, 1.0)
+    return np.column_stack([T, w])
+
+
 def write_glb_scene(path, meshes, materials, images):
     """
     A GLB with several meshes, each with several primitives.
@@ -394,6 +454,10 @@ def write_glb_scene(path, meshes, materials, images):
                 attrs["TEXCOORD_0"] = add_acc(p["uv0"].astype(np.float32), 5126, "VEC2", 34962)
             if p.get("colors") is not None:
                 attrs["COLOR_0"] = add_acc(p["colors"].astype(np.float32), 5126, "VEC4", 34962)
+            if p.get("uv0") is not None and "normalTexture" in materials[p["material"]]:
+                # the normal map's frame, stored so every viewer reads it the same way
+                tan = _tangents(p["positions"], p["normals"], p["uv0"], p["indices"])
+                attrs["TANGENT"] = add_acc(tan.astype(np.float32), 5126, "VEC4", 34962)
             idx = add_acc(p["indices"].astype(np.uint32).reshape(-1), 5125, "SCALAR", 34963)
             prims.append({"attributes": attrs, "indices": idx, "material": p["material"]})
         gl_meshes.append({"name": m["name"], "primitives": prims})
@@ -462,10 +526,12 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           output_scale, out_path, straightness=0.7, spacing_m=2.0,
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
-                          optimise=False, blocks=None, scatter=None, inner=None):
+                          optimise=False, blocks=None, scatter=None, inner=None, surface=True):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
+    surface: each tile material also gets a bump and a roughness map from its
+    grain (app/surface.py).
     inner: the inner streets as exact shapes, {"base_mask_path": the mask
     without them, "shapes": app/streets.py's shapes}: the other roads are
     built from the mask without them, and they are laid as they are.
@@ -539,12 +605,14 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     marked = {}                  # width class (cm) -> index into the marked textures
     mark_tex = []
     E = None
+    mark_size = None
     if painted:
         dashed = [st for st in mesh.streets.values() if st.get("dash")]
         if dashed:
             cycle = float((dash_cfg or {}).get("cycle_m", 9.0))
             share = float((dash_cfg or {}).get("dash_share", 0.6))
             E = math.ceil(2 * max(st["half_width_m"] for st in dashed) * 1.15 / tile_m) * tile_m
+            mark_size = (cycle, E)                         # what a marked texture covers, along and across
             # at most three line widths, each a group of streets with similar
             # widths: many short pieces would otherwise each want a texture
             ws = np.sort([st["dash"]["width_m"] * 100 for st in dashed])
@@ -594,17 +662,13 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
 
     images, materials, primitives, key_to_mat = [], [], [], {}
     for (part, vk), quads in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
-        buf = io.BytesIO()
         if part == "marked":
-            mark_tex[marked[vk]][1].save(buf, "JPEG", quality=92)
-            name = f"Road_marked_{vk}cm"
+            tile_material(f"Road_marked_{vk}cm", mark_tex[marked[vk]][1], images, materials,
+                          mark_size, "asphalt", 0.9, surface)
         else:
-            Image.open(tiles[part][vk]["path"]).convert("RGB").save(buf, "JPEG", quality=92)
-            name = f"Road_{'street' if part == 'open' else part}_{vk + 1}"
-        images.append((buf.getvalue(), "image/jpeg"))
-        materials.append({"name": name, "doubleSided": True,
-                          "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1, "texCoord": 0},
-                                                   "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+            tile_material(f"Road_{'street' if part == 'open' else part}_{vk + 1}",
+                          Image.open(tiles[part][vk]["path"]), images, materials,
+                          (tile_m, tile_m), "asphalt", 0.9, surface)
         remap, pos, uv, col, idx = {}, [], [], [], []
 
         def vid(vi, owner, qpart, _marked=(part == "marked")):
@@ -650,12 +714,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             import shapely
             dk = shapely.distance(ks.boundary, shapely.points(fv[:, 0], fv[:, 1])) * mpp_out
             ff = ff * (role_f["kerb"] + (1.0 - role_f["kerb"]) * np.clip(dk / 1.5, 0.0, 1.0))
-        buf = io.BytesIO()
-        Image.open(tiles["open"][0]["path"]).convert("RGB").save(buf, "JPEG", quality=92)
-        images.append((buf.getvalue(), "image/jpeg"))
-        materials.append({"name": "Road_fill", "doubleSided": True,
-                          "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                                   "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+        tile_material("Road_fill", Image.open(tiles["open"][0]["path"]), images, materials,
+                      (tile_m, tile_m), "asphalt", 0.9, surface)
         primitives.append({"positions": Pf, "normals": np.tile([0, 1, 0], (len(Pf), 1)),
                            "uv0": np.column_stack([Pf[:, 0] / tile_m, Pf[:, 2] / tile_m]),
                            "colors": np.column_stack([ff, ff, ff, np.ones_like(ff)]),
@@ -683,12 +743,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             t2 = np.where((ny < 0)[:, None], t2[:, [0, 2, 1]], t2)
             t2 = t2[np.abs(ny) * 0.5 > 1e-3]
             f = map_coordinates(fac, [v2[:, 1], v2[:, 0]], order=1, mode="nearest")
-            buf = io.BytesIO()
-            Image.open(tiles["open"][0]["path"]).convert("RGB").save(buf, "JPEG", quality=92)
-            images.append((buf.getvalue(), "image/jpeg"))
-            materials.append({"name": "Road_interchange", "doubleSided": True,
-                              "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                                       "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+            tile_material("Road_interchange", Image.open(tiles["open"][0]["path"]), images, materials,
+                          (tile_m, tile_m), "asphalt", 0.9, surface)
             primitives.append({"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
                                "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
                                "colors": np.column_stack([f, f, f, np.ones_like(f)]),
@@ -696,7 +752,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             ic_tris = int(len(t2))
 
     meshes = [{"name": "Road", "primitives": primitives}]
-    sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes)
+    sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface)
     scatter_info = None
     if scatter:
         stand = (float(blocks.get("height_m", 0.10)) if blocks else
@@ -710,8 +766,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                     fac, tiles, tile_m, images, materials, meshes,
                                     height_m=float(blocks.get("height_m", 0.10)),
                                     with_sidewalks=bool(mesh.sw_quads),
-                                    cell_m=16.0 if optimise else 8.0)
-    deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes) \
+                                    cell_m=16.0 if optimise else 8.0, surface=surface)
+    deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
     feet = scatter_info.pop("_feet", None) if scatter_info else None
     lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
@@ -744,7 +800,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     if didx:
         materials.append({"name": "RoadMarkings", "doubleSided": True,
                           "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
-                                                   "metallicFactor": 0.0, "roughnessFactor": 0.6}})
+                                                   "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
         meshes.append({"name": "Markings", "primitives": [{
             "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
             "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
@@ -851,7 +907,7 @@ def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
 
 
 
-def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes):
+def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface=True):
     """
     The sidewalk top (paving, with a kerb stone along its edge) and the vertical
     kerb face down to the road, as two meshes of quads.
@@ -886,14 +942,8 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             u, v = v, -u
         return (-u if L["flip"] else u), v
 
-    def add_tile_material(name, path):
-        buf = io.BytesIO()
-        Image.open(path).convert("RGB").save(buf, "JPEG", quality=92)
-        images.append((buf.getvalue(), "image/jpeg"))
-        materials.append({"name": name, "doubleSided": True,
-                          "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                                   "metallicFactor": 0.0, "roughnessFactor": 0.85}})
-        return len(materials) - 1
+    def add_tile_material(name, path, kind="paving"):
+        return tile_material(name, Image.open(path), images, materials, (tile_m, tile_m), kind, 0.85, surface)
 
     # top surface: paving grouped by variant, kerb stone on its own material
     groups = {}
@@ -912,7 +962,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk]["path"])
         else:
             kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-            mat = add_tile_material("Kerb_stone", kt)
+            mat = add_tile_material("Kerb_stone", kt, "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
 
         def vid(vi, owner):
@@ -963,7 +1013,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
 
     # the vertical kerb face, facing the road
     kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-    mat = add_tile_material("Kerb_face", kt)
+    mat = add_tile_material("Kerb_face", kt, "concrete")
     pos, nrm, uvs, col, idx = [], [], [], [], []
     for q, facing in zip(mesh.kerb_quads, mesh.kerb_facing):
         b0, b1, t1, t0 = q
@@ -993,7 +1043,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
 
 
 
-def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, meshes):
+def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, meshes, surface=True):
     """
     Give a raised road some thickness: a side face down each edge and an
     underside, deck_m below the road surface, wherever it is off the ground.
@@ -1069,12 +1119,7 @@ def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, me
     if not idx:
         return {"faces": 0}
     kt = (tiles.get("kerbstone") or tiles.get("sidewalk") or tiles["open"])[0]["path"]
-    buf = io.BytesIO()
-    Image.open(kt).convert("RGB").save(buf, "JPEG", quality=92)
-    images.append((buf.getvalue(), "image/jpeg"))
-    materials.append({"name": "Bridge_deck", "doubleSided": True,
-                      "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                               "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+    tile_material("Bridge_deck", Image.open(kt), images, materials, (tile_m, tile_m), "concrete", 0.9, surface)
     meshes.append({"name": "BridgeDeck", "primitives": [{
         "positions": np.array(pos), "normals": np.array(nrm), "uv0": np.array(uvs),
         "indices": np.array(idx), "material": len(materials) - 1}]})
@@ -1136,7 +1181,7 @@ def _split_quad(up, a, b, c, d, eps):
 
 
 def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, images, materials, meshes,
-                  height_m=0.10, with_sidewalks=True, cell_m=8.0):
+                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface=True):
     """
     The blocks and islands between roads as flat planes with the sidewalk's
     paving. With sidewalks, each block reaches all the way to the kerb line
@@ -1187,12 +1232,8 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     fb = _ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
     f = map_coordinates(fb, [np.clip(v2[:, 1], 0, H - 1), np.clip(v2[:, 0], 0, W - 1)], order=1, mode="nearest")
     f = 1.0 + (f - 1.0) * 0.33
-    buf = io.BytesIO()
-    Image.open(tiles["sidewalk"][0]["path"]).convert("RGB").save(buf, "JPEG", quality=92)
-    images.append((buf.getvalue(), "image/jpeg"))
-    materials.append({"name": "Block_paving", "doubleSided": True,
-                      "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                               "metallicFactor": 0.0, "roughnessFactor": 0.85}})
+    tile_material("Block_paving", Image.open(tiles["sidewalk"][0]["path"]), images, materials,
+                  (tile_m, tile_m), "paving", 0.85, surface)
     prims = [{"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
               "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
               "colors": np.column_stack([f, f, f, np.ones_like(f)]),
@@ -1242,12 +1283,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
                     faces += 1
         if idx:
             kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
-            buf = io.BytesIO()
-            Image.open(kt).convert("RGB").save(buf, "JPEG", quality=92)
-            images.append((buf.getvalue(), "image/jpeg"))
-            materials.append({"name": "Block_kerb", "doubleSided": True,
-                              "pbrMetallicRoughness": {"baseColorTexture": {"index": len(images) - 1},
-                                                       "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+            tile_material("Block_kerb", Image.open(kt), images, materials, (tile_m, tile_m), "concrete", 0.9, surface)
             prims.append({"positions": np.array(pos), "normals": np.array(nrm), "uv0": np.array(uvs),
                           "indices": np.array(idx), "material": len(materials) - 1})
     meshes.append({"name": "Blocks", "primitives": prims})

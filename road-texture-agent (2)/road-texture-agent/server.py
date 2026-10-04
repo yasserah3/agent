@@ -50,7 +50,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-render1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-materials1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1355,7 +1355,7 @@ def export3d(payload: dict):
                 bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
                             "deck_m": float(payload.get("bridge_deck_m", 1.0))},
-                inner=inner)
+                inner=inner, surface=bool(payload.get("surface_detail", True)))
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None
