@@ -27,8 +27,8 @@ const host = $('#view3d'), msg = $('#view3dMsg');
 // colour and strength, the sky, exposure, how much the sky lights the scene,
 // the street lamps (0 off, 1 full), the glow, and the haze
 const TIMES = {
-  dawn:  { elev: 4, azim: 100, color: 0xffb47a, sun: 2.6, sky: true, turbidity: 7, rayleigh: 2.6, mie: 0.006, mieG: 0.9,
-           clouds: 0.35, exposure: 0.8, env: 0.45, lamps: 0.6, bloom: [0.45, 0.5, 2.5], fog: [0x8a7f7c, 0.00035],
+  dawn:  { elev: 4, azim: 100, color: 0xffb47a, sun: 2.2, sky: true, turbidity: 6, rayleigh: 2.4, mie: 0.0035, mieG: 0.8,
+           clouds: 0.35, exposure: 0.8, env: 0.45, lamps: 0.6, bloom: [0.18, 0.3, 4.0], fog: [0x8a7f7c, 0.00035],
            ground: 0x4a4d3c },
   day:   { elev: 52, azim: 215, color: 0xfff3e2, sun: 3.2, sky: true, turbidity: 2.2, rayleigh: 1.0, mie: 0.004, mieG: 0.8,
            clouds: 0.3, exposure: 0.8, env: 0.4, lamps: 0, bloom: [0.1, 0.4, 6.0], fog: [0xc9d6e0, 0.00035],
@@ -37,6 +37,12 @@ const TIMES = {
            bloom: [0.6, 0.5, 1.5], fog: [0x070b16, 0.0005], ground: 0x2a2e26 },
 };
 const LAMP = { height: 8.0, arm: 1.6, candela: 320, pool: 12 };
+
+// the Light panel: the sun's strength (with its glow in the sky) and the street
+// lamps' brightness and colour, kept in this browser for the next time
+const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96' };
+try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
+const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
 
 let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, output;
 let sky, skyEnv, envScene, pmrem, envRT = null, nightTex = null, stars = null, ground;
@@ -92,7 +98,7 @@ function init(){
   // the land round the place, fading into the haze at the horizon
   ground = new THREE.Mesh(new THREE.CircleGeometry(6000, 96).rotateX(-Math.PI / 2),
     new THREE.MeshStandardMaterial({ color: 0x5c6648, roughness: 1 }));
-  ground.position.y = -0.05;
+  ground.position.y = -0.3;                                           // well under the streets, blocks and islands
   ground.receiveShadow = true;
   ground.name = 'ground';
   scene.add(ground);
@@ -222,15 +228,20 @@ function setTime(name, render = true){
   time = name;
   const t = TIMES[name];
   const d = sunDir(t);
+  const k = LIGHT.sun;
   for(const s of [sky, skyEnv]){
     const u = s.material.uniforms;
     u.sunPosition.value.copy(d);
     if(t.sky){
+      // a weaker sun has a smaller, fainter glow round it in the sky, and a dimmer disc
       u.turbidity.value = t.turbidity; u.rayleigh.value = t.rayleigh;
-      u.mieCoefficient.value = t.mie; u.mieDirectionalG.value = t.mieG;
+      u.mieCoefficient.value = t.mie * Math.min(k, 1.5); u.mieDirectionalG.value = t.mieG;
       u.cloudCoverage.value = t.clouds;
     }
   }
+  // the sun's disc is thousands of times brighter than the sky: still white, but
+  // dimmed so the glow round bright lights stays a halo instead of flooding the view
+  sky.material.uniforms.showSunDisc.value = 0.03 * Math.min(k, 1);
   sky.visible = t.sky;
   // what lights the scene from all round: the sky (without the sun's disc), or the night sky
   envScene.background = t.sky ? null : nightSky();
@@ -247,10 +258,10 @@ function setTime(name, render = true){
   const st = starField();
   if(t.sky) scene.remove(st); else scene.add(st);
   sun.color.set(t.color);
-  sun.intensity = t.sun;
+  sun.intensity = t.sun * k;
   hemi.intensity = t.sky ? 0 : 0.06;
   renderer.toneMappingExposure = t.exposure;
-  bloom.strength = t.bloom[0]; bloom.radius = t.bloom[1]; bloom.threshold = t.bloom[2];
+  bloom.strength = t.bloom[0] * (t.sky ? Math.min(k, 1) : 1); bloom.radius = t.bloom[1]; bloom.threshold = t.bloom[2];
   if(lamps) lampLevel(t.lamps);
   document.querySelectorAll('[data-time3d]').forEach(b => b.setAttribute('aria-pressed', b.dataset.time3d === name ? 'true' : 'false'));
   if(render) poolAt = null;
@@ -323,7 +334,7 @@ function buildLamps(list){
   // the nearest lamps light the scene for real; the others show a soft pool of light
   const pool = [];
   for(let i = 0; i < LAMP.pool; i++){
-    const s = new THREE.SpotLight(0xffcf96, 0, 60, 1.15, 0.85, 2);
+    const s = new THREE.SpotLight(LIGHT.colour, 0, 60, 1.15, 0.85, 2);
     s.castShadow = false;
     pool.push(s);
   }
@@ -337,11 +348,16 @@ function buildLamps(list){
 }
 
 function lampLevel(level){
+  // the time's level (off by day) times the Light panel's brightness, in its colour
+  level *= LIGHT.lamps;
   lamps.level = level;
-  lamps.headMat.emissiveIntensity = 30 * level;
-  lamps.glows.material.opacity = 0.3 * level;
+  const c = new THREE.Color(LIGHT.colour);
+  lamps.headMat.emissive.copy(c);
+  lamps.headMat.emissiveIntensity = 30 * Math.min(level, 1.5);
+  lamps.glows.material.color.copy(c);
+  lamps.glows.material.opacity = Math.min(0.3 * level, 0.9);
   lamps.glows.visible = level > 0;
-  for(const s of lamps.pool){ s.visible = level > 0; s.intensity = LAMP.candela * level; }
+  for(const s of lamps.pool){ s.visible = level > 0; s.color.copy(c); s.intensity = LAMP.candela * level; }
 }
 
 function assignPool(){
@@ -418,8 +434,9 @@ function prepare(root){
     o.castShadow = !/^Road|Markings/.test(part) && !/^Road|Block_paving|RoadMarkings/.test(name);
     for(const m of [].concat(o.material)){
       if(m.map) m.map.anisotropy = aniso;
-      if(/Road_fill|Road_interchange|Block_paving/.test(m.name)){
-        m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 2;
+      if(/Road_fill|Road_interchange/.test(m.name)){
+        // laid just under the road strips: kept behind them, but never pushed as far as the land
+        m.polygonOffset = true; m.polygonOffsetFactor = 0.5; m.polygonOffsetUnits = 2;
       }
       if(/RoadMarkings/.test(m.name)){
         m.polygonOffset = true; m.polygonOffsetFactor = -1; m.polygonOffsetUnits = -2;
@@ -474,7 +491,7 @@ async function startPhoto(){
         // the picture sharpens sooner
         const near = lamps.items.map(it => [it.foot.distanceTo(tg), it]).filter(a => a[0] < 120).sort((a, b) => a[0] - b[0]).slice(0, 24);
         for(const [, it] of near){
-          const s = new THREE.SpotLight(0xffcf96, LAMP.candela * lamps.level, 0, 1.15, 0.85, 2);
+          const s = new THREE.SpotLight(LIGHT.colour, LAMP.candela * lamps.level, 0, 1.15, 0.85, 2);
           s.position.copy(it.head);
           s.target.position.copy(it.head).addScaledVector(it.dir, 2.0).setY(it.foot.y - 1);
           extra.add(s, s.target);
@@ -562,6 +579,32 @@ window.addEventListener('view3d', e => {
   if(!running){ running = true; requestAnimationFrame(loop); }
 });
 $('#btnScene3d').addEventListener('click', generate);
+// the Light panel
+let lightTimer = null;
+const showLight = () => {
+  $('#sunStrength').value = Math.round(LIGHT.sun * 100); $('#sunStrengthVal').textContent = Math.round(LIGHT.sun * 100) + '%';
+  $('#lampStrength').value = Math.round(LIGHT.lamps * 100); $('#lampStrengthVal').textContent = Math.round(LIGHT.lamps * 100) + '%';
+  $('#lampColour').value = LIGHT.colour;
+};
+showLight();
+$('#sunStrength').addEventListener('input', () => {
+  LIGHT.sun = +$('#sunStrength').value / 100; showLight(); saveLight();
+  if(!renderer) return;
+  if(photo && photo.on) stopPhoto();
+  // the light at once; the sky's glow (which re-lights the scene) once the slider rests
+  sun.intensity = TIMES[time].sun * LIGHT.sun;
+  clearTimeout(lightTimer); lightTimer = setTimeout(() => setTime(time), 150);
+});
+$('#lampStrength').addEventListener('input', () => {
+  LIGHT.lamps = +$('#lampStrength').value / 100; showLight(); saveLight();
+  if(photo && photo.on) stopPhoto();
+  if(lamps) { lampLevel(TIMES[time].lamps); poolAt = null; }
+});
+$('#lampColour').addEventListener('input', () => {
+  LIGHT.colour = $('#lampColour').value; saveLight();
+  if(photo && photo.on) stopPhoto();
+  if(lamps) lampLevel(TIMES[time].lamps);
+});
 $('#btnPhoto').addEventListener('click', startPhoto);
 $('#btnSaveImg').addEventListener('click', saveImage);
 document.querySelectorAll('[data-time3d]').forEach(b => b.addEventListener('click', () => { if(renderer) setTime(b.dataset.time3d); else time = b.dataset.time3d; }));

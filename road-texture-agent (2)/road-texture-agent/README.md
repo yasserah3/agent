@@ -983,7 +983,8 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
   and islands, markings, and your objects and plants, exactly the model the
   GLB export makes, with the 3D model settings of the Generate tab (sidewalks,
   blocks, markings painted or as strips, mesh detail). Around the place the
-  land runs on to the horizon and fades into the haze.
+  land runs on to the horizon and fades into the haze; it lies 30 cm under the
+  streets, so it never shows through the blocks or islands.
 - **Street lamps** stand along every sidewalk, one about every 30 m, the two
   sides of a street alternating, set 45 cm in from the kerb with the arm
   reaching over the road. Never on a corner, on a sidewalk under 0.8 m, or in
@@ -994,6 +995,12 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
   - *Day*: a high sun from the south-west, a clear sky with a few clouds;
   - *Night*: moonlight, a starry sky, and the street lamps lighting the streets
     in warm pools of light.
+- **Light** sets, for every time of day:
+  - *Sun strength* (0 to 200%): how bright the sun is, or the moon at night,
+    with its glow in the sky;
+  - *Street lamps* (0 to 300%, 0 is off) and *Lamp colour*: how bright the
+    lamps are when they are on, and the colour of their light.
+  They are kept in the browser for the next time, and apply to Render photo too.
 - **The live view** is drawn with the sky (the sun's position, haze and
   clouds), sunlight with shadows (sharp close up, covering everything when
   zoomed out), the sky's light from all round, soft contact shadows where
