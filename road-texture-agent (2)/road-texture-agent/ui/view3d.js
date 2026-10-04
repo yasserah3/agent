@@ -8,7 +8,8 @@
 // the sky, the colour of the sunlight and the balance of sun and sky are
 // those of Blender and Cycles. Render
 // photo then traces the light properly (three-gpu-pathtracer), a still that
-// sharpens for as long as the camera stays put. Dawn, Day and Night set the
+// sharpens for as long as the camera stays put, its noise cleared by Intel Open
+// Image Denoise (ui/denoise.js, ported to WebGL2). Dawn, Day and Night set the
 // sun, the sky and the street lamps. Metres, Y up: the map's x is +X, its y +Z,
 // the top of the map north. Everything is bundled in ui/vendor, so it works offline.
 import * as THREE from 'three';
@@ -19,8 +20,10 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildSkyMaps } from './sky_blender.js';
+import { Denoiser } from './denoise.js';
 
 const $ = s => document.querySelector(s);
 const host = $('#view3d'), msg = $('#view3dMsg');
@@ -42,12 +45,16 @@ const TIMES = {
            bloom: [0.6, 0.5, 1.5], fog: [0x070b16, 0.0005], ground: 0x2a2e26 },
 };
 const LAMP = { height: 8.0, arm: 1.6, candela: 320, pool: 12 };
+const PHOTO_LAMPS = 1000;
 
 // the Light panel: the sun's (or moon's) strength and the street
 // lamps' brightness and colour, kept in this browser for the next time
 const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96' };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
+// Render photo's noise cleared by Open Image Denoise (on unless turned off here before)
+let DENOISE = true;
+try{ DENOISE = localStorage.getItem('rta.view3d.denoise') !== 'off'; }catch(e){}
 
 let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, output;
 let envScene, pmrem, envRT = null, nightTex = null, stars = null, ground, skyNow = null, skyToken = 0, sunBase = 1;
@@ -132,6 +139,8 @@ function init(){
 function resize(){
   const w = host.clientWidth, h = host.clientHeight;
   if(!renderer || !w || !h) return;
+  const now = renderer.getSize(new THREE.Vector2());
+  if(now.x === w && now.y === h) return;                               // the same size: nothing to do
   renderer.setSize(w, h);
   composer.setSize(w, h);
   camera.aspect = w / h;
@@ -525,7 +534,16 @@ async function startPhoto(){
       pt.bounces = 5; pt.filterGlossyFactor = 0.5;
       pt.tiles.set(2, 2);
       photo = { pt, on: false };
+      // on screen: the denoised picture once there is one, else the samples so far
+      pt.renderToCanvasCallback = (target, r, quad) => {
+        const auto = r.autoClear;
+        r.autoClear = false;
+        if(DENOISE && photo.clean && photo.clean.shown) quad.material.map = photo.clean.out.texture;
+        quad.render(r);
+        r.autoClear = auto;
+      };
     }
+    photo.clean = null;                                                 // nothing denoised yet
     photo.saved = { env: scene.environment, bg: scene.background, envI: scene.environmentIntensity };
     if(skyNow){
       // Blender's sky as the tracer's light from all round, without the sun's disc (the sun is
@@ -552,9 +570,9 @@ async function startPhoto(){
       extra.add(merged(lamps.poles.geometry, lamps.metalMat), merged(lamps.heads.geometry, lamps.headMat));
       if(lamps.level > 0){
         const tg = controls.target;
-        // the lamps that light what is in view; the far ones show only their heads, so
-        // the picture sharpens sooner
-        const near = lamps.items.map(it => [it.foot.distanceTo(tg), it]).filter(a => a[0] < 120).sort((a, b) => a[0] - b[0]).slice(0, 24);
+        // every lamp a real light (up to the nearest thousand): the tracer's light tree
+        // picks, at each point, the lamps likely to light it, so many lamps stay cheap
+        const near = lamps.items.map(it => [it.foot.distanceTo(tg), it]).sort((a, b) => a[0] - b[0]).slice(0, PHOTO_LAMPS);
         for(const [, it] of near){
           const s = new THREE.SpotLight(LIGHT.colour, LAMP.candela * lamps.level, 0, 1.15, 0.85, 2);
           s.position.copy(it.head);
@@ -583,6 +601,7 @@ async function startPhoto(){
 function stopPhoto(why){
   if(!photo || !photo.on) return;
   photo.on = false;
+  dropClean();
   scene.environment = photo.saved.env; scene.background = photo.saved.bg; scene.environmentIntensity = photo.saved.envI;
   hemi.visible = true;
   if(stars) stars.visible = true;
@@ -593,8 +612,19 @@ function stopPhoto(why){
   if(why) note(why);
 }
 
-function saveImage(){
+function dropClean(){
+  if(!photo || !photo.clean) return;
+  for(const rt of [photo.clean.albedo, photo.clean.normal, photo.clean.out]) if(rt) rt.dispose();
+  photo.clean = null;
+}
+
+async function saveImage(){
   if(!renderer) return;
+  // the photo as sharp as it is now: denoised again if it has had more samples since
+  if(photo && photo.on && DENOISE && photo.pt.samples >= 1){
+    const n = Math.floor(photo.pt.samples);
+    if(!photo.clean || photo.clean.at < n) await denoisePhoto(n);
+  }
   draw();
   renderer.domElement.toBlob(b => {
     const a = document.createElement('a');
@@ -609,8 +639,11 @@ function saveImage(){
 function draw(){
   if(photo && photo.on){
     photo.pt.renderSample();
-    const n = Math.floor(photo.pt.samples);
-    if(n && n % 4 === 0) $('#photoNote').textContent = `${n} samples, ${((performance.now() - photo.started) / 1000).toFixed(0)} s. Sharper with every sample; move the camera to go back to the live view.`;
+    const n = photo.pt.samples;
+    // denoised after 4 samples, then each time the samples have grown four times over
+    if(DENOISE && Number.isInteger(n) && n >= (photo.clean ? photo.clean.next : 4) && !photo.denoising) denoisePhoto(n);
+    const k = Math.floor(n);
+    if(k && k % 4 === 0 && !photo.denoising) photoNote(k);
     return;
   }
   // near and far planes follow the zoom, for depth precision both close up and far away
@@ -621,6 +654,123 @@ function draw(){
   assignPool();
   if(stars) stars.position.copy(camera.position);                      // as far away as the sky
   composer.render();
+}
+
+function photoNote(n){
+  const c = DENOISE && photo.clean && photo.clean.shown ? ` Showing it denoised at ${photo.clean.at} samples (Open Image Denoise).` : '';
+  $('#photoNote').textContent = `${n} samples, ${((performance.now() - photo.started) / 1000).toFixed(0)} s.${c} Sharper with every sample; move the camera to go back to the live view.`;
+}
+
+// ----------------------------------------------------------------- denoising
+// What the denoiser needs besides the noisy picture: the colour (albedo) and the
+// direction (normal) of the surface each pixel sees, drawn without noise and
+// filtered over the pixel the way the tracer's samples are (a tent, a pixel each
+// way), from 16 slightly shifted views
+const AUX_VIEWS = 16;
+let auxQuad = null, denoiser = null, denoiserLoad = null;
+const auxCache = new WeakMap();
+function auxMaterial(m, kind){
+  let c = auxCache.get(m);
+  if(!c) auxCache.set(m, c = {});
+  if(c[kind]) return c[kind];
+  const a = m.clone();
+  a.fog = false; a.toneMapped = false; a.transparent = false; a.blending = THREE.NoBlending;
+  a.onBeforeCompile = sh => {
+    const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
+    sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n'
+      + (kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`));
+  };
+  a.customProgramCacheKey = () => 'aux-' + kind;
+  return c[kind] = a;
+}
+
+function renderAux(w, h){
+  const make = type => new THREE.WebGLRenderTarget(w, h, { type, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter,
+                                                           magFilter: THREE.NearestFilter, depthBuffer: type === THREE.HalfFloatType });
+  const shot = make(THREE.HalfFloatType), out = { albedo: make(THREE.HalfFloatType), normal: make(THREE.HalfFloatType) };
+  if(!auxQuad) auxQuad = new FullScreenQuad(new THREE.ShaderMaterial({
+    uniforms: { map: { value: null }, weight: { value: 1 } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: 'uniform sampler2D map; uniform float weight; varying vec2 vUv; void main(){ gl_FragColor = texture2D(map, vUv) * weight; }',
+    blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendEquation: THREE.AddEquation,
+    depthTest: false, depthWrite: false, toneMapped: false }));
+  const keep = { target: renderer.getRenderTarget(), colour: renderer.getClearColor(new THREE.Color()), alpha: renderer.getClearAlpha(),
+                 auto: renderer.autoClear, shadows: renderer.shadowMap.autoUpdate, bg: scene.background, bgI: scene.backgroundIntensity };
+  const swapped = [], lights = [];
+  scene.traverseVisible(o => { if(o.isMesh && o.material) swapped.push([o, o.material]); });
+  // the photo's lamp lights do not matter here (and are far too many for drawing)
+  if(photo && photo.extra) photo.extra.traverse(o => { if(o.isLight && o.visible){ o.visible = false; lights.push(o); } });
+  const tent = u => (u < 0.5 ? Math.sqrt(2 * u) - 1 : 1 - Math.sqrt(2 - 2 * u));
+  renderer.shadowMap.autoUpdate = false;
+  try{
+    for(const kind of ['albedo', 'normal']){
+      for(const [o, m] of swapped) o.material = Array.isArray(m) ? m.map(x => auxMaterial(x, kind)) : auxMaterial(m, kind);
+      // the sky: as bright as it shows (albedo); no surface (normal)
+      scene.background = kind === 'albedo' ? keep.bg : null;
+      scene.backgroundIntensity = keep.bgI * renderer.toneMappingExposure;
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(out[kind]); renderer.clear();
+      for(let i = 0; i < AUX_VIEWS; i++){
+        const jx = tent(((i % 4) + 0.5) / 4), jy = tent((Math.floor(i / 4) + 0.5) / 4);
+        camera.setViewOffset(w, h, jx, jy, w, h);
+        renderer.autoClear = true;
+        renderer.setRenderTarget(shot); renderer.render(scene, camera);
+        renderer.autoClear = false;
+        auxQuad.material.uniforms.map.value = shot.texture; auxQuad.material.uniforms.weight.value = 1 / AUX_VIEWS;
+        renderer.setRenderTarget(out[kind]); auxQuad.render(renderer);
+      }
+    }
+  }finally{
+    for(const [o, m] of swapped) o.material = m;
+    for(const l of lights) l.visible = true;
+    camera.clearViewOffset();
+    scene.background = keep.bg; scene.backgroundIntensity = keep.bgI;
+    renderer.setRenderTarget(keep.target); renderer.setClearColor(keep.colour, keep.alpha);
+    renderer.autoClear = keep.auto; renderer.shadowMap.autoUpdate = keep.shadows;
+    shot.dispose();
+  }
+  return out;
+}
+
+async function denoisePhoto(n){
+  if(!photo || !photo.on || photo.denoising) return;
+  photo.denoising = true;
+  const ph = photo;
+  try{
+    if(!denoiser){
+      $('#photoNote').textContent = 'Loading the denoiser (Open Image Denoise)…';
+      denoiserLoad = denoiserLoad || Denoiser.load(renderer.getContext(), new URL('./vendor/oidn/rt_hdr_calb_cnrm.tza', import.meta.url).href);
+      denoiser = await denoiserLoad;
+      if(!ph.on) return;
+    }
+    const target = ph.pt.target, w = target.width, h = target.height;
+    if(!ph.clean || ph.clean.w !== w || ph.clean.h !== h){
+      if(ph.clean) for(const rt of [ph.clean.albedo, ph.clean.normal, ph.clean.out]) rt.dispose();
+      const aux = renderAux(w, h);
+      const out = new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                      minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+      renderer.initRenderTarget(out);
+      ph.clean = { w, h, albedo: aux.albedo, normal: aux.normal, out, at: 0, next: 4, shown: false };
+    }
+    const tex = rt => renderer.properties.get(rt.texture).__webglTexture;
+    const t0 = performance.now();
+    try{
+      ph.clean.info = denoiser.denoise({ color: tex(target), albedo: tex(ph.clean.albedo), normal: tex(ph.clean.normal),
+                                         output: tex(ph.clean.out), width: w, height: h });
+    }finally{
+      renderer.resetState();
+    }
+    ph.clean.ms = performance.now() - t0;
+    ph.clean.at = n; ph.clean.next = Math.max(4, n * 4); ph.clean.shown = true;
+    photoNote(n);
+  }catch(e){
+    DENOISE = false;
+    $('#photoDenoise').checked = false;
+    $('#photoNote').textContent = 'The denoiser is not available here: ' + e.message;
+    console.error(e);
+  }finally{
+    ph.denoising = false;
+  }
 }
 
 function loop(){
@@ -670,11 +820,20 @@ $('#lampColour').addEventListener('input', () => {
 });
 $('#btnPhoto').addEventListener('click', startPhoto);
 $('#btnSaveImg').addEventListener('click', saveImage);
+$('#photoDenoise').checked = DENOISE;
+$('#photoDenoise').addEventListener('change', () => {
+  DENOISE = $('#photoDenoise').checked;
+  try{ localStorage.setItem('rta.view3d.denoise', DENOISE ? 'on' : 'off'); }catch(e){}
+  if(photo && photo.on && DENOISE && photo.clean) photo.clean.next = 0;    // denoise what there is now
+});
 document.querySelectorAll('[data-time3d]').forEach(b => b.addEventListener('click', () => { if(renderer) setTime(b.dataset.time3d); else time = b.dataset.time3d; }));
 $('#btnView3dReset').addEventListener('click', () => { if(renderer) frame(centre, radius); });
 window.view3dState = () => renderer ? { children: scene.children.length, width: host.clientWidth, height: host.clientHeight,
   camera: camera.position.toArray().map(v => Math.round(v)), time, lamps: lamps ? lamps.items.length : 0,
-  world: !!world, photo: !!(photo && photo.on), samples: photo && photo.on ? photo.pt.samples : 0 } : null;
+  world: !!world, photo: !!(photo && photo.on), samples: photo && photo.on ? photo.pt.samples : 0,
+  denoised: photo && photo.on && photo.clean ? { at: photo.clean.at, ms: Math.round(photo.clean.ms || 0), ...photo.clean.info } : null } : null;
 window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.assign(TIMES[n], patch); if(patch.candela) LAMP.candela = patch.candela; setTime(n); }, view: (pos, tgt) => { camera.position.set(...pos); controls.target.set(...tgt); controls.update(); poolAt = null; },
-  photo: startPhoto, stop: stopPhoto, draw: () => draw(),
+  photo: startPhoto, stop: stopPhoto, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
+  // for comparisons: the path tracer's light tree on or off (off: each light as likely)
+  lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
   capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); } };

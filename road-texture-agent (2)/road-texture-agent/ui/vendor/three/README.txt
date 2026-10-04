@@ -7,4 +7,6 @@ these in its import map.
 
 Also bundled, each with its own MIT licence:
   ../three-mesh-bvh/index.module.js        three-mesh-bvh 0.9.15 (build/)
-  ../three-gpu-pathtracer/index.module.js  three-gpu-pathtracer 0.0.26 (build/)
+  ../three-gpu-pathtracer/index.module.js  three-gpu-pathtracer 0.0.26 (build/), with a light
+                                           tree added for the photo render (LightTreeUniform and
+                                           the GLSL marked "light tree"; see its header)

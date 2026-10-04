@@ -1,3 +1,9 @@
+// three-gpu-pathtracer 0.0.26 (MIT licence, see LICENSE), build/index.module.js.
+// Changed for Road Texture Agent: a light tree, after Cycles' (LightTreeUniform, the
+// GLSL "light tree" functions and directLightContributionTree): spot and point lights
+// are picked by their importance at each point, the sky and directional lights by
+// theirs; the environment's mean luminance is kept for it (EquirectHdrInfoUniform).
+// Without the tree (area lights, or more than four directional lights) it works as before.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -2282,8 +2288,10 @@ class EquirectHdrInfoUniform {
 
 		let totalSumValue = 0.0;
 		let cumulativeWeightMarginal = 0.0;
+		let solidSum = 0.0, solidWeight = 0.0; // light tree: the mean luminance over the sphere
 		for ( let y = 0; y < height; y ++ ) {
 
+			const rowSin = Math.sin( Math.PI * ( y + 0.5 ) / height );
 			let cumulativeRowWeight = 0.0;
 			for ( let x = 0; x < width; x ++ ) {
 
@@ -2297,6 +2305,8 @@ class EquirectHdrInfoUniform {
 				const weight = this.getPixelWeight( r, g, b, y, height );
 				cumulativeRowWeight += weight;
 				totalSumValue += weight;
+				solidSum += weight * rowSin;
+				solidWeight += rowSin;
 
 				pdfConditional[ i ] = weight;
 				cdfConditional[ i ] = cumulativeRowWeight;
@@ -2378,6 +2388,7 @@ class EquirectHdrInfoUniform {
 		conditionalWeights.needsUpdate = true;
 
 		this.totalSum = totalSumValue;
+		this.meanLuminance = solidWeight > 0 ? solidSum / solidWeight : 0;
 		this.map = map;
 
 	}
@@ -2606,6 +2617,157 @@ class LightsInfoUniformStruct {
 		}
 
 		return false;
+
+	}
+
+}
+
+
+// Light tree (added for Road Texture Agent, after Cycles' light tree: Conty Estevez
+// and Kulla, "Importance Sampling of Many Lights with Adaptive Tree Splitting", 2018).
+// The spot and point lights in a bounding volume hierarchy, each node with its
+// bounds, energy and cone of emission, so a shading point picks a light in proportion
+// to how much it is likely to light it; the sun (directional lights) and the sky
+// are picked by their own importance next to the tree. Used when there are no
+// area lights and at most four directional lights.
+const TREE_NODES_PER_ROW = 256;
+class LightTreeUniform {
+
+	constructor() {
+
+		const tex = new DataTexture( new Float32Array( 16 ), 4, 1 );
+		tex.format = RGBAFormat;
+		tex.type = FloatType;
+		tex.wrapS = ClampToEdgeWrapping;
+		tex.wrapT = ClampToEdgeWrapping;
+		tex.generateMipmaps = false;
+		tex.minFilter = NearestFilter;
+		tex.magFilter = NearestFilter;
+		this.tex = tex;
+		this.enabled = 0;
+		this.root = - 1;
+		this.distantCount = 0;
+		this.distant = new Vector4( - 1, - 1, - 1, - 1 );
+		this.envEnergy = 0;
+		this.nodeCount = 0;
+
+	}
+
+	updateFrom( lights ) {
+
+		const local = [], distant = [];
+		let area = false;
+		lights.forEach( ( l, i ) => {
+
+			if ( l.isDirectionalLight ) distant.push( i );
+			else if ( l.isSpotLight || l.isPointLight ) local.push( i );
+			else area = true;
+
+		} );
+		this.enabled = ! area && distant.length <= 4 && local.length + distant.length > 0 ? 1 : 0;
+		this.distantCount = Math.min( distant.length, 4 );
+		this.distant.set( ...[ 0, 1, 2, 3 ].map( k => k < distant.length ? distant[ k ] : - 1 ) );
+
+		// the leaves: position, axis and cone of each light, its energy (intensity times luminance)
+		const items = local.map( i => {
+
+			const l = lights[ i ];
+			const pos = new Vector3().setFromMatrixPosition( l.matrixWorld );
+			let axis = new Vector3( 0, - 1, 0 ), thetaO = Math.PI, thetaE = Math.PI / 2;
+			if ( l.isSpotLight ) {
+
+				axis = new Vector3().setFromMatrixPosition( l.target.matrixWorld ).sub( pos ).normalize();
+				thetaO = 0;
+				thetaE = Math.min( l.angle, Math.PI / 2 );
+
+			}
+
+			const energy = Math.max( l.intensity, 0 ) * ( 0.2126 * l.color.r + 0.7152 * l.color.g + 0.0722 * l.color.b );
+			return { index: i, pos, axis, thetaO, thetaE, energy };
+
+		} );
+
+		// the tree: each node split at the middle light along its widest side
+		const nodes = [];
+		const build = list => {
+
+			const id = nodes.length;
+			nodes.push( null );
+			const min = new Vector3( Infinity, Infinity, Infinity ), max = new Vector3( - Infinity, - Infinity, - Infinity );
+			const axis = new Vector3();
+			let energy = 0, thetaE = 0, omni = false;
+			for ( const it of list ) {
+
+				min.min( it.pos );
+				max.max( it.pos );
+				energy += it.energy;
+				axis.addScaledVector( it.axis, Math.max( it.energy, 1e-6 ) );
+				thetaE = Math.max( thetaE, it.thetaE );
+				omni = omni || it.thetaO >= Math.PI;
+
+			}
+
+			// the cone round the axes of all the lights (theta_o) and how far each emits (theta_e)
+			let thetaO = Math.PI;
+			if ( ! omni && axis.length() > 1e-6 ) {
+
+				axis.normalize();
+				thetaO = 0;
+				for ( const it of list ) thetaO = Math.max( thetaO, Math.acos( Math.min( Math.max( axis.dot( it.axis ), - 1 ), 1 ) ) + it.thetaO );
+				thetaO = Math.min( thetaO, Math.PI );
+
+			} else {
+
+				axis.set( 0, - 1, 0 );
+
+			}
+
+			const node = { min, max, energy, axis, thetaO, thetaE, leaf: - 1, left: - 1, right: - 1 };
+			nodes[ id ] = node;
+			if ( list.length === 1 ) {
+
+				node.leaf = list[ 0 ].index;
+
+			} else {
+
+				const size = new Vector3().subVectors( max, min );
+				const k = size.x >= size.y && size.x >= size.z ? 'x' : size.y >= size.z ? 'y' : 'z';
+				list.sort( ( a, b ) => a.pos[ k ] - b.pos[ k ] );
+				const mid = list.length >> 1;
+				node.left = build( list.slice( 0, mid ) );
+				node.right = build( list.slice( mid ) );
+
+			}
+
+			return id;
+
+		};
+
+		this.root = items.length ? build( items ) : - 1;
+		this.nodeCount = nodes.length;
+
+		// four texels a node: min and energy, max and its light (-1: not a leaf), axis, angles and children
+		const tex = this.tex;
+		const width = TREE_NODES_PER_ROW * 4, height = Math.max( 1, Math.ceil( nodes.length / TREE_NODES_PER_ROW ) );
+		if ( tex.image.width !== width || tex.image.height !== height ) {
+
+			tex.dispose();
+			tex.image.data = new Float32Array( width * height * 4 );
+			tex.image.width = width;
+			tex.image.height = height;
+
+		}
+
+		const data = tex.image.data;
+		data.fill( 0 );
+		nodes.forEach( ( n, i ) => {
+
+			const o = ( Math.floor( i / TREE_NODES_PER_ROW ) * width + ( i % TREE_NODES_PER_ROW ) * 4 ) * 4;
+			data.set( [ n.min.x, n.min.y, n.min.z, n.energy, n.max.x, n.max.y, n.max.z, n.leaf,
+				n.axis.x, n.axis.y, n.axis.z, Math.cos( n.thetaO ), n.thetaO, n.thetaE, n.left, n.right ], o );
+
+		} );
+		tex.needsUpdate = true;
 
 	}
 
@@ -4256,6 +4418,18 @@ const lights_struct = /* glsl */`
 
 	};
 
+	// the light tree (see LightTreeUniform)
+	struct LightTree {
+
+		sampler2D tex;
+		int enabled;
+		int root;
+		int distantCount;
+		vec4 distant;
+		float envEnergy;
+
+	};
+
 	struct Light {
 
 		vec3 position;
@@ -4834,12 +5008,19 @@ const light_sampling_functions = /* glsl */`
 
 	}
 
-	LightRecord randomLightSample( sampler2D lights, sampler2DArray iesProfiles, uint lightCount, vec3 rayOrigin, vec3 ruv ) {
+	LightRecord lightSampleAtIndex( sampler2D lights, sampler2DArray iesProfiles, uint l, vec3 rayOrigin, vec3 ruv );
 
-		LightRecord result;
+	LightRecord randomLightSample( sampler2D lights, sampler2DArray iesProfiles, uint lightCount, vec3 rayOrigin, vec3 ruv ) {
 
 		// pick a random light
 		uint l = uint( ruv.x * float( lightCount ) );
+		return lightSampleAtIndex( lights, iesProfiles, l, rayOrigin, ruv );
+
+	}
+
+	LightRecord lightSampleAtIndex( sampler2D lights, sampler2DArray iesProfiles, uint l, vec3 rayOrigin, vec3 ruv ) {
+
+		LightRecord result;
 		Light light = readLightInfo( lights, l );
 
 		if ( light.type == SPOT_LIGHT_TYPE ) {
@@ -6696,7 +6877,255 @@ const camera_util_functions = /* glsl */`
 
 const direct_light_contribution_function = /*glsl*/`
 
+
+	// ---- light tree (see LightTreeUniform)
+	vec4 lightTreeTexel( int node, int k ) {
+
+		return texelFetch( lightTree.tex, ivec2( ( ( node & 255 ) << 2 ) + k, node >> 8 ), 0 );
+
+	}
+
+	// how much a node's lights may light a point with this normal, as in Cycles: their
+	// energy, over the squared distance (no closer than the node's size), times the
+	// best cosine at the surface and the best cosine of emission any of them can have
+	float lightTreeImportance( int node, vec3 p, vec3 n, bool twoSided ) {
+
+		vec4 t0 = lightTreeTexel( node, 0 );
+		vec4 t1 = lightTreeTexel( node, 1 );
+		vec4 t2 = lightTreeTexel( node, 2 );
+		vec4 t3 = lightTreeTexel( node, 3 );
+		vec3 centre = 0.5 * ( t0.xyz + t1.xyz );
+		float radius = 0.5 * length( t1.xyz - t0.xyz );
+		vec3 toCentre = centre - p;
+		float dist = length( toCentre );
+		vec3 dir = dist > 1e-6 ? toCentre / dist : n;
+		// the angle the node takes up as seen from the point
+		float thetaU = dist <= radius ? PI : asin( clamp( radius / dist, 0.0, 1.0 ) );
+
+		// incidence: theta_i' = max( theta_i - theta_u, 0 )
+		float cosI = dot( n, dir );
+		if ( twoSided ) cosI = abs( cosI );
+		float cosIncidence = cos( max( acos( clamp( cosI, - 1.0, 1.0 ) ) - thetaU, 0.0 ) );
+
+		// emission: theta' = max( theta - theta_o - theta_u, 0 ), nothing beyond theta_e
+		float theta = acos( clamp( dot( t2.xyz, - dir ), - 1.0, 1.0 ) );
+		float thetaP = max( theta - t3.x - thetaU, 0.0 );
+		float cosEmission = thetaP < t3.y ? cos( thetaP ) : 0.0;
+
+		return cosIncidence <= 0.0 ? 0.0 : t0.w * cosIncidence * cosEmission / max( dist * dist, max( radius * radius, 1e-4 ) );
+
+	}
+
+	// a light of the tree for the point: down from the root, each child in proportion
+	// to its importance, reusing the one random number (rescaled at each step)
+	int lightTreePick( vec3 p, vec3 n, bool twoSided, float r, out float pdf ) {
+
+		int node = lightTree.root;
+		int picked = - 1;
+		pdf = 1.0;
+		for ( int i = 0; i < 48; i ++ ) {
+
+			vec4 t1 = lightTreeTexel( node, 1 );
+			if ( t1.w >= 0.0 ) {
+
+				picked = int( t1.w );
+				break;
+
+			}
+
+			vec4 t3 = lightTreeTexel( node, 3 );
+			int left = int( t3.z );
+			int right = int( t3.w );
+			float wl = lightTreeImportance( left, p, n, twoSided );
+			float wr = lightTreeImportance( right, p, n, twoSided );
+			if ( wl + wr <= 0.0 ) break;
+
+			float pl = wl / ( wl + wr );
+			if ( r < pl ) {
+
+				node = left;
+				pdf *= pl;
+				r = r / pl;
+
+			} else {
+
+				node = right;
+				pdf *= 1.0 - pl;
+				r = ( r - pl ) / ( 1.0 - pl );
+
+			}
+
+			r = clamp( r, 0.0, 0.99999994 );
+
+		}
+
+		if ( picked < 0 ) pdf = 0.0;
+		return picked;
+
+	}
+
+	// next event estimation with the light tree: the sky, a directional light or a light
+	// of the tree, picked by importance
+	vec3 directLightContributionTree( vec3 worldWo, SurfaceRecord surf, RenderState state, vec3 rayOrigin ) {
+
+		vec3 result = vec3( 0.0 );
+		vec3 n = surf.normal;
+		bool twoSided = surf.volumeParticle || surf.transmission > 0.0;
+		vec3 lum = vec3( 0.2126, 0.7152, 0.0722 );
+
+		float wEnv = envMapInfo.totalSum != 0.0 && environmentIntensity != 0.0 ? lightTree.envEnergy * environmentIntensity : 0.0;
+		float total = wEnv;
+		float wDist[ 4 ];
+		for ( int i = 0; i < 4; i ++ ) {
+
+			wDist[ i ] = 0.0;
+			if ( i < lightTree.distantCount ) {
+
+				Light light = readLightInfo( lights.tex, uint( lightTree.distant[ i ] ) );
+				float c = dot( n, light.u );
+				if ( twoSided ) c = abs( c );
+				wDist[ i ] = max( c, 0.0 ) * max( light.intensity, 0.0 ) * dot( light.color, lum );
+				total += wDist[ i ];
+
+			}
+
+		}
+
+		float wTree = lightTree.root >= 0 ? lightTreeImportance( lightTree.root, rayOrigin, n, twoSided ) : 0.0;
+		total += wTree;
+		envSelectPdf = total > 0.0 ? wEnv / total : 0.0;
+
+		// -1: the sky; 0 and up: that light
+		int pick = - 2;
+		float selectPdf = 0.0;
+		float u = rand( 5 ) * total;
+		if ( total > 0.0 ) {
+
+			if ( u < wEnv ) {
+
+				pick = - 1;
+				selectPdf = wEnv / total;
+
+			} else {
+
+				u -= wEnv;
+				for ( int i = 0; i < 4; i ++ ) {
+
+					if ( pick == - 2 && i < lightTree.distantCount ) {
+
+						if ( u < wDist[ i ] ) {
+
+							pick = int( lightTree.distant[ i ] );
+							selectPdf = wDist[ i ] / total;
+
+						} else {
+
+							u -= wDist[ i ];
+
+						}
+
+					}
+
+				}
+
+				if ( pick == - 2 && wTree > 0.0 ) {
+
+					float treePdf;
+					int l = lightTreePick( rayOrigin, n, twoSided, clamp( u / wTree, 0.0, 0.99999994 ), treePdf );
+					if ( l >= 0 && treePdf > 0.0 ) {
+
+						pick = l;
+						selectPdf = wTree / total * treePdf;
+
+					}
+
+				}
+
+			}
+
+		}
+
+		if ( pick >= 0 ) {
+
+			LightRecord lightRec = lightSampleAtIndex( lights.tex, iesProfiles, uint( pick ), rayOrigin, rand3( 6 ) );
+			bool isSampleBelowSurface = ! surf.volumeParticle && dot( surf.faceNormal, lightRec.direction ) < 0.0;
+			if ( isSampleBelowSurface ) {
+
+				lightRec.pdf = 0.0;
+
+			}
+
+			Ray lightRay;
+			lightRay.origin = rayOrigin;
+			lightRay.direction = lightRec.direction;
+			vec3 attenuatedColor;
+			if (
+				lightRec.pdf > 0.0 && selectPdf > 0.0 &&
+				isDirectionValid( lightRec.direction, surf.normal, surf.faceNormal ) &&
+				! attenuateHit( state, lightRay, lightRec.dist, attenuatedColor )
+			) {
+
+				vec3 sampleColor;
+				float lightMaterialPdf = bsdfResult( worldWo, lightRec.direction, surf, sampleColor );
+				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
+				if ( lightMaterialPdf > 0.0 && isValidSampleColor ) {
+
+					// spot, point and directional lights only here: no MIS (they cannot be hit)
+					float lightPdf = lightRec.pdf * selectPdf;
+					result = attenuatedColor * lightRec.emission * state.throughputColor * sampleColor / lightPdf;
+
+				}
+
+			}
+
+		} else if ( pick == - 1 ) {
+
+			vec3 envColor, envDirection;
+			float envPdf = sampleEquirectProbability( rand2( 7 ), envColor, envDirection );
+			envDirection = invEnvRotation3x3 * envDirection;
+			bool isSampleBelowSurface = ! surf.volumeParticle && dot( surf.faceNormal, envDirection ) < 0.0;
+			if ( isSampleBelowSurface ) {
+
+				envPdf = 0.0;
+
+			}
+
+			Ray envRay;
+			envRay.origin = rayOrigin;
+			envRay.direction = envDirection;
+			vec3 attenuatedColor;
+			if (
+				envPdf > 0.0 &&
+				isDirectionValid( envDirection, surf.normal, surf.faceNormal ) &&
+				! attenuateHit( state, envRay, INFINITY, attenuatedColor )
+			) {
+
+				vec3 sampleColor;
+				float envMaterialPdf = bsdfResult( worldWo, envDirection, surf, sampleColor );
+				bool isValidSampleColor = all( greaterThanEqual( sampleColor, vec3( 0.0 ) ) );
+				if ( envMaterialPdf > 0.0 && isValidSampleColor ) {
+
+					envPdf *= selectPdf;
+					float misWeight = misHeuristic( envPdf, envMaterialPdf );
+					result = attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
+
+				}
+
+			}
+
+		}
+
+		return result;
+
+	}
+
 	vec3 directLightContribution( vec3 worldWo, SurfaceRecord surf, RenderState state, vec3 rayOrigin ) {
+
+		if ( lightTree.enabled != 0 ) {
+
+			return directLightContributionTree( worldWo, surf, state, rayOrigin );
+
+		}
 
 		vec3 result = vec3( 0.0 );
 
@@ -7283,6 +7712,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 
 				// light uniforms
 				lights: { value: new LightsInfoUniformStruct() },
+				lightTree: { value: new LightTreeUniform() },
 				iesProfiles: { value: new RenderTarget2DArray( 360, 180, {
 					type: HalfFloatType,
 					wrapS: ClampToEdgeWrapping,
@@ -7391,6 +7821,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				// lighting
 				uniform sampler2DArray iesProfiles;
 				uniform LightsInfo lights;
+				uniform LightTree lightTree;
 
 				// background
 				uniform float backgroundBlur;
@@ -7435,6 +7866,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				mat3 envRotation3x3;
 				mat3 invEnvRotation3x3;
 				float lightsDenom;
+				float envSelectPdf; // light tree: the chance the sky was picked at the last surface
 
 				// sampling
 				${ shape_sampling_functions }
@@ -7536,7 +7968,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						// check if we intersect any lights and accumulate the light contribution
 						// TODO: we can add support for light surface rendering in the else condition if we
 						// add the ability to toggle visibility of the the light
-						if ( ! state.firstRay && ! state.transmissiveRay ) {
+						if ( ! state.firstRay && ! state.transmissiveRay && lightTree.enabled == 0 ) {
 
 							LightRecord lightRec;
 							float lightDist = hitType == NO_HIT ? INFINITY : surfaceHit.dist;
@@ -7580,7 +8012,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 								// get the PDF of the hit envmap point
 								vec3 envColor;
 								float envPdf = sampleEquirect( envRotation3x3 * ray.direction, envColor );
-								envPdf /= lightsDenom;
+								envPdf *= lightTree.enabled != 0 ? envSelectPdf : 1.0 / lightsDenom;
 
 								// and weight the contribution
 								float misWeight = misHeuristic( scatterRec.pdf, envPdf );
@@ -8773,6 +9205,7 @@ class WebGLPathTracer {
 		const lights = getLights( scene );
 		const iesTextures = getIesTextures( lights );
 		material.lights.updateFrom( lights, iesTextures );
+		material.lightTree.updateFrom( lights );
 		material.iesProfiles.setTextures( renderer, iesTextures );
 		this.reset();
 
@@ -8846,6 +9279,7 @@ class WebGLPathTracer {
 
 					const environment = new CubeToEquirectGenerator( this._renderer ).generate( scene.environment );
 					material.envMapInfo.updateFrom( environment );
+					material.lightTree.envEnergy = Math.PI * ( material.envMapInfo.meanLuminance || 0 );
 
 				} else {
 
@@ -8853,6 +9287,7 @@ class WebGLPathTracer {
 					// OES_texture_float_linear or OES_texture_half_float_linear. Requires changes to
 					// the equirect uniform
 					material.envMapInfo.updateFrom( scene.environment );
+					material.lightTree.envEnergy = Math.PI * ( material.envMapInfo.meanLuminance || 0 );
 
 				}
 

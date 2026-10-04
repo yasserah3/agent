@@ -447,6 +447,8 @@ app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
 ui/view3d.js         the 3D tab: the scene, sky, sun, lamps, live view and photo render (bundled in ui/vendor)
+ui/sky_blender.js    Blender 5's sky (Multiple Scattering), ported to JavaScript; ui/sky_worker.js runs it off the page
+ui/denoise.js        Intel Open Image Denoise, ported to WebGL2, for the photo render
 workspace/           created on first run: uploads, artifacts, memory.db
 ```
 
@@ -992,33 +994,59 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
 - **Dawn, Day, Night** set the time:
   - *Dawn*: a low sun in the east, long warm shadows, a pink and gold sky, the
     lamps still on;
-  - *Day*: a high sun from the south-west, a clear sky with a few clouds;
+  - *Day*: a high sun from the south-west, a clear blue sky;
   - *Night*: moonlight, a starry sky, and the street lamps lighting the streets
     in warm pools of light.
 - **Light** sets, for every time of day:
-  - *Sun strength* (0 to 200%): how bright the sun is, or the moon at night,
-    with its glow in the sky;
+  - *Sun strength* (0 to 200%): how bright the sun is, or the moon at night;
   - *Street lamps* (0 to 300%, 0 is off) and *Lamp colour*: how bright the
     lamps are when they are on, and the colour of their light.
   They are kept in the browser for the next time, and apply to Render photo too.
-- **The live view** is drawn with the sky (the sun's position, haze and
-  clouds), sunlight with shadows (sharp close up, covering everything when
-  zoomed out), the sky's light from all round, soft contact shadows where
+- **The sky** at dawn and by day is Blender's own physical sky, the Sky
+  Texture of Blender 5 (Multiple Scattering), ported to JavaScript: sunlight
+  scattered by the air and by haze, absorbed by ozone, the sun's disc seen
+  through the air. It gives the colour of the sky, the colour and strength of
+  the sunlight and the light of the sky, so the balance of sun and sky is that
+  of Blender and Cycles; it matches Blender 5.0.1 to within 1%. It is worked
+  out once per time of day, in the background, in a second or two.
+- **The live view** is drawn with that sky, sunlight with shadows (sharp close
+  up, covering everything when zoomed out), the sky's light from all round,
+  the haze in the sky's own colour at the horizon, soft contact shadows where
   surfaces meet (ambient occlusion), a glow round bright lights, and filmic
   colour. The lamps nearest to where the camera looks light the scene for
   real; the others show their pool of light on the ground.
 - **Render photo** traces the light through the scene (three-gpu-pathtracer):
   light bouncing between surfaces, soft shadows from the sun and the sky, and
-  the lamps around the view as real lights. The picture starts grainy and gets
-  sharper with every sample for as long as the camera stays put; the panel
-  counts the samples. Moving the camera, or **Back to live view**, returns to
-  the live view. Setting up takes a few seconds on a big map.
+  every street lamp as a real light. The picture gets sharper with every
+  sample for as long as the camera stays put; the panel counts the samples.
+  Moving the camera, or **Back to live view**, returns to the live view.
+  Setting up takes a few seconds on a big map.
+  - **Denoise** (on unless you untick it): the grain is cleared by Intel Open
+    Image Denoise, the denoiser of Blender and Cycles, ported to run on the
+    graphics card in the browser: the same neural network and trained weights,
+    giving the same picture as OIDN itself (to within 0.1%). It works from
+    the photo and the colour and direction of the surfaces in view, so edges
+    and textures stay sharp. It runs after 4 samples, and again each time the
+    samples have grown four times over (16, 64, 256…); the panel says which
+    one it shows. Save image denoises the latest samples first.
+  - **Light tree**: with hundreds of lamps, each point of the picture picks
+    the lights likely to light it (near, facing it, their beam towards it),
+    as Cycles' light tree does, instead of any lamp at random, so night photos
+    sharpen many times sooner.
 - **Save image** saves what the view shows, live or the photo, as a PNG.
 
-Everything is bundled in `ui/vendor` (three.js r186 with the add-ons used,
-three-mesh-bvh and three-gpu-pathtracer, all MIT licence), so the tab works
-offline. A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox
-or Safari); the photo render is much faster on a real graphics card.
+Everything is bundled in `ui/vendor`, so the tab works offline and nothing
+needs installing:
+- three.js r186 with the add-ons used, three-mesh-bvh and three-gpu-pathtracer
+  (MIT licence); the path tracer has the light tree added (marked in its file);
+- `blender-sky`: the licences of Blender's sky code ported in
+  `ui/sky_blender.js` (MIT, and Apache 2.0 for Cycles' sky lookup);
+- `oidn`: Open Image Denoise's trained weights (Apache 2.0), run by
+  `ui/denoise.js`, a port of OIDN 2.4's network (Apache 2.0).
+
+A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox or
+Safari); the photo render and its denoising are much faster on a real
+graphics card.
 
 ## When something goes wrong
 
