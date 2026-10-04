@@ -386,11 +386,12 @@
             <div style="font-size:12px;font-weight:600;margin-top:10px">Inner streets &amp; islands</div>
             <button class="btn secondary" id="btnDrawStreets" title="Turn spaces between the objects into streets">Draw inner streets</button>
             <div id="streetBox" hidden>
-              <div class="note">Click a space to make it a street (green), or press and drag across several; click again to take it back. The small cells where spaces cross are junctions. Streets reaching the edge continue to the nearest street (up to 50 m). Areas between streets become islands, paved like the sidewalks.</div>
+              <div class="note">Click a space to make it a street (green), or press and drag across several; click again to take it back. The small cells where spaces cross are junctions. Streets reaching the edge continue straight on to the nearest street, up to the distance set in <b>Join streets up to</b> below. Areas between streets become islands, paved like the sidewalks.</div>
             </div>
             <div class="field"><label for="stRoad">Road width (m)</label><input type="number" id="stRoad" value="6" step="0.5" min="1" title="The road comes first: it gets this width before the sidewalks get any room. A space narrower than this is road from side to side; a wider one gives the sidewalks their width, and any more widens the road"></div>
             <div class="field"><label for="stSidewalk">Sidewalk width (m)</label><input type="number" id="stSidewalk" value="2" step="0.5" min="0.5" title="Between the road and the objects, from the room the road leaves"></div>
             <div class="field"><label for="stCorner">Corner radius (m)</label><input type="number" id="stCorner" value="4" step="0.5" min="0"></div>
+            <div class="field"><label for="stReach">Join streets up to (m)</label><input type="number" id="stReach" value="200" step="10" min="0" max="2000" title="A street drawn to the edge of the placement goes straight on to the nearest street within this distance, at either end. Further away, or with objects in the way, it ends at the edge. 0: never"></div>
             <div class="field"><label for="stMarkings">Markings on inner streets</label><input type="checkbox" id="stMarkings" checked style="justify-self:start;accent-color:var(--blue)" title="Ticked: the inner streets get the markings of the main streets. Unticked: no markings on them"></div>
             <div class="note" id="stInfo"></div>
             <div style="font-size:12px;font-weight:600;margin-top:10px">Single objects</div>

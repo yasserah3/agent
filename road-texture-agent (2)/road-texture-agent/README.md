@@ -521,7 +521,13 @@ and island:
 - **Full width round sharp corners**: where a block has a sharp corner, such as
   where an inner street meets a main street, the sidewalk keeps its width all
   the way round it and its inner edge turns a square corner, instead of
-  tapering to nothing at the corner.
+  tapering to nothing at the corner. The corner itself is kept exactly, not
+  cut off.
+- **Road right up to the kerb**: the kerb runs straight from one row of the
+  sidewalk to the next, which on the inside of a bend or across a corner lies
+  a little off the road's own edge. The ground left in front of it is filled
+  with road (laid like the knot fills, with the kerb band's tone), so no gap
+  shows at the foot of the kerb.
 - **Runs to the image border**: where the kerb line meets the edge of the image,
   the sidewalk is carried right to it and cut there.
 - **No sidewalks** on highway interchanges (unchanged, for a later decision) or
@@ -852,9 +858,11 @@ street mask, so everything after it treats them like the main streets:
 - **Rounded corners** to the **Corner radius** (4 m by default, at most three
   sidewalk widths, never closer to an object than half a sidewalk).
 - **Joining the streets**: a street reaching the edge of the placement goes on
-  straight to the nearest street, at both ends, up to 200 m, unless that would
-  run through an object of any placement; otherwise it ends at the edge, and
-  Generate says which ends did not join and why.
+  straight to the nearest street, at both ends, up to **Join streets up to**
+  (200 m by default, per placement; 0 never joins), unless that would run
+  through an object of any placement; otherwise it ends at the edge, and
+  Generate says which ends did not join and why. Set it before pressing
+  Generate.
 - **Islands**: the areas between streets become islands, like any city block:
   raised to sidewalk height and paved like the sidewalks, the objects standing
   on them. Specks of island under 40 m² left between streets become road.

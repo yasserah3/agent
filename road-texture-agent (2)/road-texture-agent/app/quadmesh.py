@@ -1299,13 +1299,39 @@ def _smooth_ring(P, frame_w, frame_h, iterations, keep=None):
     return Q
 
 
-def _resample_ring(P, spacing):
+def _sharp(P, deg=30.0):
+    """The points of a closed line where it turns by deg degrees or more."""
+    a = P - np.roll(P, 1, axis=0)
+    b = np.roll(P, -1, axis=0) - P
+    la, lb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
+    ok = (la > 1e-9) & (lb > 1e-9)
+    c = np.where(ok, (a * b).sum(axis=1) / np.maximum(la * lb, 1e-18), 1.0)
+    return ok & (np.degrees(np.arccos(np.clip(c, -1.0, 1.0))) >= deg)
+
+
+def _resample_ring(P, spacing, keep=None):
+    """
+    A closed line evenly resampled. keep: its points (bool per point) to keep
+    exactly, such as sharp corners: the stretches between them are resampled
+    each on its own, so a corner is not cut off.
+    """
     closed = np.vstack([P, P[:1]])
     seg = np.hypot(*np.diff(closed, axis=0).T)
     L = float(seg.sum())
-    n = max(8, int(L / spacing))
-    t = np.linspace(0, L, n + 1)[:-1]
     cum = np.concatenate([[0.0], np.cumsum(seg)])
+    t = None
+    at = np.nonzero(keep)[0] if keep is not None else []
+    if len(at):
+        cs = [cum[i] for i in at] + [cum[at[0]] + L]
+        ts = []
+        for a, b in zip(cs, cs[1:]):
+            k = max(1, int(round((b - a) / spacing)))
+            ts += [a + (b - a) * j / k for j in range(k)]
+        if len(ts) >= 8:
+            t = np.mod(np.array(ts), L)
+    if t is None:
+        n = max(8, int(L / spacing))
+        t = np.linspace(0, L, n + 1)[:-1]
     return np.column_stack([np.interp(t, cum, closed[:, 0]), np.interp(t, cum, closed[:, 1])])
 
 
@@ -1351,10 +1377,21 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     rings_out = []
     geoms = raw.geoms if hasattr(raw, "geoms") else [raw]
     keep = getattr(mesh, "exact_edges", None)
+
+    def corners(P):
+        # an inner street's sharp corners (on its exact edges) stay where they are
+        if keep is None or keep.is_empty:
+            return None
+        import shapely
+        return _sharp(P) & shapely.dwithin(keep, shapely.points(P), 0.05)
+
+    def straightened(coords):
+        P = np.array(coords)[:-1] / scale
+        return _smooth_ring(_resample_ring(P, fine, corners(P)), W, H, iters, keep)
+
     for g in geoms:
-        ext = _smooth_ring(_resample_ring(np.array(g.exterior.coords)[:-1] / scale, fine), W, H, iters, keep)
-        holes = [_smooth_ring(_resample_ring(np.array(r.coords)[:-1] / scale, fine), W, H, iters, keep)
-                 for r in g.interiors if r.length / scale > 4 * fine]
+        ext = straightened(g.exterior.coords)
+        holes = [straightened(r.coords) for r in g.interiors if r.length / scale > 4 * fine]
         q = Polygon(ext, [h for h in holes if len(h) >= 4])
         if not q.is_valid:
             q = q.buffer(0)
@@ -1408,7 +1445,8 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             continue
         for ring_i, ring in enumerate([g.exterior] + list(g.interiors)):
             loop_id += 1
-            K = _resample_ring(np.array(ring.coords)[:-1], fine)
+            P = np.array(ring.coords)[:-1]
+            K = _resample_ring(P, fine, _sharp(P))                   # sharp corners kept exactly
             n_ = len(K)
             if n_ < 8:
                 continue
@@ -1498,6 +1536,47 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                 along = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))]) * mpp
                 mesh.sw_kind[loop_id] = "open"
                 _rows_from(mesh, pts, O, along, loop_id, H_m, ks_px, closed=False)
+    _kerb_apron(mesh, road_all, scale, mpp)
+
+
+def _kerb_apron(mesh, road, scale, mpp, depth_m=1.0):
+    """
+    Road right up to the foot of every kerb. A kerb runs straight from one row
+    of its sidewalk to the next, which on the inside of a bend, or across a
+    sharp corner, lies a little off the road's own edge: the ground left
+    uncovered in front of it, up to depth_m deep, becomes road (a fill, like
+    the knots), so no gap shows at the kerb's foot. Never behind a kerb, where
+    the sidewalk is. road: the road built so far, in mask pixels.
+    """
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    if not mesh.kerb_quads:
+        return
+    V = np.array(mesh.v, float) / scale
+    D = depth_m / mpp
+
+    def poly(ids):
+        g = Polygon(V[list(ids)])
+        return g if g.is_valid else g.buffer(0)
+
+    front = []
+    for q, f in zip(mesh.kerb_quads, mesh.kerb_facing):
+        a, b = V[q[0]], V[q[1]]
+        if np.hypot(*(b - a)) < 1e-9:
+            continue
+        f = np.asarray(f, float)
+        front.append(Polygon([a, b, b + f * D, a + f * D]).buffer(0))
+    walk = [poly(q) for q in mesh.sw_quads] + [poly(t) for t in mesh.sw_tris]
+    miss = unary_union([g for g in front if not g.is_empty]).difference(road)
+    walk = [g for g in walk if not g.is_empty]
+    if walk:
+        miss = miss.difference(unary_union(walk))
+    pieces = [g for g in (miss.geoms if hasattr(miss, "geoms") else [miss])
+              if g.geom_type == "Polygon" and g.area * mpp * mpp > 1e-4]
+    # tucked a hair under the road beside it and under the kerb, so no seam can open
+    mesh.fill_polys = list(mesh.fill_polys or []) + [_scale_poly(g.buffer(0.02 / mpp, join_style=2), scale)
+                                                     for g in pieces]
+    mesh.apron_m2 = float(sum(g.area for g in pieces) * mpp * mpp)
 
 
 def _project_monotonic(K, ring):

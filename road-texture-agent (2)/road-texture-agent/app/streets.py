@@ -9,8 +9,9 @@ paved like the sidewalks.
 
 Per placement, on a fine grid (about 0.25 m) around it:
   1. the drawn cells; where one reaches the edge of the placement it continues
-     straight on to the nearest street, at either end, up to 200 m, unless it
-     would cross an object of any placement (else it stops there);
+     straight on to the nearest street, at either end, up to the placement's
+     reach (200 m by default), unless it would cross an object of any placement
+     (else it stops there);
   2. the road of each drawn space is a straight strip down its middle, a
      sidewalk in from either side, along the space as drawn: a street across
      the rows runs straight on through each drawn junction, a street along
@@ -40,7 +41,7 @@ from scipy import ndimage as ndi
 from app import curves as CV
 from app import placements as PL
 
-REACH_M = 200.0     # how far an inner street goes on to meet a street
+REACH_M = 200.0     # how far an inner street goes on to meet a street, unless its placement says
 FINE_M = 0.25       # the grid the streets are shaped on, at most this coarse
 SPECK_M2 = 40.0     # islands smaller than this, left between streets, become road
 ROAD_M = 6.0        # an inner street's road width before its sidewalks get any room (two lanes)
@@ -252,13 +253,13 @@ def _narrowed(poly, f):
     return [tuple(A + u), tuple(B - u), tuple(B2 - u), tuple(A2 + u)]
 
 
-def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_area):
+def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_area, reach_m=REACH_M):
     """
     Drawn cells on the edge of the placement, continued straight on to the
     nearest street: (polygon in metres, reached, the cell, its side: front,
     back, left or right) per open edge. One that would cross an object
     (objects_area: shapely, metres) stops at the edge instead, as does one
-    with no street straight ahead within REACH_M: then the polygon is why
+    with no street straight ahead within reach_m: then the polygon is why
     not, "objects" or "far". cache: the rows' lines (app/curves.py row_line).
     """
     from shapely.geometry import Polygon
@@ -309,7 +310,7 @@ def _edge_extensions(layout, cache, sel_cells, all_cells, road, mpp, objects_are
     for A, B, d, c, side in edges:
         mid = (A + B) / 2
         hit = None
-        for k in range(1, int(REACH_M / 0.5) + 1):
+        for k in range(1, int(reach_m / 0.5) + 1):
             if is_road(mid + d * (k * 0.5)):
                 hit = k * 0.5
                 break
@@ -371,11 +372,12 @@ def inner_streets(road, mpp, placements, objects, packages):
             continue
         sw = float(st.get("sidewalk_m", 2.0))
         road_m = float(st.get("road_m", ROAD_M))
+        reach = max(0.0, float(st.get("reach_m", REACH_M)))
         radius = min(float(st.get("corner_m", 4.0)), 3.0 * sw)     # rounder would reach the objects
         # each drawn space with its sidewalk: the road first, then the sidewalks
         fit = {c["id"]: round(fitted_sidewalk(sw, width_of(c), road_m), 3) for c in sel}
         polys = [CV.cell_polygon(layout, c, 0.5, cache) for c in sel]
-        ext = _edge_extensions(layout, cache, sel, all_cells, road, mpp, objects_area)
+        ext = _edge_extensions(layout, cache, sel, all_cells, road, mpp, objects_area, reach)
         polys += [e for e, ok, c, _ in ext if ok]
         # the road: straight strips down the drawn spaces and their extensions
         lanes = _road_strips(layout, cache, sel, fit)
@@ -474,7 +476,7 @@ def inner_streets(road, mpp, placements, objects, packages):
         roads = [width_of(c) - 2 * fit[c["id"]] for c in streets_]
         report.append({"placement": idx + 1, "name": name, "cells": len(sel),
                        "connected": sum(1 for _, ok, _, _ in ext if ok), "dead_ends": sum(1 for _, ok, _, _ in ext if not ok),
-                       "blocked": sum(1 for e, ok, _, _ in ext if not ok and e == "objects"), "reach_m": REACH_M,
+                       "blocked": sum(1 for e, ok, _, _ in ext if not ok and e == "objects"), "reach_m": reach,
                        "narrowed": len(narrowed), "sidewalk_m": sw, "road_m": road_m,
                        "sidewalk_min": round(min(narrowed), 2) if narrowed else sw,
                        "road_min": round(min(roads), 2) if roads else 0.0,

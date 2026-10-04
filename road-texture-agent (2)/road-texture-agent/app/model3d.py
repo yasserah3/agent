@@ -642,6 +642,14 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         ft = np.where((ny < 0)[:, None], ft[:, [0, 2, 1]], ft)
         ft = ft[np.abs(ny) * 0.5 > 1e-4]
         ff = map_coordinates(fac, [fv[:, 1], fv[:, 0]], order=1, mode="nearest")
+        # the kerb's tone along the kerb, as the streets have it in their kerb band:
+        # full at the kerb, fading out over 1.5 m, so a fill beside a kerb
+        # does not show as a lighter or darker line along it
+        ks = getattr(mesh, "kerb_surface", None)
+        if ks is not None and not ks.is_empty and role_f.get("kerb", 1.0) != 1.0:
+            import shapely
+            dk = shapely.distance(ks.boundary, shapely.points(fv[:, 0], fv[:, 1])) * mpp_out
+            ff = ff * (role_f["kerb"] + (1.0 - role_f["kerb"]) * np.clip(dk / 1.5, 0.0, 1.0))
         buf = io.BytesIO()
         Image.open(tiles["open"][0]["path"]).convert("RGB").save(buf, "JPEG", quality=92)
         images.append((buf.getvalue(), "image/jpeg"))

@@ -50,7 +50,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-streets4"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-streets5"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -905,7 +905,8 @@ def _placement_list(raw):
                 if any(al.values()):
                     q["align"] = al
             # inner streets: the space cells drawn as streets (app/curves.py cells),
-            # with the sidewalk width and corner radius, and whether they get markings
+            # with the road and sidewalk widths, corner radius, how far a street
+            # reaching the edge goes on to meet a street, and whether they get markings
             st = p.get("streets")
             if isinstance(st, dict):
                 q["streets"] = {"cells": [c for c in map(str, st.get("cells") or [])
@@ -913,6 +914,7 @@ def _placement_list(raw):
                                 "sidewalk_m": min(10.0, max(0.5, float(st.get("sidewalk_m", 2.0)))),
                                 "road_m": min(30.0, max(1.0, float(st.get("road_m", 6.0)))),
                                 "corner_m": min(30.0, max(0.0, float(st.get("corner_m", 4.0)))),
+                                "reach_m": min(2000.0, max(0.0, float(st.get("reach_m", 200.0)))),
                                 "markings": bool(st.get("markings", True))}
             # a curved placement: copies along the smooth line through these points;
             # more curve lines for the rows behind, each with as many points
