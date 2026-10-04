@@ -648,6 +648,13 @@ def delete_pair(pair_id: str):
     return {"ok": True, "deleted": pair_id, "rebuilt": rebuilt}
 
 
+def _surface_choice(v):
+    """Surface detail: "scan" (scanned maps where bundled, else the tile's grain), "grain", or off."""
+    if v is True or v == "scan":
+        return "scan"
+    return "grain" if v == "grain" else False
+
+
 def _bridge_list(raw):
     out = []
     for b in raw or []:
@@ -1355,7 +1362,7 @@ def export3d(payload: dict):
                 bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
                             "deck_m": float(payload.get("bridge_deck_m", 1.0))},
-                inner=inner, surface=bool(payload.get("surface_detail", True)))
+                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")))
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None

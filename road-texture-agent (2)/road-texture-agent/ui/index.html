@@ -519,8 +519,13 @@
           <div class="note" style="margin:-2px 0 6px">Never more than half the space to the next road, so facing sidewalks cannot overlap</div>
           <div class="field"><label for="blocksOn">Blocks and islands</label><input type="checkbox" id="blocksOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="note" style="margin:-2px 0 6px">Fills the areas between roads as flat planes at sidewalk height, with the sidewalk paving</div>
-          <div class="field"><label for="surfDetail">Surface detail</label><input type="checkbox" id="surfDetail" checked style="justify-self:start;accent-color:var(--blue)" title="Bump and roughness maps from each material tile's grain, so light catches the surface (in the 3D tab, the photo render, Blender and other glTF viewers). Unticked: colour only, a smaller file"></div>
-          <div class="note" style="margin:-2px 0 6px">Bump and roughness from each material's grain: light catches the road, paint shines a little</div>
+          <div class="field"><label for="surfDetail">Surface detail</label>
+            <select id="surfDetail" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Bump and roughness maps, so light catches the surface (in the 3D tab, the photo render, Blender and other glTF viewers)">
+              <option value="scan" selected>Scanned (real asphalt and concrete)</option>
+              <option value="grain">From each tile's grain</option>
+              <option value="off">Off (colour only, smaller file)</option>
+            </select></div>
+          <div class="note" style="margin:-2px 0 6px">Scanned: measured bump and roughness of real asphalt and concrete where bundled (paving always follows its own joints); the rest from each tile's grain</div>
           <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
           <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
           <div class="note" id="genNote">Load a street mask.</div>

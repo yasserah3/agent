@@ -362,12 +362,18 @@ def _image_index(images, data, mime):
     return len(images) - 1
 
 
-def tile_material(name, img, images, materials, size_m, kind, roughness, surface=True):
+def _sidewalk_kind(tile):
+    """Paving (a pattern whose joints must line up with the colour) or plain concrete."""
+    return "concrete" if (tile or {}).get("method") == "placeholder concrete" else "paving"
+
+
+def tile_material(name, img, images, materials, size_m, kind, roughness, surface="scan"):
     """
     A material for a repeating tile: its colour, and with surface, the bump
-    (normal map) and roughness worked out from its grain (app/surface.py).
-    size_m: the width and height the picture covers; kind: asphalt, paving or
-    concrete. Returns the material's index.
+    (normal map) and roughness (app/surface.py): "scan" from a bundled scan of
+    the kind where there is one, else from the tile's grain; "grain" always from
+    the grain; False: colour only. size_m: the width and height the picture
+    covers; kind: asphalt, paving or concrete. Returns the material's index.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=92)
@@ -375,7 +381,8 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
            "metallicFactor": 0.0, "roughnessFactor": roughness}
     mat = {"name": name, "doubleSided": True, "pbrMetallicRoughness": pbr}
     if surface:
-        nrm, rgh = SF.maps(img, size_m, kind)
+        nrm, rgh, used = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan")
+        mat["extras"] = {"surface": used}
         mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
         pbr["metallicRoughnessTexture"] = {"index": _image_index(images, rgh, "image/jpeg")}
         pbr["roughnessFactor"] = 1.0                      # the map holds it
@@ -526,12 +533,13 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           output_scale, out_path, straightness=0.7, spacing_m=2.0,
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
-                          optimise=False, blocks=None, scatter=None, inner=None, surface=True):
+                          optimise=False, blocks=None, scatter=None, inner=None, surface="scan"):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
-    surface: each tile material also gets a bump and a roughness map from its
-    grain (app/surface.py).
+    surface: each tile material also gets a bump and a roughness map
+    (app/surface.py): "scan" from a bundled scan where there is one for its kind,
+    "grain" from its own grain, False none.
     inner: the inner streets as exact shapes, {"base_mask_path": the mask
     without them, "shapes": app/streets.py's shapes}: the other roads are
     built from the mask without them, and they are laid as they are.
@@ -818,6 +826,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "mesh_detail": "optimised" if optimise else "full",
             "rows_full": rep.get("rows_full"), "rows_kept": rep.get("rows_kept"),
             "markings": ("painted" if painted and marked else "strips"),
+            "surface": sorted({m["extras"]["surface"] for m in materials if (m.get("extras") or {}).get("surface")}),
             "painted_dashes": painted_dashes if painted else 0,
             "marked_textures": [{"width_cm": w, "px": list(im.size)} for w, im in mark_tex],
             "marked_quads": sum(len(v) for k, v in groups.items() if k[0] == "marked"),
@@ -907,7 +916,7 @@ def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
 
 
 
-def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface=True):
+def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan"):
     """
     The sidewalk top (paving, with a kerb stone along its edge) and the vertical
     kerb face down to the road, as two meshes of quads.
@@ -959,7 +968,8 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
     prims = []
     for (part, vk), quads in sorted(groups.items()):
         if part == "paving":
-            mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk]["path"])
+            mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk]["path"],
+                                    _sidewalk_kind(tiles["sidewalk"][vk]))
         else:
             kt = (tiles.get("kerbstone") or tiles["sidewalk"])[0]["path"]
             mat = add_tile_material("Kerb_stone", kt, "concrete")
@@ -1004,7 +1014,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                 row.append(remap[vi])
             idx.append(row)
         if idx:
-            mat = add_tile_material("Sidewalk_island", tiles["sidewalk"][0]["path"])
+            mat = add_tile_material("Sidewalk_island", tiles["sidewalk"][0]["path"], _sidewalk_kind(tiles["sidewalk"][0]))
             prims.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
                           "uv0": np.array(uvs), "colors": np.array(col), "indices": np.array(idx),
                           "material": mat})
@@ -1043,7 +1053,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
 
 
 
-def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, meshes, surface=True):
+def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, meshes, surface="scan"):
     """
     Give a raised road some thickness: a side face down each edge and an
     underside, deck_m below the road surface, wherever it is off the ground.
@@ -1181,7 +1191,7 @@ def _split_quad(up, a, b, c, d, eps):
 
 
 def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, images, materials, meshes,
-                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface=True):
+                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan"):
     """
     The blocks and islands between roads as flat planes with the sidewalk's
     paving. With sidewalks, each block reaches all the way to the kerb line
@@ -1233,7 +1243,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     f = map_coordinates(fb, [np.clip(v2[:, 1], 0, H - 1), np.clip(v2[:, 0], 0, W - 1)], order=1, mode="nearest")
     f = 1.0 + (f - 1.0) * 0.33
     tile_material("Block_paving", Image.open(tiles["sidewalk"][0]["path"]), images, materials,
-                  (tile_m, tile_m), "paving", 0.85, surface)
+                  (tile_m, tile_m), _sidewalk_kind(tiles["sidewalk"][0]), 0.85, surface)
     prims = [{"positions": P, "normals": np.tile([0, 1, 0], (len(P), 1)),
               "uv0": np.column_stack([P[:, 0] / tile_m, P[:, 2] / tile_m]),
               "colors": np.column_stack([f, f, f, np.ones_like(f)]),

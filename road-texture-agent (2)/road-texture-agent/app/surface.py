@@ -4,14 +4,26 @@ and a roughness map, worked out from each tile's own grain, so the sun and the
 street lamps catch the surface, in the 3D tab, the photo render and in Blender
 or any glTF viewer.
 
-The bump comes from the fine grain only, the pores and stones a few millimetres
-across: lighter grain stands proud, darker sinks. Larger tone changes (stains,
-patches, wear) are not relief and are left out; their edges are softened so a
-stain does not grow a rim. The roughness follows the tone gently (lighter,
-polished parts a little smoother) and paint is smoother than the road.
+Two sources:
+- scanned: measured bump and roughness of real asphalt and concrete (CC0
+  scans in app/scans, see its README), laid over the tile at their real size.
+  Only for surfaces without a pattern of their own (asphalt, plain concrete):
+  the joints of paving must line up with the paving in the colour, so paving
+  always uses its own grain.
+- grain: worked out from the tile's own colour. The bump comes from the fine
+  grain only, the pores and stones a few millimetres across: lighter grain
+  stands proud, darker sinks. Larger tone changes (stains, patches, wear) are
+  not relief and are left out; their edges are softened so a stain does not
+  grow a rim. The roughness follows the tone gently (lighter, polished parts a
+  little smoother).
+Either way, road paint found in the colour is smoother than the road and
+slightly raised at its edges.
 """
 import hashlib
 import io
+import json
+import os
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -27,21 +39,79 @@ KINDS = {
 PAINT_ROUGH = 0.55          # road paint: smoother than asphalt
 PAINT_THICK_M = 0.0004      # its thickness, a slight step at its edges
 GRAIN_M = 0.007             # the grain: features finer than about this
+SCAN_KINDS = ("asphalt", "concrete")   # kinds a scan may stand in for (no pattern of their own)
+SCANS_DIR = Path(os.environ.get("RTA_SCANS") or Path(__file__).with_name("scans"))
 
 _cache = {}
+_scans = {}
 
 
-def maps(img, size_m, kind="asphalt", quality=90):
+def scan_for(kind):
     """
-    The normal map and the roughness map of a tile, as JPEG bytes.
+    The scanned maps bundled for a kind of surface, or None: app/scans/<kind>.json
+    names the normal map (OpenGL convention, as glTF), the roughness map, the size
+    they cover in metres and where they come from.
+    """
+    if kind not in SCAN_KINDS:
+        return None
+    meta_path = SCANS_DIR / f"{kind}.json"
+    if not meta_path.exists():
+        return None
+    stamp = meta_path.stat().st_mtime
+    hit = _scans.get(kind)
+    if hit and hit["stamp"] == stamp:
+        return hit
+    meta = json.loads(meta_path.read_text())
+    nrm = np.asarray(Image.open(SCANS_DIR / meta["normal"]).convert("RGB")).astype(np.float32) / 127.5 - 1.0
+    rgh = np.asarray(Image.open(SCANS_DIR / meta["roughness"]).convert("L")).astype(np.float32) / 255.0
+    if nrm.shape[:2] != rgh.shape:
+        rgh = np.asarray(Image.fromarray(rgh).resize((nrm.shape[1], nrm.shape[0]), Image.BILINEAR))
+    hit = {"stamp": stamp, "normal": nrm, "rough": rgh, "size_m": [float(v) for v in meta["size_m"]],
+           "name": meta.get("name", kind), "source": meta.get("source", "")}
+    _scans[kind] = hit
+    return hit
+
+
+def _resize(arr, w, h):
+    """A float picture (H x W, or H x W x C) resized to w x h, bilinear, channel by channel."""
+    if arr.ndim == 2:
+        return np.asarray(Image.fromarray(arr.astype(np.float32), "F").resize((w, h), Image.BILINEAR))
+    return np.stack([_resize(arr[..., c], w, h) for c in range(arr.shape[2])], axis=-1)
+
+
+def _scan_layer(scan, size_m, w_px, h_px):
+    """
+    A scan laid over a tile of size_m: repeated a whole number of times each way
+    (so the tile still joins itself), stretched by the little it takes to fit, and
+    resampled to the tile's pixels. Returns the slopes (dh/dx, dh/d-row-down) and
+    the roughness.
+    """
+    sw, sh = scan["size_m"]
+    nx, ny = max(1, int(round(size_m[0] / sw))), max(1, int(round(size_m[1] / sh)))
+    n = _resize(np.tile(scan["normal"], (ny, nx, 1)), w_px, h_px)
+    r = _resize(np.tile(scan["rough"], (ny, nx)), w_px, h_px)
+    nz = np.maximum(n[..., 2], 0.05)
+    # a stretched surface has gentler slopes
+    fx, fy = (nx * sw) / size_m[0], (ny * sh) / size_m[1]
+    return -n[..., 0] / nz * fx, n[..., 1] / nz * fy, np.clip(r, 0.02, 1.0)
+
+
+def maps(img, size_m, kind="asphalt", quality=90, source="scan"):
+    """
+    The normal map and the roughness map of a tile, as JPEG bytes, and what they
+    came from ("scan: <name>" or "grain").
 
     img: the tile (PIL image), repeating seamlessly; size_m: (width, height)
-    it covers in metres; kind: one of KINDS. Normal map: glTF's convention
-    (+X right, +Y up in the picture, +Z out of the surface). Roughness: in the
-    green channel as glTF's metallicRoughness texture wants it (grey picture).
+    it covers in metres; kind: one of KINDS; source: "scan" uses a bundled scan
+    where there is one for the kind, else the tile's grain; "grain" always the
+    grain. Normal map: glTF's convention (+X right, +Y up in the picture, +Z out
+    of the surface). Roughness: in the green channel as glTF's metallicRoughness
+    texture wants it (grey picture).
     """
     rgb = np.asarray(img.convert("RGB"))
-    key = (hashlib.sha1(rgb.tobytes()).hexdigest(), rgb.shape, tuple(round(float(s), 4) for s in size_m), kind, quality)
+    scan = scan_for(kind) if source == "scan" else None
+    key = (hashlib.sha1(rgb.tobytes()).hexdigest(), rgb.shape, tuple(round(float(s), 4) for s in size_m), kind, quality,
+           (scan["name"], scan["stamp"]) if scan else None)
     if key in _cache:
         return _cache[key]
     k = KINDS[kind]
@@ -59,26 +129,37 @@ def maps(img, size_m, kind="asphalt", quality=90):
         # under the paint the grain shows only faintly: shift its tone down to the road's
         lum = lum - paint * (float(np.median(lum[paint > 0.5])) - med if (paint > 0.5).any() else 0.0)
 
-    # the fine grain, a band of a pixel or so to GRAIN_M, its large steps softened
-    smooth = ndi.gaussian_filter(lum, 0.6, **wrap)
-    sig = (max(0.8, GRAIN_M / my), max(0.8, GRAIN_M / mx))                # (rows, columns)
-    grain = smooth - ndi.gaussian_filter(smooth, sig, **wrap)
-    scale = 1.4826 * float(np.median(np.abs(grain))) + 1e-6
-    h = np.tanh(grain / (2.5 * scale)) * 2.5                               # about -2.5 .. 2.5
-    height = h * k["relief_m"] * (1.0 - 0.8 * paint) + paint * PAINT_THICK_M
+    def slopes(height):
+        """Slopes (metres per metre) of a height field: along x, and down the rows."""
+        return ((np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) / (2 * mx),
+                (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) / (2 * my))
 
-    # slopes (metres per metre), rows running down the picture
-    dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) / (2 * mx)
-    dy_down = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) / (2 * my)
+    # the paint's own edge: a slight step
+    pdx, pdy = slopes(paint * PAINT_THICK_M)
+    if scan:
+        # measured relief and roughness, flattened under paint (paint fills the pores)
+        sdx, sdy, rough = _scan_layer(scan, size_m, w_px, h_px)
+        dx, dy_down = sdx * (1.0 - 0.8 * paint) + pdx, sdy * (1.0 - 0.8 * paint) + pdy
+        used = "scan: " + scan["name"]
+    else:
+        # the fine grain, a band of a pixel or so to GRAIN_M, its large steps softened
+        smooth = ndi.gaussian_filter(lum, 0.6, **wrap)
+        sig = (max(0.8, GRAIN_M / my), max(0.8, GRAIN_M / mx))            # (rows, columns)
+        grain = smooth - ndi.gaussian_filter(smooth, sig, **wrap)
+        scale = 1.4826 * float(np.median(np.abs(grain))) + 1e-6
+        h = np.tanh(grain / (2.5 * scale)) * 2.5                           # about -2.5 .. 2.5
+        gdx, gdy = slopes(h * k["relief_m"] * (1.0 - 0.8 * paint))
+        dx, dy_down = gdx + pdx, gdy + pdy
+        # roughness following the tone gently
+        tone = ndi.gaussian_filter(lum, 1.0, **wrap)
+        z = (tone - float(np.median(tone))) / (float(tone.std()) + 1e-6)
+        rough = k["rough"] - k["spread"] * np.tanh(z / 1.5)
+        used = "grain"
+
     n = np.stack([-dx, dy_down, np.ones_like(dx)], axis=-1)              # +Y up the picture
     n /= np.linalg.norm(n, axis=-1, keepdims=True)
     nrm = np.clip((n * 0.5 + 0.5) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-
-    # roughness: following the tone gently, paint smoother
-    tone = ndi.gaussian_filter(lum, 1.0, **wrap)
-    z = (tone - float(np.median(tone))) / (float(tone.std()) + 1e-6)
-    rough = k["rough"] - k["spread"] * np.tanh(z / 1.5)
-    rough = rough * (1.0 - paint) + PAINT_ROUGH * paint
+    rough = rough * (1.0 - paint) + PAINT_ROUGH * paint                   # paint smoother
     rgh = np.clip(rough * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
     out = []
@@ -86,6 +167,7 @@ def maps(img, size_m, kind="asphalt", quality=90):
         buf = io.BytesIO()
         Image.fromarray(arr).save(buf, "JPEG", quality=quality)
         out.append(buf.getvalue())
+    out.append(used)
     _cache[key] = tuple(out)
     if len(_cache) > 64:
         _cache.pop(next(iter(_cache)))

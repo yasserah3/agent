@@ -653,7 +653,7 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
           markings: $('#markMode').value,
           mesh_detail: $('#meshDetail').value,
           blocks: $('#blocksOn').checked,
-          surface_detail: $('#surfDetail').checked,
+          surface_detail: $('#surfDetail').value,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
@@ -693,6 +693,8 @@ const UI_VERSION = '2026.10.04-materials1';   // must match VERSION in server.py
             + `${res.marked_textures.length} marked texture(s) (${res.marked_textures.map(m => m.width_cm + ' cm lines').join(', ')}).`
             + (res.strip_dashes ? ` ${res.strip_dashes} dashes on bridge crossings stay as strips.` : ''));
         else log(`  Markings: ${res.dashes} dashes as separate strips.`);
+        if(res.surface && res.surface.length)
+          log(`  Surface detail (bump and roughness): ${res.surface.map(s => s === 'grain' ? 'from the tiles\' grain' : s.replace(/^scan: /, 'scanned ')).join(', ')}.`);
         if(res.sidewalk) log(`  Sidewalks: ${res.sidewalk.top_quads.toLocaleString()} quads on top, raised ${Math.round(res.sidewalk.height_m*100)} cm, with ${res.sidewalk.kerb_faces.toLocaleString()} kerb faces.`);
         else if($('#swOn').checked) log('  No sidewalks: build the tiles first (Memory tab), so there is a sidewalk material.', 'bad');
         const rc = res.repeat_check;
