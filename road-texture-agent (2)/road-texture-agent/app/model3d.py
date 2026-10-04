@@ -713,6 +713,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                     cell_m=16.0 if optimise else 8.0)
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes) \
         if plans else None
+    feet = scatter_info.pop("_feet", None) if scatter_info else None
+    lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
 
     # dashes: their own mesh, a centimetre above the road so they never flicker into it
     dpos, dcol, didx = [], [], []
@@ -770,6 +772,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                                            "warnings", "streets")}
                         for pl in plans] if plans else None,
             "deck": deck_info,
+            "lamps": lamps,
             "layouts": {int(k): v for k, v in layouts.items()}, "_mesh": mesh, "_world": world,
             "_fac": fac}
 
@@ -1346,7 +1349,7 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
         road = QM._road_surface(mesh)
     road = make_valid(road)                    # a repaired shape: intersections cannot fail on it
     placed, skipped, by_obj = 0, 0, {}
-    problems = []
+    problems, feet = [], []
     sized = lambda oid: PL.sized(scatter["objects"][oid]["meta"])
     for p in scatter["placements"]:
       label = (scatter["objects"].get(p.get("object"), {}).get("meta", {}).get("name") or
@@ -1370,6 +1373,7 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
             phi = -(a + turn * math.pi / 2)
             q = (0.0, math.sin(phi / 2), 0.0, math.cos(phi / 2))
             by_obj.setdefault(oid, []).append((tr, q, k))
+            feet.append(fp)
             placed += 1
       except Exception as e:
         problems.append("%s: %s" % (label, e))
@@ -1399,8 +1403,41 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
       except Exception as e:
         placed -= len(inst)
         problems.append("%s: %s" % (scatter["objects"][oid]["meta"].get("name", "object"), e))
-    return {"copies": placed, "skipped_on_road": skipped, "objects": len(by_obj), "problems": problems}
+    return {"copies": placed, "skipped_on_road": skipped, "objects": len(by_obj), "problems": problems,
+            "_feet": feet}
 
+
+
+def _lamps(mesh, world, feet, mpp_mask, scale, mpp_out, W, H):
+    """
+    Street lamps for the 3D view (app/quadmesh.py lamp_spots), clear of the
+    objects (feet: their footprints in texture pixels): [x, y, z, dx, dz] each,
+    the foot of the pole in metres on the sidewalk's top (raised with a
+    bridge) and the way its arm reaches, towards the road. Not in the GLB.
+    """
+    from scipy.spatial import cKDTree
+    from shapely.affinity import scale as sscale
+    from shapely.ops import unary_union
+    if not getattr(mesh, "sw_runs", None):
+        return []
+    avoid = None
+    if feet:
+        avoid = sscale(unary_union(feet), 1.0 / scale, 1.0 / scale, origin=(0, 0))     # to mask pixels
+    spots = QM.lamp_spots(mesh, mpp_mask, avoid=avoid)
+    if not spots:
+        return []
+    top = sorted({i for q in mesh.sw_quads for i in q if mesh.h[i] > 0})
+    if not top:
+        return []
+    V = np.array(mesh.v, float)[top] / scale
+    tree = cKDTree(V)
+    out = []
+    for x, y, dx, dy in spots:
+        _, j = tree.query((x, y))
+        vi = top[j]
+        out.append([round(x * mpp_mask - W * mpp_out / 2, 2), round(float(world[vi, 1] + mesh.h[vi]), 3),
+                    round(y * mpp_mask - H * mpp_out / 2, 2), round(dx, 3), round(dy, 3)])
+    return out
 
 
 def _vertex_normals(pos, faces):

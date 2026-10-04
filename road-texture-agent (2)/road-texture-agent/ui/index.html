@@ -97,8 +97,10 @@
   .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
   .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
   .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .btn-row.three{ grid-template-columns:1fr 1fr 1fr; }
   .btn.secondary.toggle[aria-pressed="true"]{ background:rgba(70,130,220,.28); border-color:var(--blue); }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
+  .note.bad{ color:var(--red); }
 
   .viewport{
     grid-column:2; grid-row:1; position:relative; overflow:hidden; border-radius:6px; border:1px solid var(--line);
@@ -621,17 +623,36 @@
   <div class="tabpane" id="pane-view3d" hidden>
     <aside class="left">
       <section class="panel">
-        <div class="panel-h">3D scene <small>coming soon</small></div>
+        <div class="panel-h">3D scene</div>
         <div class="panel-b">
-          <button class="btn" id="btnScene3d" disabled title="Coming soon">Generate 3D scene</button>
-          <div class="note">Coming soon: the generated streets, objects and foliage together in one 3D scene, to look around here.</div>
+          <button class="btn" id="btnScene3d" title="Build the streets, inner streets, sidewalks, kerbs, blocks and objects of the last generated texture">Generate 3D scene</button>
+          <div class="note" id="scene3dNote">Builds the last generated texture in 3D: streets and inner streets, sidewalks and kerbs, blocks and your objects, with the 3D model settings of the Generate tab, and street lamps along the sidewalks.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Time of day</div>
+        <div class="panel-b">
+          <div class="btn-row three">
+            <button class="btn secondary toggle" data-time3d="dawn" aria-pressed="false" title="Low sun in the east, long warm shadows, street lamps still on">Dawn</button>
+            <button class="btn secondary toggle" data-time3d="day" aria-pressed="true" title="High sun, clear sky with a few clouds">Day</button>
+            <button class="btn secondary toggle" data-time3d="night" aria-pressed="false" title="Moonlight and stars, the street lamps lighting the streets">Night</button>
+          </div>
+          <div class="note">The sun, sky and shadows change with the time; at dawn and at night the street lamps are on.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Photo render</div>
+        <div class="panel-b">
+          <button class="btn" id="btnPhoto" disabled title="Trace the light for a photo-like still of this view">Render photo</button>
+          <button class="btn secondary" id="btnSaveImg" disabled title="Save what the view shows now as a PNG">Save image</button>
+          <div class="note" id="photoNote">Render photo traces the light through the scene (bounces, soft shadows, the sky's light): a still of this view that gets sharper for as long as the camera stays put. Moving the camera goes back to the live view. Save image keeps the view as a PNG.</div>
         </div>
       </section>
       <section class="panel">
         <div class="panel-h">View</div>
         <div class="panel-b">
           <button class="btn secondary" id="btnView3dReset">Reset view</button>
-          <div class="note">Left drag: orbit. Right drag (or Shift + drag): pan. Wheel: zoom. The grid is 500 m across in 10 m squares; red is X (the map's right), blue is Z (the map's down), green is up.</div>
+          <div class="note">Left drag: orbit. Right drag (or Shift + drag): pan. Wheel: zoom.</div>
         </div>
       </section>
     </aside>
@@ -663,6 +684,15 @@
 <input type="file" id="picker" accept="image/png,image/jpeg,image/webp" hidden>
 
 <script src="app.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.min.js",
+  "three/addons/": "./vendor/three/addons/",
+  "three/examples/jsm/": "./vendor/three/addons/",
+  "three-mesh-bvh": "./vendor/three-mesh-bvh/index.module.js",
+  "three-gpu-pathtracer": "./vendor/three-gpu-pathtracer/index.module.js"
+} }
+</script>
 <script type="module" src="view3d.js"></script>
 </body>
 </html>

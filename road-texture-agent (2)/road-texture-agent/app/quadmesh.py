@@ -58,6 +58,7 @@ class Mesh:
         self.sw_kind = {}
         self.fill_polys = None # the knot and fallback fills, as polygons in texture pixels
         self.sw_mode = None
+        self.sw_runs = []      # each sidewalk run: its kerb points and outer edge (mask pixels), for street lamps
 
     def add(self, x, y, st=None, role="open", h=0.0):
         self.v.append((float(x), float(y)))
@@ -1484,6 +1485,7 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                 O = _project_monotonic(Kk, inner.exterior)
                 along = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(Kk, axis=0).T))]) * mpp
                 _rows_from(mesh, Kk, O, along, loop_id, H_m, ks_px, closed=True)
+                mesh.sw_runs.append({"kerb": Kk.copy(), "outer": np.asarray(O, float), "closed": True})
                 continue
 
             # open runs: blocks touching the image border, or interrupted by an
@@ -1536,7 +1538,96 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                 along = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))]) * mpp
                 mesh.sw_kind[loop_id] = "open"
                 _rows_from(mesh, pts, O, along, loop_id, H_m, ks_px, closed=False)
+                mesh.sw_runs.append({"kerb": pts.copy(), "outer": np.asarray(O, float), "closed": False})
     _kerb_apron(mesh, road_all, scale, mpp)
+
+
+def lamp_spots(mesh, mpp, spacing_m=30.0, setback_m=0.45, min_width_m=0.8, min_gap_m=8.0, avoid=None):
+    """
+    Where street lamps stand: along every sidewalk, one every spacing_m along
+    its kerb (the two sides of a street alternating), setback_m in from the
+    kerb, facing the road. Never on a corner
+    (the kerb turning more than 25 degrees within 5 m), on a sidewalk narrower
+    than min_width_m, within min_gap_m of another lamp, or inside avoid (a
+    shapely shape in mask pixels: the objects). Returns [(x, y, dx, dy)] in
+    mask pixels: the foot of the pole and the way it faces, towards the road.
+    """
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+    keep_out = prep(avoid) if avoid is not None and not avoid.is_empty else None
+    step, back, gap = spacing_m / mpp, setback_m / mpp, min_gap_m / mpp
+    out, grid = [], {}
+
+    def facing(foot, face):
+        # another lamp on the far side of the street, level with this one
+        for x, y, fx, fy in out:
+            if fx * face[0] + fy * face[1] > -0.7:
+                continue
+            v = foot - np.array([x, y])
+            if abs(v @ np.array([fx, fy])) < 40.0 / mpp and abs(v[0] * fy - v[1] * fx) < 0.25 * step:
+                return True
+        return False
+
+    def at(K, s, cum):
+        # the point s along the kerb, and the kerb's direction there
+        i = int(np.clip(np.searchsorted(cum, s, side="right") - 1, 0, len(K) - 2))
+        t = (s - cum[i]) / max(cum[i + 1] - cum[i], 1e-9)
+        d = K[i + 1] - K[i]
+        return i, t, d / max(np.hypot(*d), 1e-9)
+
+    for run in mesh.sw_runs:
+        K, O = run["kerb"], run["outer"]
+        if run["closed"]:
+            K, O = np.vstack([K, K[:1]]), np.vstack([O, O[:1]])
+        if len(K) < 2:
+            continue
+        cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(K, axis=0).T))])
+        L = cum[-1]
+        if L < 0.6 * step:
+            continue
+        s0 = 0.5 * step if L >= 1.25 * step else 0.5 * L
+        phase = 0.0
+
+        def place(s, shift=True):
+            # the nearest straight spot within a few metres: placed, None if there is
+            # none, or "shift" if a lamp stands straight across the street
+            for ds in (0.0, 3.0, -3.0, 6.0, -6.0):
+                sm = s + ds / mpp
+                if not (0 <= sm <= L):
+                    continue
+                _, _, ta = at(K, max(sm - 5.0 / mpp, 0.0), cum)
+                _, _, tb = at(K, min(sm + 5.0 / mpp, L - 1e-6), cum)
+                if np.degrees(np.arccos(np.clip(float(ta @ tb), -1.0, 1.0))) > 25.0:
+                    continue
+                i, t, _ = at(K, sm, cum)
+                k = K[i] + (K[i + 1] - K[i]) * t
+                o = O[i] + (O[i + 1] - O[i]) * t
+                w = float(np.hypot(*(o - k)))
+                if w * mpp < min_width_m:
+                    continue
+                n = (o - k) / w
+                foot = k + n * min(back, 0.5 * w)
+                if keep_out is not None and keep_out.intersects(Point(foot).buffer(0.6 / mpp)):
+                    continue
+                if shift and L >= 1.25 * step and facing(foot, -n):
+                    return "shift"
+                cell = (int(foot[0] // gap), int(foot[1] // gap))
+                near = [q for a in (-1, 0, 1) for b in (-1, 0, 1) for q in grid.get((cell[0] + a, cell[1] + b), [])]
+                if any(np.hypot(foot[0] - x, foot[1] - y) < gap for x, y in near):
+                    continue
+                grid.setdefault(cell, []).append((foot[0], foot[1]))
+                out.append((float(foot[0]), float(foot[1]), float(-n[0]), float(-n[1])))
+                return True
+            return None
+
+        for s in np.arange(s0, L - 0.25 * step + 1e-9, step) if L >= 1.25 * step else [s0]:
+            if place(s + phase) == "shift":
+                # the two sides of a street alternate: from here on this side moves on
+                # by half a spacing
+                phase += 0.5 * step
+                if s + phase <= L:
+                    place(s + phase, shift=False)
+    return out
 
 
 def _kerb_apron(mesh, road, scale, mpp, depth_m=1.0):

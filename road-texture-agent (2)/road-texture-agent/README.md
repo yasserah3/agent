@@ -446,7 +446,7 @@ app/streets.py       inner streets drawn between objects, built into the street 
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
-ui/view3d.js         the 3D tab's viewport (three.js, bundled in ui/vendor/three)
+ui/view3d.js         the 3D tab: the scene, sky, sun, lamps, live view and photo render (bundled in ui/vendor)
 workspace/           created on first run: uploads, artifacts, memory.db
 ```
 
@@ -975,13 +975,43 @@ plant as an instance with its own scale and rotation, exactly as on the map.
 
 ## 3D tab
 
-A **3D** tab sits between Generate and Memory, with a viewport to look around
-in: left drag orbits, right drag (or Shift + drag) pans, the wheel zooms, and
-**Reset view** goes back. For now it shows the ground grid (500 m across, in
-10 m squares) and the axes. **Generate 3D scene**, the generated streets,
-objects and foliage together in this viewport, is coming soon. The viewport
-uses three.js, bundled in `ui/vendor/three` (MIT licence), so it works
-offline.
+The **3D** tab shows the whole place in 3D, to look around: left drag orbits,
+right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
+
+- **Generate 3D scene** builds the last generated texture (Generate it in the
+  Generate tab first): streets and inner streets, sidewalks and kerbs, blocks
+  and islands, markings, and your objects and plants, exactly the model the
+  GLB export makes, with the 3D model settings of the Generate tab (sidewalks,
+  blocks, markings painted or as strips, mesh detail). Around the place the
+  land runs on to the horizon and fades into the haze.
+- **Street lamps** stand along every sidewalk, one about every 30 m, the two
+  sides of a street alternating, set 45 cm in from the kerb with the arm
+  reaching over the road. Never on a corner, on a sidewalk under 0.8 m, or in
+  an object. They are in the 3D view and the photo render only, not in the GLB.
+- **Dawn, Day, Night** set the time:
+  - *Dawn*: a low sun in the east, long warm shadows, a pink and gold sky, the
+    lamps still on;
+  - *Day*: a high sun from the south-west, a clear sky with a few clouds;
+  - *Night*: moonlight, a starry sky, and the street lamps lighting the streets
+    in warm pools of light.
+- **The live view** is drawn with the sky (the sun's position, haze and
+  clouds), sunlight with shadows (sharp close up, covering everything when
+  zoomed out), the sky's light from all round, soft contact shadows where
+  surfaces meet (ambient occlusion), a glow round bright lights, and filmic
+  colour. The lamps nearest to where the camera looks light the scene for
+  real; the others show their pool of light on the ground.
+- **Render photo** traces the light through the scene (three-gpu-pathtracer):
+  light bouncing between surfaces, soft shadows from the sun and the sky, and
+  the lamps around the view as real lights. The picture starts grainy and gets
+  sharper with every sample for as long as the camera stays put; the panel
+  counts the samples. Moving the camera, or **Back to live view**, returns to
+  the live view. Setting up takes a few seconds on a big map.
+- **Save image** saves what the view shows, live or the photo, as a PNG.
+
+Everything is bundled in `ui/vendor` (three.js r186 with the add-ons used,
+three-mesh-bvh and three-gpu-pathtracer, all MIT licence), so the tab works
+offline. A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox
+or Safari); the photo render is much faster on a real graphics card.
 
 ## When something goes wrong
 

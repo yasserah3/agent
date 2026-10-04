@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-streets5';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.04-scene3d';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -643,13 +643,8 @@ const UI_VERSION = '2026.10.04-streets5';   // must match VERSION in server.py
     status('Ready.'); $('#btnGenerate').disabled = false; renderMemory();
   });
 
-  $('#btn3d').addEventListener('click', async () => {
-    if(!S.gen.result) return;
-    $('#btn3d').disabled = true; status('Building 3D model…');
-    log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
-    try{
-      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ generation: S.gen.result.id, mesh: $('#meshMode').value,
+  // the 3D model settings, shared by the export and the 3D tab's scene (ui/view3d.js)
+  const exportSettings = () => ({ mesh: $('#meshMode').value,
           straightness: +$('#straight').value, spacing_m: +$('#rowSpacing').value,
           variation: +$('#variation').value, seed: +$('#seed').value,
           sidewalks: $('#swOn').checked, sw_height_cm: +$('#swHeight').value, sw_share: +$('#swShare').value,
@@ -660,7 +655,17 @@ const UI_VERSION = '2026.10.04-streets5';   // must match VERSION in server.py
           blocks: $('#blocksOn').checked,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
-          bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value }) });
+          bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
+  window.exportSettings = exportSettings;
+  window.lastGeneration = () => S.gen.result ? S.gen.result.id : null;
+
+  $('#btn3d').addEventListener('click', async () => {
+    if(!S.gen.result) return;
+    $('#btn3d').disabled = true; status('Building 3D model…');
+    log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
+    try{
+      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ generation: S.gen.result.id, ...exportSettings() }) });
       if(res.mesh === 'tiled'){
         log(`Road model ready: ${res.quads.toLocaleString()} quads, ${res.materials} materials, ${res.dashes} dashes as their own strips, `
           + `${res.size_m[0]} × ${res.size_m[1]} m, ${(res.file_bytes/1048576).toFixed(1)} MB.`, 'ok');
