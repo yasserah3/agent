@@ -40,6 +40,7 @@ from app import generation as G
 from app import junctions as J
 from app import model3d as M3
 from app import library as LIB
+from app import looks as LK
 from app import tiles as TL
 from app import objects as OB
 from app import quadmesh as QMB
@@ -51,7 +52,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-materials2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.04-look1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -689,6 +690,61 @@ def list_materials():
     return {"parts": {p: list(k) for p, k in LIB.KINDS_FOR_PART.items()},
             "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence")}
                           for e in LIB.materials()]}
+
+
+# ------------------------------------------------------------------ looks
+# The 3D tab's Look panel: your saved looks and imported colour tables (LUTs),
+# kept in workspace/looks; the ones that ship with the program in app/looks.
+LOOKS = LK.Store(WORK / "looks")
+
+
+@app.get("/api/looks")
+def list_looks():
+    return {"looks": LOOKS.look_list(), "luts": LOOKS.lut_list()}
+
+
+@app.post("/api/looks")
+def save_look(payload: dict):
+    """Save a look: {"name", "settings", "id" (optional: overwrite your look with this id)}."""
+    lk = LOOKS.save_look(payload.get("name") or "My look", payload.get("settings") or {}, payload.get("id"))
+    mem.record("look_save", "saved look %s" % lk["name"], {"id": lk["id"]})
+    return lk
+
+
+@app.delete("/api/looks/{lid}")
+def delete_look(lid: str):
+    if not LOOKS.delete_look(lid):
+        raise HTTPException(404, "no such look of yours")
+    return {"ok": True}
+
+
+@app.post("/api/looks/import")
+async def import_look(file: UploadFile = File(...)):
+    """A LUT (.cube, or a Hald CLUT .png) or a look file downloaded from the Look panel (.json)."""
+    raw = await file.read()
+    if len(raw) > 40 * 1024 * 1024:
+        raise HTTPException(400, "%s is too large for a LUT or a look (over 40 MB)" % file.filename)
+    try:
+        out = LOOKS.import_file(file.filename or "lut.cube", raw)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    mem.record("look_import", "imported %s" % file.filename, {k: v["id"] for k, v in out.items() if v})
+    return out
+
+
+@app.get("/api/looks/lut/{lid}")
+def lut_file(lid: str):
+    text = LOOKS.lut_text(lid)
+    if text is None:
+        raise HTTPException(404, "no such LUT")
+    return Response(content=text, media_type="text/plain", headers={"Cache-Control": "no-cache"})
+
+
+@app.delete("/api/looks/lut/{lid}")
+def delete_lut(lid: str):
+    if not LOOKS.delete_lut(lid):
+        raise HTTPException(404, "no such LUT of yours")
+    return {"ok": True}
 
 
 @app.get("/api/materials/{mid}/thumb")

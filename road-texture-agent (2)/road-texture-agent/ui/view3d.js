@@ -3,7 +3,8 @@
 // generated texture (the same model as the GLB export, with the 3D model
 // settings of the Generate tab) and adds street lamps along the sidewalks.
 // The live view has a sky, the sun with its shadows, soft contact shadows
-// (ambient occlusion), filmic colour and a glow around bright lights. The sky
+// (ambient occlusion), filmic colour and a glow around bright lights, graded by
+// the Look panel (ui/look.js) as a photo editor would. The sky
 // is Blender's own physical sky (ui/sky_blender.js, ported from Blender), so
 // the sky, the colour of the sunlight and the balance of sun and sky are
 // those of Blender and Cycles. Render
@@ -19,11 +20,11 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildSkyMaps } from './sky_blender.js';
 import { Denoiser } from './denoise.js';
+import { GradePass, lookPanel } from './look.js';
 
 const $ = s => document.querySelector(s);
 const host = $('#view3d'), msg = $('#view3dMsg');
@@ -57,7 +58,10 @@ const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.str
 let DENOISE = true;
 try{ DENOISE = localStorage.getItem('rta.view3d.denoise') !== 'off'; }catch(e){}
 
-let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, output;
+let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, bloomFrom = null, photoHDR = null;
+// the Look panel's pass: from the scene's light to the finished picture (film response, then the
+// adjustments), for the live view and the photo alike
+const look = new GradePass();
 let envScene, pmrem, envRT = null, nightTex = null, stars = null, ground, skyNow = null, skyToken = 0, sunBase = 1;
 let sun, hemi, world = null, lamps = null, time = 'day', radius = 300, centre = new THREE.Vector3();
 let visible = false, running = false, poolAt = null, photo = null, busy = false;
@@ -112,7 +116,8 @@ function init(){
   grid.name = 'grid';
   scene.add(grid);
 
-  // the picture: the scene, contact shadows, the glow of bright lights, then filmic colour
+  // the picture: the scene, contact shadows, the glow of bright lights, then the look (the
+  // film response and the Look panel's adjustments)
   const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
   composer = new EffectComposer(renderer, rt);
   renderPass = new RenderPass(scene, camera);
@@ -120,8 +125,7 @@ function init(){
   gtao.updateGtaoMaterial({ radius: 1.6, distanceExponent: 1.5, thickness: 1.5, scale: 1.0, samples: 16 });
   gtao.blendIntensity = 0.9;
   bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.2, 0.4, 4.0);
-  output = new OutputPass();
-  composer.addPass(renderPass); composer.addPass(gtao); composer.addPass(bloom); composer.addPass(output);
+  composer.addPass(renderPass); composer.addPass(gtao); composer.addPass(bloom); composer.addPass(look);
   // the pools of lamp light are painted on, not surfaces: left out of the contact shadows
   const hide = gtao._overrideVisibility.bind(gtao);
   gtao._overrideVisibility = function(){
@@ -334,7 +338,10 @@ function setTime(name, render = true){
 
 function setBloom(t, exposure){
   // the glow starts from a brightness on screen: in the scene's own units, that over the exposure
-  bloom.strength = t.bloom[0]; bloom.radius = t.bloom[1]; bloom.threshold = t.bloom[2] / exposure;
+  // (the look's included); the look's Glow scales its strength
+  bloomFrom = [t, exposure];
+  bloom.strength = t.bloom[0] * look.settings.glow; bloom.radius = t.bloom[1];
+  bloom.threshold = t.bloom[2] / look.exposureOf(exposure);
 }
 
 // the sun's shadow covers what is in view: a small area close up (sharp
@@ -558,13 +565,11 @@ async function startPhoto(){
       pt.bounces = 5; pt.filterGlossyFactor = 0.5;
       pt.tiles.set(2, 2);
       photo = { pt, on: false };
-      // on screen: the denoised picture once there is one, else the samples so far
+      // on screen: the denoised picture once there is one, else the samples so far, with the
+      // glow and the look as the live view has them
       pt.renderToCanvasCallback = (target, r, quad) => {
-        const auto = r.autoClear;
-        r.autoClear = false;
         if(DENOISE && photo.clean && photo.clean.shown) quad.material.map = photo.clean.out.texture;
-        quad.render(r);
-        r.autoClear = auto;
+        presentPhoto(r, quad);
       };
     }
     photo.clean = null;                                                 // nothing denoised yet
@@ -622,6 +627,25 @@ async function startPhoto(){
     note('The photo render is not available here: ' + e.message, true);
   }
   busy = false;
+}
+
+// the photo's light (linear, as traced) into a picture of its own, the glow added, then the
+// look to the screen
+function presentPhoto(r, quad){
+  const size = r.getDrawingBufferSize(new THREE.Vector2());
+  if(!photoHDR || photoHDR.width !== size.x || photoHDR.height !== size.y){
+    if(photoHDR) photoHDR.dispose();
+    photoHDR = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, depthBuffer: false });
+  }
+  const auto = r.autoClear;
+  r.autoClear = false;
+  r.setRenderTarget(photoHDR); r.clear();
+  quad.render(r);
+  if(bloom.strength > 0){ bloom.renderToScreen = false; bloom.render(r, null, photoHDR, 0, false); }
+  look.renderToScreen = true;
+  look.render(r, null, photoHDR);
+  r.setRenderTarget(null);
+  r.autoClear = auto;
 }
 
 function stopPhoto(why){
@@ -855,6 +879,8 @@ $('#lampColour').addEventListener('input', () => {
   if(photo && photo.on) stopPhoto();
   if(lamps) lampLevel(TIMES[time].lamps);
 });
+// the Look panel: a change shows at once, in the live view and the photo alike (no new render)
+const lookApi = lookPanel(look, () => { if(bloomFrom) setBloom(...bloomFrom); });
 $('#btnPhoto').addEventListener('click', startPhoto);
 $('#btnSaveImg').addEventListener('click', saveImage);
 $('#photoDenoise').checked = DENOISE;
@@ -873,4 +899,4 @@ window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.
   photo: startPhoto, stop: stopPhoto, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
   // for comparisons: the path tracer's light tree on or off (off: each light as likely)
   lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
-  capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); } };
+  capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi };

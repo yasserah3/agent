@@ -445,12 +445,14 @@ app/placements.py    where each copy of a placement goes, for the 3D model and i
 app/streets.py       inner streets drawn between objects, built into the street mask
 app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
 app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
+app/looks.py         the Look panel's LUTs (.cube, Hald CLUT) and saved looks; app/looks holds bundled ones
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
 ui/app.js            the interface logic
 ui/view3d.js         the 3D tab: the scene, sky, sun, lamps, live view and photo render (bundled in ui/vendor)
 ui/sky_blender.js    Blender 5's sky (Multiple Scattering), ported to JavaScript; ui/sky_worker.js runs it off the page
 ui/denoise.js        Intel Open Image Denoise, ported to WebGL2, for the photo render
+ui/look.js           the Look panel: film response, adjustments, LUTs and presets for the finished picture
 workspace/           created on first run: uploads, artifacts, memory.db
 ```
 
@@ -1108,7 +1110,49 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
     the lights likely to light it (near, facing it, their beam towards it),
     as Cycles' light tree does, instead of any lamp at random, so night photos
     sharpen many times sooner.
-- **Save image** saves what the view shows, live or the photo, as a PNG.
+- **Save image** saves what the view shows, live or the photo, as a PNG,
+  with its look.
+
+### Look
+
+The **Look** panel adjusts the finished picture, as a photo editor would. It
+applies to the live view and to Render photo alike, at once and without
+rendering again (a photo keeps sharpening while you change its look), and Save
+image keeps it.
+
+- **Look**: a built-in preset (Neutral, Natural, Warm evening, Cool morning,
+  Cinematic (teal and orange), Faded film, Vivid, Black and white), a look that
+  came with the program, or one of yours. Change anything and the look becomes
+  *Custom*, based on the one you picked.
+- **Film response**: how the scene's light becomes the picture's tones. *AgX*
+  (as Blender; the default, and what the 3D tab always used), *Neutral*
+  (Khronos PBR Neutral: truer, stronger colours) or *ACES filmic* (contrasty).
+- **Exposure** (in stops, before the film response, so highlights still roll
+  off softly), **Contrast** and **Brightness** (black and white stay put),
+  **Highlights** and **Shadows** (bring back a bright sky, see into the shade),
+  **Saturation** (0: black and white), **Warmth** and **Tint** (white balance,
+  at the same brightness), **Split toning** with its two colours (one in the
+  shadows, one in the highlights), **Fade** (blacks lifted, as an old print),
+  **Vignette**, **Sharpen**, **Film grain** and **Glow** (the glow round bright
+  lights, 100% being the time of day's own; it now glows in photos too).
+  Double-click a slider to put it back.
+- **LUT**: a colour lookup table, the usual way film emulations and colour
+  grades are shared. **Import…** takes `.cube` files (3D or 1D, as from
+  Resolve, Premiere, Photoshop and most LUT packs) and Hald CLUT pictures
+  (`.png`, as RawTherapee's and darktable's film simulation packs); tables over
+  65³ are resampled to 65³. The LUT is applied right after the film response,
+  then your adjustments on top; **LUT strength** mixes it in. **×** removes a
+  LUT of yours.
+- **Save** keeps the settings (and the LUT) as a look of yours, under the
+  name typed; saving under the name of one of your looks updates it.
+  **Delete** removes one. Your looks and LUTs are kept in the workspace
+  (`workspace/looks`), so updates never touch them.
+- **Download** saves the look as a `.look.json` file with its LUT inside, to
+  keep or to give to someone; **Import…** takes such a file back.
+- Looks and LUTs put in `app/looks` come with the program for every workspace
+  (see `app/looks/README.md`).
+
+The current look is kept in the browser for the next time.
 
 Everything is bundled in `ui/vendor`, so the tab works offline and nothing
 needs installing:
@@ -1120,6 +1164,9 @@ needs installing:
   `ui/denoise.js`, a port of OIDN 2.4's network (Apache 2.0).
 - `app/scans` (server side): nine scanned materials from Poly Haven, CC0
   (public domain), listed with their authors in `app/scans/README.md`.
+
+The Look panel's presets are written for this program (no third-party LUTs
+are bundled); LUTs you import keep their own licences.
 
 A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox or
 Safari); the photo render and its denoising are much faster on a real

@@ -677,6 +677,32 @@
         </div>
       </section>
       <section class="panel">
+        <div class="panel-h">Look <small>after the render</small></div>
+        <div class="panel-b">
+          <select id="lookPreset" class="select-full" title="A built-in preset, a look that came with the program, or one you saved"></select>
+          <div class="field"><label for="lookFilm">Film response</label>
+            <select id="lookFilm" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="How the scene's light becomes the picture's tones. AgX: as Blender (soft highlights, natural colour in bright light). Neutral (Khronos): truer, stronger colours. ACES: the film industry's, contrasty">
+              <option value="agx">AgX (Blender)</option><option value="neutral">Neutral (Khronos)</option><option value="aces">ACES filmic</option></select></div>
+          <div id="lookSliders"></div>
+          <div class="field"><label for="lookLut">LUT</label>
+            <div style="display:flex;gap:4px;align-items:center"><select id="lookLut" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="A colour lookup table: a film emulation or a colour grade from a .cube file or a Hald CLUT picture. Import one with Import"><option value="">None</option></select>
+            <button class="btn secondary" id="btnLutDelete" disabled title="Remove this LUT of yours from the workspace" style="width:auto;margin:0;padding:4px 8px">×</button></div></div>
+          <div id="lookLutMix"></div>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnLookImport" title="Import a LUT (.cube, or a Hald CLUT .png) or a look file (.look.json) downloaded from here">Import…</button>
+            <button class="btn secondary" id="btnLookDownload" title="Download this look as a file (its LUT inside), to keep or to share">Download</button>
+          </div>
+          <input type="file" id="lookFile" accept=".cube,.png,.json" multiple hidden>
+          <div class="field"><label for="lookName">Name</label><input type="text" id="lookName" placeholder="My look" maxlength="80" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%"></div>
+          <div class="btn-row three">
+            <button class="btn" id="btnLookSave" title="Keep these settings as a look of yours (in the workspace), under the name above. With the name of a look of yours: that look is updated">Save</button>
+            <button class="btn secondary" id="btnLookDelete" disabled title="Delete the picked look of yours">Delete</button>
+            <button class="btn secondary" id="btnLookReset" title="Back to Neutral: the picture as rendered">Reset</button>
+          </div>
+          <div class="note" id="lookNote">Applied to the live view and to Render photo, without rendering again; Save image keeps it. Double-click a slider to put it back.</div>
+        </div>
+      </section>
+      <section class="panel">
         <div class="panel-h">View</div>
         <div class="panel-b">
           <button class="btn secondary" id="btnView3dReset">Reset view</button>
