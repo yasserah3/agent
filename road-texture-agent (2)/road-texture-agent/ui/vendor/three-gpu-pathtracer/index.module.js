@@ -4,6 +4,7 @@
 // are picked by their importance at each point, the sky and directional lights by
 // theirs; the environment's mean luminance is kept for it (EquirectHdrInfoUniform).
 // Without the tree (area lights, or more than four directional lights) it works as before.
+// LIGHT_TREE (define, 1 by default) 0 compiles it out. The MIS weight of two zero pdfs is 0, not 0/0.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -5538,7 +5539,7 @@ const util_functions = /* glsl */`
 
 		float aa = a * a;
 		float bb = b * b;
-		return aa / ( aa + bb );
+		return aa + bb > 0.0 ? aa / ( aa + bb ) : 0.0;
 
 	}
 
@@ -6879,6 +6880,7 @@ const camera_util_functions = /* glsl */`
 const direct_light_contribution_function = /*glsl*/`
 
 
+	#if LIGHT_TREE
 	// ---- light tree (see LightTreeUniform)
 	vec4 lightTreeTexel( int node, int k ) {
 
@@ -7126,13 +7128,17 @@ const direct_light_contribution_function = /*glsl*/`
 
 	}
 
+	#endif
+
 	vec3 directLightContribution( vec3 worldWo, SurfaceRecord surf, RenderState state, vec3 rayOrigin ) {
 
+		#if LIGHT_TREE
 		if ( lightTree.enabled != 0 ) {
 
 			return directLightContributionTree( worldWo, surf, state, rayOrigin );
 
 		}
+		#endif
 
 		vec3 result = vec3( 0.0 );
 
@@ -7673,6 +7679,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 			defines: {
 				FEATURE_MIS: 1,
 				FEATURE_RUSSIAN_ROULETTE: 1,
+				LIGHT_TREE: 1,
 				FEATURE_DOF: 1,
 				FEATURE_BACKGROUND_MAP: 0,
 				FEATURE_FOG: 1,
@@ -7941,6 +7948,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						( environmentIntensity == 0.0 || envMapInfo.totalSum == 0.0 ) && lights.count != 0u ?
 							float( lights.count ) :
 							float( lights.count + 1u );
+					envSelectPdf = 0.0;
 
 					// final color
 					gl_FragColor = vec4( 0, 0, 0, 1 );
@@ -8019,7 +8027,11 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 								// get the PDF of the hit envmap point
 								vec3 envColor;
 								float envPdf = sampleEquirect( envRotation3x3 * ray.direction, envColor );
+								#if LIGHT_TREE
 								envPdf *= lightTree.enabled != 0 ? envSelectPdf : 1.0 / lightsDenom;
+								#else
+								envPdf *= 1.0 / lightsDenom;
+								#endif
 
 								// and weight the contribution
 								float misWeight = misHeuristic( scatterRec.pdf, envPdf );

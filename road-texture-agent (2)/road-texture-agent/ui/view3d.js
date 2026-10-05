@@ -57,6 +57,10 @@ const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.str
 // Render photo's noise cleared by Open Image Denoise (on unless turned off here before)
 let DENOISE = true;
 try{ DENOISE = localStorage.getItem('rta.view3d.denoise') !== 'off'; }catch(e){}
+// the light tree compiled out, when a photo on this graphics card came out empty with it
+// and right without it (see photoHealth)
+let NO_TREE = false;
+try{ NO_TREE = localStorage.getItem('rta.view3d.notree') === '1'; }catch(e){}
 
 let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom, bloomFrom = null, photoHDR = null;
 // the Look panel's pass: from the scene's light to the finished picture (film response, then the
@@ -597,14 +601,20 @@ async function startPhoto(){
       pt.bounces = 5; pt.filterGlossyFactor = 0.5;
       pt.tiles.set(2, 2);
       photo = { pt, on: false };
+      if(NO_TREE) pt._pathTracer.material.setDefine('LIGHT_TREE', 0);
       // on screen: the denoised picture once there is one, else the samples so far, with the
       // glow and the look as the live view has them
       pt.renderToCanvasCallback = (target, r, quad) => {
         if(DENOISE && photo.clean && photo.clean.shown) quad.material.map = photo.clean.out.texture;
-        presentPhoto(r, quad);
+        if(photo.plain){
+          // as the path tracer draws it itself (no glow, no look): see photoHealth
+          const auto = r.autoClear;
+          r.autoClear = false; quad.render(r); r.autoClear = auto;
+        }else presentPhoto(r, quad);
       };
     }
     photo.clean = null;                                                 // nothing denoised yet
+    photo.checked = false; photo.retried = false;
     photo.saved = { env: scene.environment, bg: scene.background, envI: scene.environmentIntensity };
     if(skyNow){
       // Blender's sky as the tracer's light from all round, without the sun's disc (the sun is
@@ -738,6 +748,8 @@ async function saveImage(){
 function draw(){
   if(photo && photo.on){
     photo.pt.renderSample();
+    if(!photo.checked && photo.pt.samples >= 2) photoHealth();
+    if(!photo.on) return;
     const n = photo.pt.samples;
     // denoised after 4 samples, then each time the samples have grown four times over
     if(DENOISE && Number.isInteger(n) && n >= (photo.clean ? photo.clean.next : 4) && !photo.denoising) denoisePhoto(n);
@@ -753,6 +765,111 @@ function draw(){
   assignPool();
   if(stars) stars.position.copy(camera.position);                      // as far away as the sky
   composer.render();
+}
+
+// ----------------------------------------------------------------- photo health
+// Is there any light in the photo? On some graphics cards the path tracer can come out
+// empty: a shader the card's driver does not compile, or a feature it lacks. Then say
+// so with the reason, try once without the light tree, and if still empty go back to
+// the live view with the details, instead of showing a black picture
+function gpuInfo(){
+  const gl = renderer.getContext();
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  const has = n => !!gl.getExtension(n);
+  return { name: String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)),
+           floatTarget: has('EXT_color_buffer_float'), floatLinear: has('OES_texture_float_linear'), floatBlend: has('EXT_float_blend') };
+}
+
+// a grid of pixels of a float picture: how many have light, how many are invalid,
+// where the brightest is, and null if this browser cannot read float pictures back
+const GRID = [9, 7];
+function lightIn(rt){
+  const px = new Float32Array(4);
+  let lit = 0, bad = 0, read = 0, top = 0;
+  const values = [];
+  for(let j = 0; j < GRID[1]; j++) for(let i = 0; i < GRID[0]; i++){
+    px.fill(-1);
+    renderer.readRenderTargetPixels(rt, Math.floor((i + 0.5) / GRID[0] * rt.width), Math.floor((j + 0.5) / GRID[1] * rt.height), 1, 1, px);
+    if(px[3] === -1){ values.push(0); continue; }
+    read++;
+    const v = px[0] + px[1] + px[2];
+    if(!Number.isFinite(v)){ bad++; values.push(0); }
+    else{ if(v > 1e-7) lit++; values.push(v); top = Math.max(top, v); }
+  }
+  return read ? { lit, bad, read, top, values } : null;
+}
+
+// the same grid of what the screen shows now (0..765 each), read straight after drawing
+function shownOnScreen(){
+  const gl = renderer.getContext(), c = renderer.domElement, buf = new Uint8Array(4), out = [];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  for(let j = 0; j < GRID[1]; j++) for(let i = 0; i < GRID[0]; i++){
+    gl.readPixels(Math.floor((i + 0.5) / GRID[0] * c.width), Math.floor((j + 0.5) / GRID[1] * c.height), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    out.push(buf[0] + buf[1] + buf[2]);
+  }
+  renderer.resetState();
+  return out;
+}
+
+// the first error of the photo's own drawing steps (the cleaning copy, the glow, the look)
+function displayErrors(){
+  for(const m of [cleanQuad && cleanQuad.material, bloom && bloom.materialHighPassFilter, look.material]){
+    const prog = m && renderer.properties.get(m).currentProgram;
+    const d = prog && prog.diagnostics;
+    if(d && !d.runnable) return `${m.name || m.type}: ` + String((d.fragmentShader && d.fragmentShader.log) || d.programLog || '').replace(/[\x00-\x1f]+/g, ' ').trim();
+  }
+  return null;
+}
+
+function photoHealth(){
+  photo.checked = true;
+  const mat = photo.pt._pathTracer.material;
+  const prog = renderer.properties.get(mat).currentProgram;
+  const d = prog && prog.diagnostics;
+  const shader = d && !d.runnable ? String((d.fragmentShader && d.fragmentShader.log) || d.programLog || 'no log').replace(/[\x00-\x1f]+/g, ' ').trim() : null;
+  let c = null;
+  try{ c = lightIn(photo.pt._pathTracer.target); }catch(e){}
+  const tree = mat.defines.LIGHT_TREE !== 0;
+  if(!shader && (!c || c.lit > 0)){
+    // the photo has light: does it reach the screen through the glow and the look?
+    if(c && !photo.plain){
+      const screen = shownOnScreen(), k = look.exposureOf(renderer.toneMappingExposure);
+      // points bright enough that they cannot show black, yet all of them black
+      const bright = c.values.map((v, i) => [v * k, screen[i]]).filter(([v]) => v > 0.05);
+      if(bright.length && bright.every(([, sv]) => sv <= 3)){
+        photo.plain = true;
+        const g = gpuInfo(), err = displayErrors();
+        const msg = `The photo has light, but its glow and look came out black on this graphics card (${g.name})`
+                  + (err ? `: ${err.slice(0, 300)}` : '') + '. Showing it without them. Please send this message.';
+        console.error('Render photo:', msg);
+        note(msg, true);
+      }
+    }
+    if(photo.retried){
+      // empty with the light tree, right without it: keep it off on this card
+      NO_TREE = true;
+      try{ localStorage.setItem('rta.view3d.notree', '1'); }catch(e){}
+      note('This graphics card renders photos without the light tree: night photos with many lamps sharpen more slowly.');
+    }
+    return;
+  }
+  const g = gpuInfo();
+  const why = shader ? 'the path tracer\'s shader did not compile on this graphics card: ' + shader.split('\n').slice(0, 4).join(' ')
+            : c.bad === c.read ? 'every pixel came out invalid (not a number)' : 'the picture came out black, with no light at all';
+  const facts = `Graphics: ${g.name}. Float pictures ${g.floatTarget ? 'yes' : 'NO'}, float filtering ${g.floatLinear ? 'yes' : 'NO'}, `
+              + `float blending ${g.floatBlend ? 'yes' : 'NO'}. Light tree ${tree ? 'on' : 'off'}.`;
+  console.error('Render photo came out empty:', why, facts, shader || '');
+  if(tree && !photo.retried){
+    photo.retried = true; photo.checked = false;
+    mat.setDefine('LIGHT_TREE', 0);
+    photo.pt.reset(); dropClean();
+    $('#photoNote').textContent = `The photo came out empty (${why}). Trying again without the light tree…`;
+    return;
+  }
+  stopPhoto();
+  const msg = `Render photo does not work on this graphics card yet: ${why}. ${facts} Please send this message (also in the browser console, F12).`;
+  note(msg, true);
+  $('#photoNote').textContent = msg;
 }
 
 function photoNote(n){
@@ -865,6 +982,13 @@ async function denoisePhoto(n){
       renderer.resetState();
     }
     ph.clean.ms = performance.now() - t0;
+    if(!ph.clean.at){
+      const c = (() => { try{ return lightIn(ph.clean.out); }catch(e){ return null; } })();
+      if(c && c.lit === 0){
+        const g = gpuInfo();
+        throw new Error(`its picture came out ${c.bad ? 'invalid' : 'black'} on this graphics card (${g.name}); showing the samples without it`);
+      }
+    }
     ph.clean.at = n; ph.clean.next = Math.max(4, n * 4); ph.clean.shown = true;
     photoNote(n);
   }catch(e){

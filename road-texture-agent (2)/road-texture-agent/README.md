@@ -1148,6 +1148,16 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
     and textures stay sharp. It runs after 4 samples, and again each time the
     samples have grown four times over (16, 64, 256…); the panel says which
     one it shows. Save image denoises the latest samples first.
+  - **If the photo comes out empty** (some graphics cards' drivers handle the
+    path tracer differently): after the first samples the photo checks
+    itself. If the path tracer's shader did not compile, or the picture has
+    no light at all, it tries again without the light tree (and remembers
+    that for this card if that works). If the picture has light but the glow
+    and look turn it black, it shows the photo without them. If nothing
+    works it goes back to the live view and says exactly what failed: the
+    shader's error, the graphics card, and whether it can draw, filter and
+    blend float pictures. A single invalid pixel (not a number) is shown as
+    one dark dot and never spreads.
   - **Light tree**: with hundreds of lamps, each point of the picture picks
     the lights likely to light it (near, facing it, their beam towards it),
     as Cycles' light tree does, instead of any lamp at random, so night photos
