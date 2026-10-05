@@ -18,7 +18,8 @@ COMP = {5126: np.float32, 5125: np.uint32, 5123: np.uint16}
 SIZE = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
 
 
-def load_glb(path):
+def load_glb(path, meshes=None):
+    """The file's primitives (all, or only those of the meshes named in meshes)."""
     data = open(path, "rb").read()
     jlen = struct.unpack("<I", data[12:16])[0]
     gltf = json.loads(data[20:20 + jlen])
@@ -44,6 +45,8 @@ def load_glb(path):
 
     prims = []
     for m in gltf["meshes"]:
+        if meshes is not None and m.get("name") not in meshes:
+            continue
         for p in m["primitives"]:
             mat = gltf["materials"][p["material"]]
             pbr = mat.get("pbrMetallicRoughness", {})
@@ -69,7 +72,10 @@ def render(prims, x0, z0, width_m, height_m, mm_per_px=20.0, use_colours=True, b
     for p in sorted(prims, key=lambda q: q["mesh"] == "Markings"):   # markings drawn last, on top
         P = p["pos"]
         X = (P[:, 0] - x0) * k; Z = (P[:, 2] - z0) * k
-        for tri in p["idx"]:
+        # only the triangles reaching into the picture (a city's worth would be millions)
+        tx, tz = X[p["idx"]], Z[p["idx"]]
+        near = (tx.max(axis=1) >= 0) & (tx.min(axis=1) <= W) & (tz.max(axis=1) >= 0) & (tz.min(axis=1) <= H)
+        for tri in p["idx"][near]:
             xs, zs = X[tri], Z[tri]
             if xs.max() < 0 or xs.min() > W or zs.max() < 0 or zs.min() > H:
                 continue
@@ -77,10 +83,15 @@ def render(prims, x0, z0, width_m, height_m, mm_per_px=20.0, use_colours=True, b
             za, zb = max(0, int(np.floor(zs.min()))), min(H, int(np.ceil(zs.max())) + 1)
             if xa >= xb or za >= zb:
                 continue
-            gx, gz = np.meshgrid(np.arange(xa, xb) + 0.5, np.arange(za, zb) + 0.5)
             (x1, x2, x3), (z1, z2, z3) = xs, zs
             den = (z2 - z3) * (x1 - x3) + (x3 - x2) * (z1 - z3)
             if abs(den) < 1e-12:
+                continue
+            # the pixels of each row the triangle crosses (a pixel wider each side, the exact
+            # test below decides), not its whole bounding box: a long thin triangle across
+            # the picture covers a few pixels of a box of millions
+            gz, gx = _spans(xs, zs, xa, xb, za, zb)
+            if not len(gx):
                 continue
             w1 = ((z2 - z3) * (gx - x3) + (x3 - x2) * (gz - z3)) / den
             w2 = ((z3 - z1) * (gx - x3) + (x1 - x3) * (gz - z3)) / den
@@ -89,10 +100,11 @@ def render(prims, x0, z0, width_m, height_m, mm_per_px=20.0, use_colours=True, b
             if not inside.any():
                 continue
             y = w1 * P[tri[0], 1] + w2 * P[tri[1], 1] + w3 * P[tri[2], 1]
-            sub_d = depth[za:zb, xa:xb]
-            draw = inside & (y >= sub_d)
+            ri, ci = (gz - 0.5).astype(np.int64), (gx - 0.5).astype(np.int64)
+            draw = inside & (y >= depth[ri, ci])
             if not draw.any():
                 continue
+            gx, gz, w1, w2, w3, y, ri, ci = (q[draw] for q in (gx, gz, w1, w2, w3, y, ri, ci))
             if p["tex"] is not None and p["uv"] is not None:
                 uv = p["uv"][tri]
                 u = w1 * uv[0, 0] + w2 * uv[1, 0] + w3 * uv[2, 0]
@@ -107,10 +119,37 @@ def render(prims, x0, z0, width_m, height_m, mm_per_px=20.0, use_colours=True, b
                 c = p["col"][tri]
                 f = (w1[..., None] * c[0, :3] + w2[..., None] * c[1, :3] + w3[..., None] * c[2, :3])
                 colour = colour * f
-            sub = img[za:zb, xa:xb]
-            sub[draw] = colour[draw]
-            sub_d[draw] = y[draw]
+            img[ri, ci] = colour
+            depth[ri, ci] = y
     return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def _spans(xs, zs, xa, xb, za, zb):
+    """Pixel centres (z, x) of the rows za..zb a triangle crosses, each row from where
+    its edges cross the row's centre line, a pixel wider each side, within xa..xb."""
+    zc = np.arange(za, zb) + 0.5
+    lo = np.full(len(zc), np.inf)
+    hi = np.full(len(zc), -np.inf)
+    for i in range(3):
+        xa_, za_, xb_, zb_ = xs[i], zs[i], xs[(i + 1) % 3], zs[(i + 1) % 3]
+        on = (zc >= min(za_, zb_) - 0.01) & (zc <= max(za_, zb_) + 0.01)   # rows this edge crosses
+        if za_ == zb_:
+            x = np.where(on, min(xa_, xb_), np.inf); lo = np.minimum(lo, x)
+            x = np.where(on, max(xa_, xb_), -np.inf); hi = np.maximum(hi, x)
+            continue
+        t = np.clip((zc - za_) / (zb_ - za_), 0.0, 1.0)
+        x = xa_ + t * (xb_ - xa_)
+        lo = np.where(on, np.minimum(lo, x), lo); hi = np.where(on, np.maximum(hi, x), hi)
+    lo = np.where(np.isfinite(lo), lo, 0.0); hi = np.where(np.isfinite(hi), hi, -10.0)   # rows it misses: none
+    c0 = np.maximum(xa, np.floor(lo - 0.5).astype(np.int64) - 1) if len(zc) else lo
+    c1 = np.minimum(xb - 1, np.ceil(hi - 0.5).astype(np.int64) + 1) if len(zc) else hi
+    n = np.maximum(0, c1 - c0 + 1)
+    if not n.sum():
+        return np.zeros(0), np.zeros(0)
+    rows = np.repeat(zc, n)
+    start = np.repeat(np.cumsum(n) - n, n)
+    cols = np.arange(n.sum()) - start + np.repeat(c0, n) + 0.5
+    return rows, cols
 
 
 def render_oblique(prims, x0, z0, width_m, depth_m, elevation_deg=30.0, exaggerate=1.0,

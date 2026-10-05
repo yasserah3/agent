@@ -27,6 +27,7 @@ from app.generation import prepare_mask
 from app import surface as SF
 from app import library as LIB
 from app import quadmesh as QM
+from app import progress as prog
 from app import placements as PL
 from scipy import ndimage as ndi
 
@@ -565,6 +566,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     tile_m = float(tileset["settings"]["tile_m"])
     tiles = tileset["tiles"]
 
+    prog.stage("road", "road surfaces, materials and colours")
     V = np.array(mesh.v, float)
     bcfg = dict({"height_m": 5.0, "ramp_m": 120.0, "deck_m": 1.0}, **(bridge_cfg or {}))
     plans, lift = [], np.zeros(len(V))
@@ -779,16 +781,19 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         regions = QM.block_polygons(mesh, (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale),
                                     output_scale, mpp_out * output_scale, min_area_m2=0.5)
         frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac)
+    prog.stage("sidewalk_meshes", "sidewalk paving")
     sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface, frames)
     scatter_info = None
     if scatter:
         stand = (float(blocks.get("height_m", 0.10)) if blocks else
                  float(sidewalk.get("height_m", 0.10)) if sidewalk else 0.0)
+        prog.stage("objects", "objects")
         scatter_info = _object_meshes(mesh, scatter, metres_per_pixel, output_scale, mpp_out, W, H,
                                       stand, images, materials, meshes)
     blocks_info = None
     if blocks:
         mask_shape = (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale)
+        prog.stage("blocks", "blocks and islands")
         blocks_info = _block_meshes(mesh, mask_shape, output_scale, mpp_out, W, H,
                                     fac, tiles, tile_m, images, materials, meshes,
                                     height_m=float(blocks.get("height_m", 0.10)),
@@ -797,6 +802,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
     feet = scatter_info.pop("_feet", None) if scatter_info else None
+    prog.stage("lamps", "street lamps")
     lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
 
     # dashes: their own mesh, a centimetre above the road so they never flicker into it
@@ -836,6 +842,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
             "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
 
+    prog.stage("writing", "writing the 3D file")
     size = write_glb_scene(out_path, meshes, materials, images)
 
     return {"mesh": "tiled", "quads": int(road_quads), "streets": rep["streets"],
@@ -910,7 +917,7 @@ def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
     horizontal = abs(d[0]) >= abs(d[1])
     # the road surface only: paving is a regular pattern that repeats by design,
     # and would be counted as the tile repeating if it were included
-    prims = [p for p in P3.load_glb(glb_path) if p["mesh"] == "Road"]
+    prims = P3.load_glb(glb_path, meshes={"Road"})
     x0, z0 = min(a[0], b[0]) - 6, min(a[1], b[1]) - 6
     w, h = abs(d[0]) + 12, abs(d[1]) + 12
     out = {}
@@ -1309,6 +1316,9 @@ def _split_quad(up, a, b, c, d, eps):
 
 
 
+SLIVER_M = 0.06               # block pieces thinner than this along the kerb are slivers, not blocks
+
+
 def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, images, materials, meshes,
                   height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan", frames=None):
     """
@@ -1335,11 +1345,19 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
             grown = list(shapely.buffer(np.array(parts, object), 0.001, quad_segs=16))   # as geometry.buffer()
             tree = shapely.STRtree(grown)
             cut = []
-            for g in polys:
+            for n_g, g in enumerate(polys):
+                prog.part(0.5 * n_g / len(polys))
                 # the sidewalk near this block, joined and shrunk back
                 x0, y0, x1, y1 = g.bounds
                 near = tree.query(shapely.box(x0 - 0.01, y0 - 0.01, x1 + 0.01, y1 + 0.01))
                 r = g.difference(unary_union([grown[i] for i in near]).buffer(-0.001)) if len(near) else g
+                # hairline slivers left between the kerb line and the sidewalk's kerb (where its
+                # rows cut a bend as straight lines) taken off: they stood in front of the kerb
+                # with a kerb face of their own, two faces in one place. Square corners kept;
+                # the road is filled up to the kerb there instead
+                if len(near) and not r.is_empty:
+                    e = SLIVER_M / 2 / mpp_out
+                    r = r.buffer(-e, join_style=2).buffer(e, join_style=2).intersection(r)
                 for part in (r.geoms if hasattr(r, "geoms") else [r]):
                     if part.geom_type == "Polygon" and part.area * (mpp_out ** 2) > 1.0:
                         cut.append(part)
@@ -1474,7 +1492,8 @@ def _grid_mesh(polys, cell):
         return i
 
     import shapely
-    for g in polys:
+    for n_g, g in enumerate(polys):
+        prog.part(0.5 + 0.4 * n_g / max(1, len(polys)))
         shapely.prepare(g)
         minx, miny, maxx, maxy = g.bounds
         # the block's squares, in the same order as one by one, each tested in one

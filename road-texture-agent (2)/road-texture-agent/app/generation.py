@@ -27,6 +27,7 @@ from PIL import Image
 from scipy import ndimage as ndi
 
 from app import junctions as J
+from app import progress as prog
 
 EDGE_METRES = 1.5
 
@@ -113,7 +114,10 @@ def synth_layer(shape, patches, rng, overlap=0.25, jitter=1.0, masks=None, seam=
         reach = np.zeros((H + 1, W + 1), np.int64)
         reach[1:, 1:] = grown.cumsum(0).cumsum(1)
 
-    for y in range(-s, H + s, step):
+    rows = range(-s, H + s, step)
+    for n_row, y in enumerate(rows):
+        if n_row % 8 == 0:
+            prog.part(n_row / len(rows))
         for x in range(-s, W + s, step):
             j = max(1, int(step * jitter / 3))
             yy = y + int(rng.integers(-j, j + 1))
@@ -257,6 +261,8 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
     widths_used = []
     seg_px = det.get("segment_pixels") or J.label_coords(seg_lab, n)
     for s in range(1, n + 1):
+        if s % 50 == 0:
+            prog.part(s / n)
         coords = seg_px[s]
         if len(coords) < 4:
             continue
@@ -474,11 +480,14 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     mpp_out = mpp / scale                     # each output pixel covers less ground
 
     gray = np.array(Image.open(mask_path).convert("L"))
+    prog.stage("mask", "cleaning and smoothing the mask")
     prepared, coverage = prepare_mask(gray, scale)
+    prog.stage("junctions", "finding the junctions and streets")
     det = J.detect(prepared)
     det["coverage"] = coverage
     road = det["road"]
     H, W = road.shape
+    prog.stage("areas", "junction, kerb and open-road areas")
     groups, road_width, band_m = groups_for(det, mpp_out)
 
     # ---- 1. material ----
@@ -491,6 +500,8 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     used = {}
     size_ratio = {}
     for name, m in groups.items():
+        prog.stage("material_" + name, {"open": "material patches: open road", "edge": "material patches: kerb band",
+                                     "junction": "material patches: junctions"}.get(name, "material patches"))
         if not m.any():
             continue
         npz = libraries["material"].get(name) or libraries["material"].get("open")
@@ -532,6 +543,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         material = lay_material(street, material, road, mpp_out)
 
     # ---- 2. wear ----
+    prog.stage("wear", "wear patches")
     wear_strength = float(params.get("wear", 0.5))
     wear_map = np.zeros((H, W), np.float32)
     wear_npz = libraries["wear"].get("open") or libraries["wear"].get("junction")
@@ -546,6 +558,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     worn = material * (1.0 - 0.45 * wear_strength * wear_map[:, :, None])
 
     # ---- 3. markings ----
+    prog.stage("markings", "markings")
     paint_rgb = np.array(params.get("paint_colour", [235, 232, 222]), np.float32)
     paint, dash_info = place_dashes(
         det, mpp_out,
@@ -556,6 +569,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         rng=rng, align=align_lines, width_ratio=params.get("width_ratio"),
         nomark=_at_size(params.get("nomark"), scale, road.shape))
 
+    prog.stage("finishing", "blending and saving the pictures")
     result = worn.copy()
     if paint.any():
         # paint is worn too, so it is not a flat block of white; the coverage

@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -23,15 +23,86 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
   }
   const status = t => $('#status').textContent = t;
 
+  /* A long job's line in the console: what it is doing, the time so far and the time
+     left, asked from the server about once a second while the job runs. */
+  function fmtTime(s){
+    s = Math.max(0, Math.round(s));
+    if(s < 60) return `${s} s`;
+    const m = Math.floor(s / 60);
+    if(m < 60) return `${m} min ${String(s % 60).padStart(2, '0')} s`;
+    return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+  }
+  function trackJob(name){
+    const id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    const t0 = performance.now();
+    const li = document.createElement('li'); li.className = 'hi job';
+    const ul = $('#log'); ul.appendChild(li); ul.scrollTop = ul.scrollHeight;
+    let snap = null, ended = false, busy = false, timer = null;
+    const draw = () => {
+      if(ended) return;
+      const secs = (performance.now() - t0) / 1000;
+      let s = `${name}: `;
+      if(snap && !snap.unknown){
+        s += snap.stage + (snap.done != null ? ` · ${Math.floor(snap.done * 100)}%` : '') + ` · ${fmtTime(secs)} so far`;
+        if(snap.left != null) s += ` · about ${fmtTime(snap.left)} left`;
+        else if(snap.done != null && !snap.finished) s += ' · working out the time left';
+      } else s += `${fmtTime(secs)} so far`;
+      li.textContent = s;
+    };
+    const ask = async () => {
+      if(ended || busy) return;
+      busy = true;
+      try{
+        const r = await fetch(API + '/api/progress/' + id);
+        const j = r.ok ? await r.json() : null;
+        if(j && timer) snap = j;                           // not once the page has taken over
+      }catch(_){}
+      busy = false; draw();
+    };
+    draw();
+    timer = setInterval(ask, 1000);
+    const tick = setInterval(draw, 1000);                  // the time so far moves between answers
+    return {
+      id,
+      // the page takes over the line (its own work, after the server's part): no more asking
+      set(stage, done = null, left = null){
+        if(timer){ clearInterval(timer); timer = null; }
+        snap = { stage, done, left }; draw();
+      },
+      done(ok, extra){
+        if(ended) return; ended = true; clearInterval(timer); clearInterval(tick);
+        const secs = (performance.now() - t0) / 1000;
+        li.className = ok ? 'ok' : 'bad';
+        li.textContent = `${name}: ${ok ? 'done' : 'stopped'} in ${fmtTime(secs)}` + (extra ? ` · ${extra}` : '');
+      }
+    };
+  }
+  window.trackJob = trackJob;
+
   async function api(path, opts){
-    const res = await fetch(API + path, opts);
-    let body = null;
-    try { body = await res.json(); } catch(e) { body = null; }
-    if(!res.ok){
-      const msg = (body && (body.error || body.detail)) || `${res.status} ${res.statusText}`;
-      const err = new Error(msg); err.status = res.status; err.body = body; throw err;
+    let job = null;
+    if(opts && opts.job){
+      job = trackJob(opts.job);
+      let payload = {};
+      try { payload = opts.body ? JSON.parse(opts.body) : {}; } catch(_) {}
+      payload.progress = job.id;
+      opts = Object.assign({}, opts, { body: JSON.stringify(payload) });
+      delete opts.job;
     }
-    return body;
+    try{
+      const res = await fetch(API + path, opts);
+      let body = null;
+      try { body = await res.json(); } catch(e) { body = null; }
+      if(!res.ok){
+        const msg = (body && (body.error || body.detail)) || `${res.status} ${res.statusText}`;
+        const err = new Error(msg); err.status = res.status; err.body = body; throw err;
+      }
+      if(job) job.done(true);
+      return body;
+    }catch(e){
+      if(job) job.done(false);
+      throw e;
+    }
   }
 
   async function boot(){
@@ -311,7 +382,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
       drawInto($('.thumb', swRow), rec.img);
       $('.imgrow-s', swRow).textContent = `${rec.name}, ${rec.width} × ${rec.height}`;
       log(`Loaded sidewalk paving: ${rec.name}. Rebuilding the tiles to use it…`);
-      const res = await api('/api/tiles', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+      const res = await api('/api/tiles', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}', job:'Rebuilding the tiles' });
       const sw = (res.tiles.sidewalk || [])[0] || {};
       log(sw.method === 'pattern'
         ? `  Repeating pattern found (every ${sw.period_px.join(' × ')} px): tile cut to ${sw.repeats.join(' × ')} whole repeats, so the joints stay aligned.`
@@ -365,7 +436,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#btnPrime').disabled = true; status('Priming…');
     log('Running the three methods on the three reference images…');
     try{
-      const res = await api('/api/prime', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/prime', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Priming',
         body: JSON.stringify({ material:S.prime.material.id, line:S.prime.line.id, noisy:S.prime.noisy.id }) });
       S.primeResults = res;
       const f = res.fingerprints, m = f.material.neighbours, d = f.line.dash, n = f.noise;
@@ -534,7 +605,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#btnTrain').disabled = true; status('Training…');
     log(`Training on ${aligned.length} pair${aligned.length>1?'s':''}. Junction detection runs first, so large images take a while.`);
     try{
-      const res = await api('/api/train', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/train', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Training',
         body: JSON.stringify({ metres_per_pixel: +$('#trainScale').value || 0.25,
           pairs: aligned.map(p => ({ mask:p.mask.id, photo:p.photo.id })) }) });
       S.trainResults = res;
@@ -602,7 +673,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
   async function detectJunctions(imageId, label, vp, prevEl){
     status('Finding junctions…');
     try{
-      const res = await api('/api/junctions', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/junctions', { method:'POST', headers:{'Content-Type':'application/json'}, job:`${label}: finding junctions`,
         body: JSON.stringify({ image: imageId }) });
       const img = await loadImage(API + res.overlay_url);
       vp.show(img, `${label}: junctions`);
@@ -688,7 +759,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#btnGenerate').disabled = true; status('Generating…');
     log('Generating: junctions first, then material, wear and markings.');
     try{
-      const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the texture',
         body: JSON.stringify({ mask: S.gen.mask.id, scale: +$('#scale').value,
           wear: +$('#noiseAmt').value, seed: +$('#seed').value,
           cycle_m: +$('#cycleM').value, marking_width_m: +$('#markW').value, dash_m: +$('#dashM').value || null,
@@ -748,7 +819,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#lp-top').innerHTML = '<div class="ph">building…</div>';
     log('Top view: building the 3D model to show the streets, sidewalks and kerbs with their materials…');
     try{
-      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Building the top view',
         body: JSON.stringify({ ...exportSettings(), generation: gid, mesh: 'tiled' }) });
       if(!window.renderTopView) throw new Error('the top view drawing is not loaded');
       const canvas = await window.renderTopView(API + res.url, res.size_m);
@@ -789,7 +860,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#btn3d').disabled = true; status('Building 3D model…');
     log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
     try{
-      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Building the 3D model',
         body: JSON.stringify({ generation: S.gen.result.id, ...exportSettings() }) });
       if(res.mesh === 'tiled'){
         log(`Road model ready: ${res.quads.toLocaleString()} quads, ${res.materials} materials, ${res.dashes} dashes as their own strips, `
@@ -2821,7 +2892,7 @@ const UI_VERSION = '2026.10.05-nav1';   // must match VERSION in server.py
     $('#btnTiles').disabled = true; status('Building tiles…');
     log('Building material tiles from the priming close-up…');
     try{
-      const res = await api('/api/tiles', { method:'POST', headers:{'Content-Type':'application/json'},
+      const res = await api('/api/tiles', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Building the tiles',
         body: JSON.stringify({ photo_width_m: +$('#tPhoto').value, tile_m: +$('#tSize').value,
           px: +$('#tPx').value, variants: +$('#tVar').value, sidewalk_width_m: +$('#tSwPhoto').value }) });
       const n = Object.values(res.tiles).reduce((k, v) => k + v.length, 0);

@@ -433,10 +433,66 @@ and markings come out identical; blocks and the fill under the kerbs within
 0.02% (the same shapes, triangulated a little differently). On the test map
 above, the 3D model went from over an hour (it never finished) to minutes.
 
+After the model is written, a check draws about 60 m of the longest street from
+above to see whether the tile repeat shows. It used to work through every
+pixel of each triangle's bounding box, and the road fill under the kerbs has
+long thin triangles crossing the whole stretch (millions of pixels for a few
+hundred covered): on the test map that one check took about 2 minutes. It now
+goes row by row through only the pixels each triangle crosses, and reads only
+the road from the file: about 3 seconds, the same picture pixel for pixel.
+
+**Each 3D model is built once.** After Generate, the Top view builds the 3D
+model; Generate 3D scene (3D tab) and Export 3D model ask for the same model.
+Each used to build it again, even while the top view was still building it:
+twice the time on a big map, and two builds writing the same file, so the 3D
+tab could load one half written. Now a request for a model already being built
+waits for that build (its console line follows it, marked *shared*), and one
+already built with the same texture, settings, materials, objects and tiles is
+answered at once (kept for half an hour, as long as its file has not been
+rebuilt with other settings since). Each model is written under its own name
+and put in place whole, so a model is never read half written.
+
 **Big scenes in the 3D tab**: a 3.7 × 2.5 km city is millions of triangles and
 thousands of street lamps. Mesh detail *Optimised* (Generate tab, 3D model)
 keeps far fewer rows along straight streets; Bake light *Whole place* covers it
 at about 1.8 m a pixel, so bake *What you see* close to where you look.
+
+## Time so far and time left, in the console
+
+Every long job has a line in the console that updates about once a second:
+what it is doing now, how far along it is, the time so far and about how long
+is left. For example:
+
+    Building the 3D model: kerb lines and sidewalks · 41% · 1 min 05 s so far · about 1 min 34 s left
+
+When it ends, the line says how long it took in all (green), or that it stopped
+(red), with the error below it as before. The jobs with a line:
+
+- Generate tab: **Generate** (the texture), the **Top view**, **Export 3D model**,
+  finding junctions.
+- Train tab: **Train**, **Prime**, building or rebuilding the material tiles.
+- 3D tab: **Generate 3D scene** and **Update view** (the server's stages, then
+  loading the model into the view with its own time left), and **Bake light**
+  (compiling the shader, then samples done with the time left from their pace,
+  then clearing the noise).
+
+Pressing Generate 3D scene while the Top view is still building the same model
+does not start a second build: its line follows the one under way, marked
+*shared* (see Big maps).
+
+How the time left is worked out: each job is a list of stages, each with its
+share of the time, measured on the 3.7 × 2.5 km test map (for the 3D model,
+for example, the blocks take about a quarter of it and the kerb lines and
+sidewalks about a sixth). Stages that go through many pieces (rows of patches,
+streets, junctions, kerb rings, tiles, blocks, training pairs) report how far
+they are; the others are taken to go at the pace of the stages before them.
+The time left is the time so far scaled by what is left, so it settles after
+the first few seconds ("working out the time left" until then) and is a guide,
+not a promise: a map with more blocks than streets, say, will spend longer in
+that stage than the shares expect.
+
+Render photo has no line: it keeps getting sharper until you stop it, so it has
+no end to count down to.
 
 ## Known limits
 
@@ -640,6 +696,35 @@ anything inside the kerb line that the strips and patches do not cover is part
 of the road fill where there is a real gap, and kerb points sitting just
 outside the road (within 20 cm) are snapped exactly onto its edge. Measured on
 both test masks: no kerb point more than 1 mm from the road.
+
+### Kerb line traced from the mask
+
+The kerb line used to be the edge of the rebuilt road mesh (street strips,
+junction patches and knot fills put together) smoothed with up to 73 passes.
+Where those pieces met, it picked up their joins: notches in the kerb, S-shaped
+jogs where a strip ended a little off a patch, bulges where a fill stuck out,
+and corners rounded far more than the mask's. The mask itself was right.
+
+Now the kerb line comes from the mask's own outline:
+
+- **Traced from the mask** (the same outline the sidewalk cover uses), joined
+  with the exact shapes of inner streets, so it is where the mask says the road
+  ends.
+- **Straight lines through the pixel steps**: the traced outline follows the
+  pixels in stairs; it is replaced by straight lines that are never more than
+  0.75 px from it, then smoothed lightly (4 to 20 passes with Straightness,
+  instead of up to 73), which rounds only the joins.
+- **No snapping back onto the mesh's edge** (that put the strips' joins back in).
+  The road fill in front of the kerb still closes any gap.
+- **No doubled kerb faces on blocks**: cutting a block by the sidewalks round it
+  could leave hairline slivers along the kerb (a second kerb face a few
+  millimetres from the first). Block pieces thinner than 6 cm are removed.
+
+Measured on the 3.7 × 2.5 km test map (1.1 m per px), distance from each kerb
+point to the mask's edge: before, median 0.13 m, 13% of the kerb over 0.5 m
+off, the worst 22.9 m; now, median 0.02 m, the worst 0.14 m. Doubled kerb faces
+on blocks went from 95 km to 2.3 km. Natural wiggle in the mask (a street that
+really bends a little) is kept; that is the mask's own shape.
 
 ## Mesh detail: Full or Optimised
 

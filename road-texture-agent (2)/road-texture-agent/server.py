@@ -17,7 +17,11 @@ What is not built yet (these endpoints say so honestly instead of pretending):
   - generation
 """
 
+import functools
 import json
+import os
+import threading
+import time
 import mimetypes
 import re
 import uuid
@@ -35,6 +39,7 @@ import numpy as np
 mimetypes.add_type("text/javascript", ".js")
 
 from app import analysis as A
+from app import progress as prog
 from app import images as I
 from app import generation as G
 from app import junctions as J
@@ -52,7 +57,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.05-nav1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.05-kerb1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -192,12 +197,48 @@ def noise(payload: dict):
 
 
 # --------------------------------------------------------------- junctions
+# ---- progress of the long jobs, for the console: the page sends an id with the job
+# ("progress") and asks /api/progress/{id} about once a second while it waits. Each
+# plan is the job's stages with their share of its time, measured on a city-sized map
+# (seconds on the 3.7 x 2.5 km test map, 3328 x 2304 px, 1.1 m per px)
+GEN_PLAN = [("preparing", 0.5), ("mask", 5.0), ("junctions", 5.0), ("areas", 1.0), ("material_open", 3.0),
+            ("material_edge", 3.0), ("material_junction", 4.0), ("wear", 2.5), ("markings", 1.0),
+            ("finishing", 8.0), ("saving", 0.5)]
+EXPORT_PLAN = [("preparing", 0.5), ("materials", 6.0), ("junctions", 5.0), ("groups", 3.0), ("streets", 2.0),
+               ("patches", 4.0), ("sidewalks", 24.0), ("apron", 24.0), ("road", 19.0), ("sidewalk_meshes", 15.0),
+               ("objects", 0.5), ("blocks", 58.0), ("lamps", 1.0), ("writing", 1.5), ("check", 3.0)]
+TRAIN_PLAN = [("pairs", 8.0), ("libraries", 2.0)]
+PRIME_PLAN = [("material", 3.0), ("line", 2.0), ("noise", 2.0), ("trees", 1.0)]
+TILES_PLAN = [("tiles", 1.0)]
+JUNCTIONS_PLAN = [("junctions", 1.0)]
+
+
+def tracked(name, plan):
+    """Run an endpoint as a job the console can follow (when the page sent an id)."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def inner(payload: dict):
+            jid = payload.get("progress") if isinstance(payload, dict) else None
+            with prog.job(str(jid)[:64] if jid else None, name, plan):
+                return fn(payload)
+        return inner
+    return wrap
+
+
+@app.get("/api/progress/{jid}")
+def progress_of(jid: str):
+    snap = prog.of(jid)
+    return snap if snap else {"id": jid, "unknown": True}
+
+
 @app.post("/api/junctions")
+@tracked("Finding junctions", JUNCTIONS_PLAN)
 def junctions(payload: dict):
     rec = mem.image(payload.get("image"))
     if not rec:
         raise HTTPException(400, "unknown image")
     limit = float(payload.get("divider_limit_px", J.DIVIDER_LIMIT_PX))
+    prog.stage("junctions", "finding the junctions")
     result = J.detect(I.load_gray(rec["path"]), limit)
 
     art_id = uuid.uuid4().hex[:12]
@@ -257,6 +298,7 @@ def memory_attempt(payload: dict):
 
 # ------------------------------------------------------- not built yet
 @app.post("/api/prime")
+@tracked("Priming", PRIME_PLAN)
 def prime(payload: dict):
     """Stage A: analyse the three reference images and create the three trees."""
     need = ["material", "line", "noisy"]
@@ -272,9 +314,13 @@ def prime(payload: dict):
     if not diff.get("ok"):
         raise HTTPException(400, diff["error"])
 
+    prog.stage("material", "analysing the material photo")
     material = A.analyse_material(have["material"]["path"])
+    prog.stage("line", "analysing the line image")
     line = A.analyse_line(have["line"]["path"])
+    prog.stage("noise", "analysing the wear image")
     noise = A.analyse_noise(noise_path)
+    prog.stage("trees", "building the trees")
 
     # keep the patch libraries: generation draws real fragments from these
     libs, previews = {}, {}
@@ -377,11 +423,14 @@ def _build_tiles(settings=None):
     # fade smoothly from one part to the next instead of changing at a hard line
     part_tones = {p: (stats[p]["tone"] if stats[p]["tone"] is not None else prime_tone) for p in TL.PARTS}
     common = part_tones["open"] if part_tones["open"] is not None else prime_tone
+    prog.stage("tiles", "building the material tiles")
+    n_tiles, made = (len(TL.PARTS) + 2) * int(cfg["variants"]), 0
     for part in TL.PARTS:
         tone = common
         ratio = (stats[part]["contrast"] / base_c) if (stats[part]["contrast"] and base_c) else 1.0
         tiles[part] = []
         for v in range(int(cfg["variants"])):
+            made += 1; prog.part(made / n_tiles); prog.note(f"building the material tiles: {part} {v + 1}")
             tile, info = TL.build_tile(src, float(cfg["photo_width_m"]), float(cfg["tile_m"]),
                                        int(cfg["px"]), tone=tone, contrast_ratio=ratio, seed=v + 1)
             aid = f"tile_{set_id}_{part}_{v + 1}"
@@ -544,6 +593,7 @@ def _rebuild_libraries(note: str):
 
 
 @app.post("/api/train")
+@tracked("Training", TRAIN_PLAN)
 def train(payload: dict):
     """
     Stage B: measure any pair not measured before, then rebuild the libraries.
@@ -559,7 +609,9 @@ def train(payload: dict):
         raise HTTPException(400, "run priming first: the trees do not exist yet")
 
     reports, added, skipped = [], 0, 0
+    prog.stage("pairs", "measuring the pairs")
     for n, pair in enumerate(pairs, start=1):
+        prog.part((n - 1) / len(pairs)); prog.note(f"measuring pair {n} of {len(pairs)}")
         mask, photo = mem.image(pair.get("mask")), mem.image(pair.get("photo"))
         if not mask or not photo:
             raise HTTPException(400, f"pair {n}: missing mask or photo")
@@ -611,6 +663,7 @@ def train(payload: dict):
                                    for k, v in res["groups"].items()}})
         added += 1
 
+    prog.stage("libraries", "rebuilding the libraries and tiles")
     rebuilt = _rebuild_libraries(f"training: {added} new pair(s)")
     return {"ok": True, "added": added, "already_trained": skipped,
             "pairs": reports, "rebuilt": rebuilt, "memory": mem.summary()}
@@ -1199,6 +1252,7 @@ def get_tiles():
 
 
 @app.post("/api/tiles")
+@tracked("Building the material tiles", TILES_PLAN)
 def rebuild_tiles(payload: dict):
     settings = {k: payload[k] for k in TILE_DEFAULTS if k in payload}
     res = _build_tiles(settings)
@@ -1237,8 +1291,10 @@ def recalculate():
 
 
 @app.post("/api/generate")
+@tracked("Generating the texture", GEN_PLAN)
 def generate(payload: dict):
     """Fill a new mask with material, wear and markings, using the learned libraries."""
+    prog.stage("preparing", "choosing the libraries")
     rec = mem.image(payload.get("mask"))
     if not rec:
         raise HTTPException(400, "unknown mask")
@@ -1318,6 +1374,7 @@ def generate(payload: dict):
         "street_material": _street_material(payload),
     }, outs, map_path)
 
+    prog.stage("saving", "saving")
     urls = {}
     for kind, path in outs.items():
         aid = f"{gid}_{kind}"
@@ -1495,9 +1552,74 @@ def review(payload: dict):
             "correction": ({"id": payload.get("correction"), **correction} if correction else None)}
 
 
+# One build per model: the top view, Generate 3D scene and Export 3D model ask for the
+# same model (same texture and settings). A request for one already being built waits
+# for it, its console line following that build, instead of building it a second time
+# alongside (twice the time, and both writing the same file); one built already, and
+# still the file on disk, is answered at once.
+_builds = {}                       # key -> {"done": Event, "result", "error", "job", "mtime", "at"}
+_builds_lock = threading.Lock()
+BUILD_KEEP_S = 1800                # a finished build is reused for half an hour
+
+
+def _build_key(payload):
+    gid = payload.get("generation")
+    art = mem.artifact(f"{gid}_map")
+    if not art:
+        return None
+    import hashlib
+    base = art["meta"].get("base_mask") or art["meta"].get("mask")
+    sc = ARTIFACTS / f"scatter_{base}.json"                  # objects and inner streets
+    tiles = mem.latest_artifact("tileset") if payload.get("mesh", "tiled") == "tiled" else None
+    return json.dumps([gid, {k: v for k, v in payload.items() if k != "progress"},
+                       hashlib.sha1(sc.read_bytes()).hexdigest() if sc.exists() else None,
+                       tiles["id"] if tiles else None], sort_keys=True, default=str)
+
+
 @app.post("/api/export3d")
+@tracked("Building the 3D model", EXPORT_PLAN)
 def export3d(payload: dict):
-    """Build a GLB road model from a generated result, in real metres."""
+    """Build a GLB road model from a generated result, in real metres (once per model)."""
+    key = _build_key(payload)
+    if key is None:
+        return _export3d(payload)
+    final = ARTIFACTS / f"gen_{payload.get('generation')}.glb"
+    with _builds_lock:
+        now = time.time()
+        for k in [k for k, b in _builds.items() if b["done"].is_set() and now - b["at"] > BUILD_KEEP_S]:
+            _builds.pop(k)
+        b = _builds.get(key)
+        if b is not None and b["done"].is_set() and not (
+                b["result"] and final.exists() and final.stat().st_mtime == b["mtime"]):
+            b = None                                         # the file has been rebuilt since, other settings
+        mine = b is None
+        if mine:
+            b = _builds[key] = {"done": threading.Event(), "result": None, "error": None,
+                                "job": payload.get("progress"), "mtime": None, "at": now}
+    if not mine:
+        if not b["done"].is_set():
+            prog.follow(b["job"], "already being built: shared")
+            b["done"].wait()
+        if b["error"] is not None:
+            raise b["error"]
+        return dict(b["result"])
+    try:
+        res = _export3d(payload)
+        b["result"], b["mtime"] = res, final.stat().st_mtime
+        return dict(res)
+    except BaseException as e:
+        b["error"] = e
+        with _builds_lock:
+            if _builds.get(key) is b:
+                _builds.pop(key)
+        raise
+    finally:
+        b["at"] = time.time()
+        b["done"].set()
+
+
+def _export3d(payload):
+    prog.stage("preparing", "preparing")
     gid = payload.get("generation")
     art = mem.artifact(f"{gid}_map")
     result = mem.artifact(f"{gid}_result")
@@ -1506,7 +1628,10 @@ def export3d(payload: dict):
     rec = mem.image(art["meta"]["mask"])
     if not rec:
         raise HTTPException(400, "the mask for this generation is missing")
-    out = ARTIFACTS / f"gen_{gid}.glb"
+    # written under its own name, then put in place whole: a page loading the model
+    # never reads a file half written
+    final = ARTIFACTS / f"gen_{gid}.glb"
+    out = final.with_name(f"gen_{gid}.{uuid.uuid4().hex[:8]}.part.glb")
     mode = payload.get("mesh", "tiled")
     dash_cfg = dict(art["meta"].get("dashes") or {})
     if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
@@ -1530,6 +1655,7 @@ def export3d(payload: dict):
             for part, lst in tileset["tiles"].items():
                 for tile in lst:
                     tile["path"] = mem.artifact(tile["id"])["path"]
+            prog.stage("materials", "street materials")
             used_materials = _apply_materials(tileset, payload.get("materials") or {},
                                               bool(payload.get("match_tone", True)))
             markings = mem.artifact(f"{gid}_markings")
@@ -1558,6 +1684,7 @@ def export3d(payload: dict):
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
                             "deck_m": float(payload.get("bridge_deck_m", 1.0))},
                 inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")))
+            prog.stage("check", "checking the tile repeat")
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["materials_used"] = used_materials
@@ -1574,7 +1701,13 @@ def export3d(payload: dict):
                 spacing_m=float(payload.get("spacing_m", 2.0)),
                 optimise=payload.get("mesh_detail") == "optimised", inner=inner)
     except ValueError as e:
+        out.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise
+    os.replace(out, final)
+    out = final
     aid = f"{gid}_glb"
     mem.add_artifact(aid, "model_glb", out, {"generation": gid, **info})
     count = (f"{info['quads']:,} quads" if info.get("mesh") == "quads"

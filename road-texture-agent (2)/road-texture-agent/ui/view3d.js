@@ -633,13 +633,23 @@ async function generate(keep = false){
   stopPhoto();
   note(keep ? 'Updating the scene with the current materials and settings…' : 'Building the 3D model: streets, sidewalks, kerbs, blocks and objects…');
   const key = buildKey();
+  // its line in the console: the server's stages with the time left, then the loading
+  const job = window.trackJob ? window.trackJob(keep ? 'Updating the 3D scene' : 'Building the 3D scene') : null;
   try{
     const r = await fetch('/api/export3d', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled' }) });
+      body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined }) });
     const res = await r.json();
     if(!r.ok) throw new Error(res.detail || 'the 3D model could not be built');
     note('Loading the model into the view…');
-    const gltf = await new GLTFLoader().loadAsync(res.url);
+    const t0 = performance.now(), mb = (res.file_bytes || 0) / 1048576;
+    if(job) job.set(`loading the model into the view${mb ? ` (${mb.toFixed(0)} MB)` : ''}`, 0);
+    const gltf = await new GLTFLoader().loadAsync(res.url, ev => {
+      if(!job || !ev.total) return;
+      const f = ev.loaded / ev.total, s = (performance.now() - t0) / 1000;
+      if(f < 1) job.set(`loading the model into the view (${mb.toFixed(0)} MB)`, f, f > 0.05 && s > 1 ? s * (1 - f) / f : null);
+      else job.set('reading the model', null);
+    });
+    if(job) job.set('putting the model in the scene', null);
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
     dropBakes();
     world = gltf.scene;
@@ -662,8 +672,10 @@ async function generate(keep = false){
       + (res.materials_used && Object.keys(res.materials_used).length
          ? ' Materials: ' + Object.entries(res.materials_used).map(([k, v]) => `${k} ${v}`).join(', ') + '.' : ''));
     $('#btnPhoto').disabled = false; $('#btnSaveImg').disabled = false; $('#btnBake').disabled = false;
+    if(job) job.done(true, `${Math.round(tris).toLocaleString()} triangles, ${(res.lamps || []).length} street lamps`);
     window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: (res.lamps || []).length, triangles: Math.round(tris) } }));
   }catch(e){
+    if(job) job.done(false, e.message);
     note('Could not build the 3D scene: ' + e.message, true);
   }
   busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
@@ -1423,6 +1435,8 @@ async function bakeLight(){
   $('#btnBake').textContent = 'Stop baking'; $('#btnPhoto').disabled = true;
   const started = performance.now();
   const secs = () => Math.round((performance.now() - started) / 1000);
+  const job = window.trackJob ? window.trackJob('Baking the light') : null;
+  if(job) job.set('building the ray-tracing structure of the scene');
   bakeNote('Preparing the bake: building the ray-tracing structure of the scene…');
   await new Promise(r => setTimeout(r, 30));
   let pt;
@@ -1431,6 +1445,7 @@ async function bakeLight(){
     BAKE.busy = false;
     $('#btnBake').textContent = 'Bake light'; $('#btnPhoto').disabled = !world;
     bakeNote('Bake light is not available here: ' + e.message, true);
+    if(job) job.done(false, e.message);
     return;
   }
   const a = bakeArea(kind);
@@ -1466,11 +1481,17 @@ async function bakeLight(){
     try{ aux = renderAux(a.w, a.h, { cam: a.cam, kinds: ['albedo', 'normal', 'height'], extra: st.extra }); }
     finally{ unstage(st); }
     pt.reset();
+    // the time left from the samples' own pace (the shader compiling first is not part of it)
+    let first = null;
     const ok = await traceBake(pt, samples, () => {
       const n = Math.floor(pt.samples), s = secs();
+      if(n >= 1 && first === null) first = { n, t: performance.now() };
+      const left = first && n - first.n >= 2 ? (performance.now() - first.t) / 1000 / (n - first.n) * (samples - n) : null;
       bakeNote(pt.isCompiling && !n ? `Compiling the path tracer's shader for this graphics card… ${s} s (the first time in a session it can take a minute or more).`
         : `Baking the light ${a.kind === 'view' ? 'of what you see' : 'of the whole place'} (${a.w} × ${a.h} px): ${n} of ${samples} samples, ${s} s`
-          + (n >= 2 ? `, about ${Math.max(1, Math.round(s / n * (samples - n)))} s left.` : '.') + ' The view stays live meanwhile.');
+          + (left != null ? `, about ${Math.max(1, Math.round(left))} s left.` : '.') + ' The view stays live meanwhile.');
+      if(job) job.set(pt.isCompiling && !n ? "compiling the path tracer's shader (once a session)" : `${n} of ${samples} samples`,
+                      pt.isCompiling && !n ? null : n / samples, left);
     });
     if(!ok) throw new Error('stopped');
     const c = (() => { try{ return lightIn(pt.target); }catch(e){ return null; } })();
@@ -1480,6 +1501,7 @@ async function bakeLight(){
     if(DENOISE){
       try{
         bakeNote('Clearing the noise (Open Image Denoise)…');
+        if(job) job.set('clearing the noise (Open Image Denoise)');
         if(!denoiser){
           denoiserLoad = denoiserLoad || Denoiser.load(renderer.getContext(), new URL('./vendor/oidn/rt_hdr_calb_cnrm.tza', import.meta.url).href);
           denoiser = await denoiserLoad;
@@ -1517,6 +1539,7 @@ async function bakeLight(){
     BAKE.busy = false;
     $('#btnBake').textContent = 'Bake light'; $('#btnPhoto').disabled = !world;
   }
+  if(job) job.done(done, done ? `${samples} samples` : (BAKE.cancel ? 'by you' : 'see the 3D tab'));
   if(done){
     applyBake(); bakeNote(`Baked in ${secs()} s. ` + $('#bakeNote').textContent);
     msg.textContent = 'Baked light on: move round freely. B switches it off and on to compare with the live light.';
