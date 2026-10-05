@@ -97,7 +97,32 @@
   .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
   .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
   .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .matChips{ display:grid; gap:6px; margin:6px 0 4px; }
+  .matChip{ display:grid; grid-template-columns:40px 1fr auto; align-items:center; gap:10px; width:100%; padding:5px 8px; border-radius:6px;
+            background:var(--panel-2); border:1px solid var(--line); color:var(--ink); cursor:pointer; text-align:left; }
+  .matChip:hover{ border-color:var(--blue); }
+  .matChip img{ width:40px; height:40px; border-radius:50%; object-fit:cover; background:radial-gradient(circle at 35% 30%, #777, #333); }
+  .matChip .mc-t{ display:flex; flex-direction:column; min-width:0; }
+  .matChip .mc-t small{ color:var(--muted); font-size:11.5px; }
+  .matChip .mc-t b{ font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .matChip .mc-c{ color:var(--blue); font-size:12px; }
+  .matPop{ position:fixed; z-index:50; width:476px; max-width:calc(100vw - 24px); max-height:calc(100vh - 24px); overflow:auto;
+           background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 12px 32px rgba(0,0,0,.45); padding:10px 12px 12px; }
+  .matPop .mp-h{ display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .matPop .mp-x{ background:none; border:none; color:var(--muted); font-size:20px; cursor:pointer; line-height:1; }
+  .matPop .mp-grid{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+  .matPop .mp-group{ grid-column:1 / -1; color:var(--muted); font-size:12px; margin-top:6px; }
+  .matPop .mp-card{ display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 4px 6px; border-radius:6px; cursor:pointer;
+                    background:var(--panel-2); border:1px solid var(--line); color:var(--ink); }
+  .matPop .mp-card:hover{ border-color:var(--blue); }
+  .matPop .mp-card[aria-pressed="true"]{ border-color:var(--blue); background:rgba(70,130,220,.22); }
+  .matPop .mp-card img, .matPop .mp-card .mp-none{ width:76px; height:76px; border-radius:50%; }
+  .matPop .mp-card .mp-none{ background:radial-gradient(circle at 35% 30%, #666, #2a2a2a); display:flex; align-items:center; justify-content:center; color:#bbb; font-size:11px; }
+  .matPop .mp-card span{ font-size:12px; text-align:center; line-height:1.25; }
+  .matPop .mp-card small{ font-size:11px; color:var(--muted); }
+  .matPop .mp-foot{ margin-top:8px; }
   .btn-row.three{ grid-template-columns:1fr 1fr 1fr; }
+  .btn.secondary.attention{ border-color:var(--blue); box-shadow:0 0 0 2px rgba(70,130,220,.45); color:#fff; }
   .btn.secondary.toggle[aria-pressed="true"]{ background:rgba(70,130,220,.28); border-color:var(--blue); }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
   .note.bad{ color:var(--red); }
@@ -147,10 +172,10 @@
   .slider-row{ display:flex; align-items:center; gap:8px; margin-top:8px; color:var(--muted); font-size:12px; }
   .slider-row input{ flex:1; accent-color:var(--blue); }
 
-  .layers{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+  .layers{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
   .layer{ background:none; border:1px solid var(--line); border-radius:4px; padding:4px; cursor:pointer; text-align:left; }
-  .layer .preview{ aspect-ratio:1; border:none; cursor:inherit; }
-  .layer span{ display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--muted); margin-top:4px; }
+  .layer .preview{ aspect-ratio:16/9; border:none; cursor:inherit; }
+  .layer span{ display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--muted); margin-top:4px; white-space:nowrap; }
   .layer span::before{ content:""; width:9px; height:9px; border-radius:2px; border:1px solid var(--muted); }
   .layer[aria-pressed="true"]{ border-color:var(--blue); }
   .layer[aria-pressed="true"] span{ color:var(--ink); }
@@ -487,6 +512,15 @@
               <option value="4">4× (about 16× slower)</option>
             </select></div>
           <div class="field"><label for="softEdges">Smooth edges</label><input type="checkbox" id="softEdges" checked style="justify-self:start;accent-color:var(--blue)"></div>
+          <div style="margin-top:12px;font-weight:600;font-size:13px">Materials</div>
+          <div class="matChips">
+            <button type="button" class="matChip" data-part="street" title="Choose the street surface"><img alt=""><span class="mc-t"><small>Streets</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
+            <button type="button" class="matChip" data-part="sidewalk" title="Choose the sidewalk surface (blocks and islands use it too)"><img alt=""><span class="mc-t"><small>Sidewalks</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
+            <button type="button" class="matChip" data-part="kerb" title="Choose the kerb surface (bridge decks use it too)"><img alt=""><span class="mc-t"><small>Kerbs</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
+          </div>
+          <input type="hidden" id="matStreet" value="tiles"><input type="hidden" id="matSidewalk" value="tiles"><input type="hidden" id="matKerb" value="tiles">
+          <div class="field"><label for="matTone">Match the tone of your tiles</label><input type="checkbox" id="matTone" style="justify-self:start;accent-color:var(--blue)" title="A scanned material takes on the mean colour of what it replaces, so it fits the generated texture's tone. Unticked: its own colour"></div>
+          <div class="note" style="margin:-2px 0 6px" id="matNote">Generate texture lays the street surface into the texture; its Top view and the 3D tab show streets, sidewalks and kerbs.</div>
           <button class="btn secondary" id="btnGenJunctions" disabled>Detect junctions</button>
           <button class="btn" id="btnGenerate" disabled>Generate texture</button>
           <div style="margin-top:14px;font-weight:600;font-size:13px">3D model</div>
@@ -526,14 +560,6 @@
               <option value="off">Off (colour only, smaller file)</option>
             </select></div>
           <div class="note" style="margin:-2px 0 6px">Scanned: measured bump and roughness of real asphalt and concrete where bundled (paving always follows its own joints); the rest from each tile's grain</div>
-          <div class="field"><label for="matStreet">Street surface</label>
-            <div style="display:flex;gap:6px;align-items:center"><select id="matStreet" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles: the material tiles built from your training. Or a scanned material (CC0, Poly Haven) with its own measured bump and roughness, lined up with its colour"><option value="tiles">Your tiles</option></select><img id="matStreetThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
-          <div class="field"><label for="matSidewalk">Sidewalk surface</label>
-            <div style="display:flex;gap:6px;align-items:center"><select id="matSidewalk" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles, or a scanned paving, concrete or asphalt; blocks and islands use it too"><option value="tiles">Your tiles</option></select><img id="matSidewalkThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
-          <div class="field"><label for="matKerb">Kerb surface</label>
-            <div style="display:flex;gap:6px;align-items:center"><select id="matKerb" class="matPick" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Your tiles, or a scanned concrete; bridge decks use it too"><option value="tiles">Your tiles</option></select><img id="matKerbThumb" alt="" style="width:30px;height:30px;border-radius:3px;border:1px solid var(--line);object-fit:cover;visibility:hidden"></div></div>
-          <div class="field"><label for="matTone">Match the tone of your tiles</label><input type="checkbox" id="matTone" checked style="justify-self:start;accent-color:var(--blue)" title="A scanned material takes on the mean colour of the tile it replaces, so it fits the generated texture's tone. Unticked: its own colour"></div>
-          <div class="note" style="margin:-2px 0 6px" id="matNote">Scanned materials keep their bump and roughness exactly on their stones and joints</div>
           <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
           <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
           <div class="note" id="genNote">Load a street mask.</div>
@@ -589,6 +615,7 @@
             <button class="layer" aria-pressed="true" data-layer="material"><div class="preview" id="lp-material"><div class="ph">—</div></div><span>Material</span></button>
             <button class="layer" aria-pressed="true" data-layer="noise"><div class="preview" id="lp-noise"><div class="ph">—</div></div><span>Noise</span></button>
             <button class="layer" aria-pressed="true" data-layer="markings"><div class="preview" id="lp-markings"><div class="ph">Needs engine</div></div><span>Markings</span></button>
+            <button class="layer" aria-pressed="false" data-layer="top" title="The 3D model from straight above: streets, sidewalks, kerbs, blocks and objects with their materials"><div class="preview" id="lp-top"><div class="ph">—</div></div><span>Top view</span></button>
           </div>
         </div>
       </section>
@@ -642,7 +669,11 @@
       <section class="panel">
         <div class="panel-h">3D scene</div>
         <div class="panel-b">
-          <button class="btn" id="btnScene3d" title="Build the streets, inner streets, sidewalks, kerbs, blocks and objects of the last generated texture">Generate 3D scene</button>
+          <div class="btn-row">
+            <button class="btn" id="btnScene3d" title="Build the streets, inner streets, sidewalks, kerbs, blocks and objects of the last generated texture, and frame the whole place">Generate 3D scene</button>
+            <button class="btn secondary" id="btnScene3dUpdate" disabled title="Build the scene again with the current materials and settings, keeping the camera">Update view</button>
+          </div>
+          <div class="note bad" id="scene3dStale" hidden>Materials or settings changed since this scene was built: press Update view.</div>
           <div class="note" id="scene3dNote">Builds the last generated texture in 3D: streets and inner streets, sidewalks and kerbs, blocks and your objects, with the 3D model settings of the Generate tab, and street lamps along the sidewalks.</div>
         </div>
       </section>
@@ -737,6 +768,11 @@
 
 <input type="file" id="picker" accept="image/png,image/jpeg,image/webp" hidden>
 
+<div id="matPop" class="matPop" hidden role="dialog" aria-label="Choose a material">
+  <div class="mp-h"><b id="matPopTitle">Street surface</b><button type="button" class="mp-x" title="Close (Esc)">×</button></div>
+  <div class="mp-grid" id="matPopGrid"></div>
+  <div class="note mp-foot" id="matPopFoot">Scanned materials: CC0, from Poly Haven, shown at their real size on a ball 1 m across.</div>
+</div>
 <script src="app.js"></script>
 <script type="importmap">
 { "imports": {
@@ -748,5 +784,6 @@
 } }
 </script>
 <script type="module" src="view3d.js"></script>
+<script type="module" src="topview.js"></script>
 </body>
 </html>

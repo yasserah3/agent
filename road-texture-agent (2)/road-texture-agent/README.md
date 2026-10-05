@@ -453,6 +453,7 @@ ui/view3d.js         the 3D tab: the scene, sky, sun, lamps, live view and photo
 ui/sky_blender.js    Blender 5's sky (Multiple Scattering), ported to JavaScript; ui/sky_worker.js runs it off the page
 ui/denoise.js        Intel Open Image Denoise, ported to WebGL2, for the photo render
 ui/look.js           the Look panel: film response, adjustments, LUTs and presets for the finished picture
+ui/topview.js        the Generate tab's Top view: the 3D model drawn from straight above
 workspace/           created on first run: uploads, artifacts, memory.db
 ```
 
@@ -625,13 +626,19 @@ press Rebuild tiles once in the Memory tab.
 
 ## Street, sidewalk and kerb materials
 
-Under 3D model, three pickers choose what each part is made of:
+In the Generate tab, under Settings, **Materials** chooses what each part is
+made of, before you press Generate texture:
 
-- **Street surface**, **Sidewalk surface**, **Kerb surface**: *Your tiles*
-  (the material tiles built from your training, as before) or a **scanned
-  material** from the bundled library (`app/scans`): real surfaces scanned
-  by Poly Haven, free to use (CC0), each with its own measured colour, bump
-  and roughness. A small preview shows the one chosen.
+- **Streets**, **Sidewalks**, **Kerbs**: each shows its material on a small
+  ball and its name. Click one (or *Change*) and a window opens with every
+  material it can use, each on a ball with its name under it: *Your tiles*
+  (the material tiles built from your training, as before) first, then the
+  **scanned materials** from the bundled library (`app/scans`), grouped by
+  kind: real surfaces scanned by Poly Haven, free to use (CC0), each with its
+  own measured colour, bump and roughness. The balls are 1 m across and show
+  each material at its real size, lit so its bump and shine show. Click one
+  to choose it; Esc or a click outside closes the window. Your choices are
+  kept in this browser for the next time.
   - Streets: three asphalts (fine grey, new and dark, old and worn).
   - Sidewalks: four pavings (grey blocks, square slabs, hexagons, red brick),
     the concretes or the asphalts. Blocks and islands use the sidewalk's.
@@ -642,10 +649,23 @@ Under 3D model, three pickers choose what each part is made of:
   way, so **every stone and joint has its bump exactly on it**. Checked: the
   colour's edges and the bump line up at zero pixels of offset, on the tiles
   and on the painted-dash textures made from them.
-- **Match the tone of your tiles** (on by default): a scanned material takes
-  on the mean colour of the tile it replaces, so it fits the generated
-  texture. The large-scale variation (stains, wear) still comes from your
-  generated texture either way. Untick it for the material's own colour.
+- **Match the tone of your tiles** (off by default): a scanned material takes
+  on the mean colour of what it replaces, so it fits your trained look. The
+  large-scale variation (stains, wear) still comes from your generated
+  texture either way. Off, each material keeps its own colour.
+- **Generate texture** lays the street material into the texture: at its
+  real size, each pixel the average of the ground it covers (at a metre or
+  so per pixel that is its colour and tone, not its stones), with your
+  trained material's lighter and darker areas over 2 m and more kept on it,
+  then wear and markings as always. The log names it.
+- **Top view**: once the texture is made, the 3D model is built with the
+  chosen materials and drawn from straight above, as a flat map (about
+  24 cm per pixel on a 1 km place): streets, sidewalks, kerbs, blocks,
+  islands, markings and objects. It shows by itself when ready, and the
+  *Top view* layer button switches between it and the texture. Clicking a
+  spot on it inspects the same spot of the texture.
+- **The 3D tab** uses the same choices: *Update view* rebuilds the scene with
+  them (see 3D tab).
 - Painted dashes are painted on the scanned asphalt too, smoother and
   slightly raised.
 - The export log names the materials used. Each material in the GLB also
@@ -1054,6 +1074,10 @@ plant as an instance with its own scale and rotation, exactly as on the map.
 The **3D** tab shows the whole place in 3D, to look around: left drag orbits,
 right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
 
+- **Update view** builds the scene again with the current materials and 3D
+  model settings, keeping the camera, the time of day and the look. When the
+  materials or settings (or the texture) have changed since the scene was
+  built, the button lights up and a note says so.
 - **Generate 3D scene** builds the last generated texture (Generate it in the
   Generate tab first): streets and inner streets, sidewalks and kerbs, blocks
   and islands, markings, and your objects and plants, exactly the model the

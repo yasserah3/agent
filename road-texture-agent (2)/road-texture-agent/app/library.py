@@ -134,3 +134,104 @@ def own_maps(tile):
         return None
     return (Image.open(tile["normal_path"]).convert("RGB"), Image.open(tile["rough_path"]).convert("L"),
             tile.get("name") or tile.get("library") or "library")
+
+
+# ------------------------------------------------------------------ material balls
+BALL_D_M = 1.0          # the ball's diameter in metres: the material is shown at its real size
+
+
+def _to_linear(c):
+    c = c / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _to_srgb(c):
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
+
+
+def ball(colour, normal, rough, size_m, px=152, ss=2):
+    """
+    A material on a ball, as material browsers show it (PNG bytes, transparent
+    round it): its colour, with its bump catching a light from the upper left
+    and its roughness in the highlight. colour: RGB uint8; normal: the normal
+    map (-1..1, OpenGL convention) or None; rough: roughness (0..1) or None;
+    size_m: (width, height) the pictures cover in metres. The ball is
+    BALL_D_M across, so the material shows at its real size.
+    """
+    import io
+    from scipy.ndimage import map_coordinates
+    n = px * ss
+    y, x = np.mgrid[0:n, 0:n].astype(np.float64)
+    x = (x + 0.5) / n * 2 - 1
+    y = 1 - (y + 0.5) / n * 2
+    r2 = x * x + y * y
+    inside = r2 < 1.0
+    z = np.sqrt(np.clip(1 - r2, 0, 1))
+    N0 = np.stack([x, y, z], -1)
+    phi, theta = np.arctan2(x, z), np.arcsin(np.clip(y, -1, 1))
+    R = BALL_D_M / 2
+    th, tw = colour.shape[:2]
+    # surface position in metres (along, up), to picture pixels (rows go down)
+    cols = (phi * R / size_m[0] * tw) % tw
+    rows = (-theta * R / size_m[1] * th) % th
+    at = [rows.ravel(), cols.ravel()]
+
+    def sample(img):
+        if img.ndim == 2:
+            return map_coordinates(img.astype(np.float64), at, order=1, mode="grid-wrap").reshape(n, n)
+        return np.stack([sample(img[..., c]) for c in range(img.shape[2])], -1)
+
+    A = _to_linear(sample(colour.astype(np.float64)))
+    T = np.stack([np.cos(phi), np.zeros_like(phi), -np.sin(phi)], -1)
+    B = np.stack([-np.sin(phi) * np.sin(theta), np.cos(theta), -np.cos(phi) * np.sin(theta)], -1)
+    if normal is not None:
+        t = sample(normal)
+        N = T * t[..., :1] + B * t[..., 1:2] + N0 * t[..., 2:3]
+        N /= np.maximum(np.linalg.norm(N, axis=-1, keepdims=True), 1e-6)
+    else:
+        N = N0
+    rgh = np.clip(sample(rough), 0.04, 1.0) if rough is not None else np.full((n, n), 0.8)
+    L = np.array([-0.55, 0.62, 0.56]); L /= np.linalg.norm(L)
+    V = np.array([0.0, 0.0, 1.0])
+    H = (L + V) / np.linalg.norm(L + V)
+    nl = np.clip(N @ L, 0, 1)
+    nv = np.clip(N @ V, 1e-3, 1)
+    nh = np.clip(N @ H, 0, 1)
+    a2 = (rgh * rgh) ** 2
+    D = a2 / (np.pi * (nh * nh * (a2 - 1) + 1) ** 2)
+    k = (rgh + 1) ** 2 / 8
+    G = (nl / (nl * (1 - k) + k)) * (nv / (nv * (1 - k) + k))
+    F = 0.04 + 0.96 * (1 - float(V @ H)) ** 5
+    spec = D * G * F / np.maximum(4 * nl * nv, 1e-4)
+    # white light, so the ball shows the material's own colour
+    sky = 0.30 * (0.55 + 0.45 * N[..., 1:2])
+    key = 2.6
+    lit = A * (key * nl[..., None] + sky) + (spec * nl)[..., None] * key
+    rgb = _to_srgb(1 - np.exp(-1.35 * lit))
+    rgba = np.concatenate([rgb * inside[..., None], inside[..., None].astype(np.float64)], -1)
+    # anti-aliased: averaged down from the finer picture (premultiplied, so the edge stays clean)
+    rgba = rgba.reshape(px, ss, px, ss, 4).mean(axis=(1, 3))
+    out = np.zeros_like(rgba)
+    out[..., 3] = rgba[..., 3]
+    out[..., :3] = rgba[..., :3] / np.maximum(rgba[..., 3:], 1e-6)
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(out * 255 + 0.5, 0, 255).astype(np.uint8), "RGBA").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def material_ball(mid, cache_dir, px=152):
+    """A library material's ball (PNG bytes), kept in cache_dir."""
+    e = entry(mid)
+    if not e:
+        return None
+    files = [DIR / e[k] for k in ("colour", "normal", "roughness")]
+    key = hashlib.sha1(json.dumps([mid, px, BALL_D_M, 2, [f.stat().st_mtime for f in files]]).encode()).hexdigest()[:12]
+    path = Path(cache_dir) / f"ball_{mid}_{key}.png"
+    if path.exists():
+        return path.read_bytes()
+    colour, normal, rough = _load(e)
+    data = ball(colour, normal, rough, e["size_m"], px)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return data

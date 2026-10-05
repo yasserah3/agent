@@ -469,14 +469,21 @@ function assignPool(){
 }
 
 // ----------------------------------------------------------------- the scene
-async function generate(){
+// what the scene was built from (the texture and the 3D model settings, materials
+// included), to tell when it is out of date
+let builtFrom = null;
+const buildKey = () => JSON.stringify([window.lastGeneration && window.lastGeneration(), window.exportSettings ? window.exportSettings() : null]);
+
+// keep: Update view, the same camera (and time of day and look); else the whole place framed
+async function generate(keep = false){
   if(busy) return;
   const gid = window.lastGeneration && window.lastGeneration();
   if(!gid){ note('Generate the texture first (Generate tab), then come back and press Generate 3D scene.', true); return; }
   if(!renderer && !init()) return;
-  busy = true; $('#btnScene3d').disabled = true;
+  busy = true; $('#btnScene3d').disabled = true; $('#btnScene3dUpdate').disabled = true;
   stopPhoto();
-  note('Building the 3D model: streets, sidewalks, kerbs, blocks and objects…');
+  note(keep ? 'Updating the scene with the current materials and settings…' : 'Building the 3D model: streets, sidewalks, kerbs, blocks and objects…');
+  const key = buildKey();
   try{
     const r = await fetch('/api/export3d', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled' }) });
@@ -491,18 +498,37 @@ async function generate(){
     const g = scene.getObjectByName('grid'); if(g) scene.remove(g);
     buildLamps(res.lamps || []);
     const box = new THREE.Box3().setFromObject(world);
-    frame(box.getCenter(new THREE.Vector3()).setY(0), Math.max(60, box.getSize(new THREE.Vector3()).length() / 2));
+    const c = box.getCenter(new THREE.Vector3()).setY(0), rad = Math.max(60, box.getSize(new THREE.Vector3()).length() / 2);
+    if(keep && builtFrom){ centre.copy(c); radius = rad; controls.maxDistance = Math.max(400, 3 * rad); poolAt = null; }
+    else frame(c, rad);
+    builtFrom = key;
+    staleCheck();
     let tris = 0;
     world.traverse(o => { if(o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
     note(`${res.size_m[0]} × ${res.size_m[1]} m, ${Math.round(tris).toLocaleString()} triangles`
       + (res.scatter ? `, ${res.scatter.copies} object(s)` : '') + `, ${(res.lamps || []).length} street lamps.`
-      + (res.streets_warning ? ' Note: ' + res.streets_warning + '.' : ''));
+      + (res.streets_warning ? ' Note: ' + res.streets_warning + '.' : '')
+      + (res.materials_used && Object.keys(res.materials_used).length
+         ? ' Materials: ' + Object.entries(res.materials_used).map(([k, v]) => `${k} ${v}`).join(', ') + '.' : ''));
     $('#btnPhoto').disabled = false; $('#btnSaveImg').disabled = false;
     window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: (res.lamps || []).length, triangles: Math.round(tris) } }));
   }catch(e){
     note('Could not build the 3D scene: ' + e.message, true);
   }
-  busy = false; $('#btnScene3d').disabled = false;
+  busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
+}
+
+// a scene built from other settings (materials, the 3D model settings, a newer
+// texture) than the current ones: Update view says so
+function staleCheck(){
+  const b = $('#btnScene3dUpdate');
+  if(!b) return;
+  const stale = !!(world && builtFrom && buildKey() !== builtFrom);
+  b.classList.toggle('attention', stale);
+  b.title = stale ? 'The materials or settings changed since this scene was built: update it, keeping the camera'
+                  : 'Build the scene again with the current materials and settings, keeping the camera';
+  const n = $('#scene3dStale');
+  if(n) n.hidden = !stale;
 }
 
 function prepare(root){
@@ -869,9 +895,14 @@ window.addEventListener('view3d', e => {
   visible = !!e.detail;
   if(!visible || (!renderer && !init())) return;
   resize();
+  staleCheck();
   if(!running){ running = true; requestAnimationFrame(loop); }
 });
-$('#btnScene3d').addEventListener('click', generate);
+$('#btnScene3d').addEventListener('click', () => generate(false));
+$('#btnScene3dUpdate').addEventListener('click', () => generate(true));
+window.addEventListener('materials', staleCheck);
+// settings changed in the Generate tab show when coming back here
+document.addEventListener('change', e => { if(!e.target.closest('#pane-view3d')) staleCheck(); });
 // the Light panel
 const showLight = () => {
   $('#sunStrength').value = Math.round(LIGHT.sun * 100); $('#sunStrengthVal').textContent = Math.round(LIGHT.sun * 100) + '%';

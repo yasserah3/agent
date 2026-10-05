@@ -52,7 +52,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.04-look1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.05-materials3"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -684,12 +684,66 @@ def _apply_materials(tileset, choice, match_tone):
     return used
 
 
+def _your_tile(part):
+    """Your trained tile that a part (street, sidewalk, kerb) uses, with its file and the tileset's id, or None."""
+    row = mem.latest_artifact("tileset")
+    if not row or not row["meta"].get("tiles"):
+        return None
+    tiles = row["meta"]["tiles"]
+    names = list(MATERIAL_PARTS[part]) + (["sidewalk"] if part == "kerb" else [])
+    tile = next((tiles[t][0] for t in names if tiles.get(t)), None)
+    art = mem.artifact(tile["id"]) if tile else None
+    if not art or not Path(art["path"]).exists():
+        return None
+    return {**tile, "path": art["path"], "tileset": row["id"], "tile_m": float(row["meta"]["settings"]["tile_m"])}
+
+
 @app.get("/api/materials")
 def list_materials():
-    """The scanned material library: what each part (street, sidewalk, kerb) can use."""
+    """
+    The scanned material library: what each part (street, sidewalk, kerb) can
+    use; and for each part whether you have trained tiles for it (their ball's
+    version, so a new tileset shows a new picture).
+    """
+    yours = {}
+    for part in MATERIAL_PARTS:
+        t = _your_tile(part)
+        yours[part] = t["tileset"] if t else None
     return {"parts": {p: list(k) for p, k in LIB.KINDS_FOR_PART.items()},
+            "yours": yours,
             "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence")}
                           for e in LIB.materials()]}
+
+
+@app.get("/api/materials/tiles/{part}/ball")
+def your_tiles_ball(part: str):
+    """Your trained tile for a part on a ball, with the bump and roughness the 3D model gives it."""
+    if part not in MATERIAL_PARTS:
+        raise HTTPException(404, "no such part")
+    t = _your_tile(part)
+    if t is None:
+        raise HTTPException(404, "no material tiles yet")
+    cache = ARTIFACTS / "library" / f"ball_tiles_{t['id']}_{part}.png"
+    if not cache.exists():
+        from app import surface as SF
+        import io as _io
+        img = Image.open(t["path"]).convert("RGB")
+        kind = "asphalt" if part == "street" else ("concrete" if part == "kerb" else M3._sidewalk_kind(t))
+        nrm, rgh, _ = SF.maps(img, (t["tile_m"], t["tile_m"]), kind, source="scan")
+        normal = np.asarray(Image.open(_io.BytesIO(nrm)).convert("RGB")).astype(np.float32) / 127.5 - 1.0
+        rough = np.asarray(Image.open(_io.BytesIO(rgh)).convert("L")).astype(np.float32) / 255.0
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(LIB.ball(np.asarray(img), normal, rough, (t["tile_m"], t["tile_m"])))
+    return Response(content=cache.read_bytes(), media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+
+@app.get("/api/materials/{mid}/ball")
+def material_ball(mid: str):
+    """A library material on a ball (PNG), at its real size, lit to show its bump and roughness."""
+    data = LIB.material_ball(mid, ARTIFACTS / "library")
+    if data is None:
+        raise HTTPException(404, "no such material")
+    return Response(content=data, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
 
 
 # ------------------------------------------------------------------ looks
@@ -1243,6 +1297,7 @@ def generate(payload: dict):
         "grain": float(payload.get("grain", 50)) / 50.0,
         "match_tone": _priming_tone() if payload.get("match_material") else None,
         "soft_edges": bool(payload.get("soft_edges", True)),
+        "street_material": _street_material(payload),
     }, outs, map_path)
 
     urls = {}
@@ -1271,6 +1326,19 @@ def generate(payload: dict):
     return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions,
             "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3)}
+
+
+def _street_material(payload):
+    """The scanned material chosen for the streets, for the texture (its colour and size), or None for yours."""
+    mid = (payload.get("materials") or {}).get("street")
+    if not mid or mid == "tiles":
+        return None
+    e = LIB.entry(mid)
+    if not e or e["kind"] not in LIB.KINDS_FOR_PART["street"]:
+        raise HTTPException(400, f"{mid} is not a street material in the library")
+    tone = bool(payload.get("match_tone", True))
+    return {"colour": np.asarray(Image.open(LIB.DIR / e["colour"]).convert("RGB")), "size_m": e["size_m"],
+            "match": tone, "name": e["name"] + (" (toned to your material)" if tone else "")}
 
 
 def _inner_streets(rec, mpp):

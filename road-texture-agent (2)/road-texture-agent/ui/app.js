@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.05-materials3';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -59,29 +59,97 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
 
   $('#uiVersion').textContent = 'v' + UI_VERSION;
 
-  // the scanned material library (app/scans): what streets, sidewalks and kerbs can use
-  async function loadMaterials(){
-    let lib;
-    try{ lib = await api('/api/materials'); }catch(_){ return; }
-    const kindName = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete' };
-    for(const [id, part] of [['#matStreet', 'street'], ['#matSidewalk', 'sidewalk'], ['#matKerb', 'kerb']]){
-      const sel = $(id), kinds = lib.parts[part] || [];
-      for(const kind of kinds){
-        const group = document.createElement('optgroup');
-        group.label = `Scanned ${(kindName[kind] || kind).toLowerCase()}`;
-        for(const m of lib.materials.filter(m => m.kind === kind)){
-          const o = document.createElement('option');
-          o.value = m.id; o.textContent = m.name;
-          o.title = `${m.title} by ${(m.authors || []).join(', ')}, Poly Haven, ${m.licence}; ${m.size_m[0]} m across`;
-          group.appendChild(o);
-        }
-        if(group.children.length) sel.appendChild(group);
-      }
-      const thumb = $(id + 'Thumb');
-      const show = () => { const v = sel.value; thumb.style.visibility = v === 'tiles' ? 'hidden' : 'visible'; if(v !== 'tiles') thumb.src = API + `/api/materials/${v}/thumb`; };
-      sel.addEventListener('change', show); show();
+  // the materials of streets, sidewalks and kerbs: your trained tiles, or one of the
+  // scanned library's (app/scans). Each part has a chip; clicking it opens a choice of
+  // balls with their names. The choice is kept in this browser for the next time.
+  const MAT = { lib: null, parts: { street: '#matStreet', sidewalk: '#matSidewalk', kerb: '#matKerb' },
+                titles: { street: 'Street surface', sidewalk: 'Sidewalk surface', kerb: 'Kerb surface' },
+                open: null };
+  const KIND_NAME = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete' };
+  try{
+    const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
+    if(kept){
+      for(const [part, id] of Object.entries(MAT.parts)) if(kept[part]) $(id).value = kept[part];
+      if(typeof kept.tone === 'boolean') $('#matTone').checked = kept.tone;
+    }
+  }catch(_){}
+  const keepMaterials = () => { try{ localStorage.setItem('rta.materials', JSON.stringify({
+    street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value, tone: $('#matTone').checked })); }catch(_){} };
+  $('#matTone').addEventListener('change', () => { keepMaterials(); window.dispatchEvent(new Event('materials')); });
+  const yourBall = part => MAT.lib && MAT.lib.yours && MAT.lib.yours[part] ? API + `/api/materials/tiles/${part}/ball?v=${MAT.lib.yours[part]}` : null;
+  function materialOf(part){
+    const v = $(MAT.parts[part]).value;
+    const m = MAT.lib && MAT.lib.materials.find(x => x.id === v);
+    return m ? { id: m.id, name: m.name, ball: API + `/api/materials/${m.id}/ball`, m } : { id: 'tiles', name: 'Your tiles', ball: yourBall(part) };
+  }
+  function showChips(){
+    for(const chip of $$('.matChip')){
+      const cur = materialOf(chip.dataset.part);
+      $('b', chip).textContent = cur.name;
+      const img = $('img', chip);
+      if(cur.ball){ img.src = cur.ball; img.style.visibility = ''; } else { img.removeAttribute('src'); }
+      chip.title = cur.m ? `${cur.m.title} by ${(cur.m.authors || []).join(', ')}, Poly Haven, ${cur.m.licence}; ${cur.m.size_m[0]} m across. Click to change`
+                         : 'Your material tiles, built from your training. Click to change';
     }
   }
+  async function loadMaterials(){
+    try{ MAT.lib = await api('/api/materials'); }catch(_){ return; }
+    // a kept choice that is no longer in the library goes back to your tiles
+    for(const [part, id] of Object.entries(MAT.parts))
+      if($(id).value !== 'tiles' && !MAT.lib.materials.some(m => m.id === $(id).value && (MAT.lib.parts[part] || []).includes(m.kind))) $(id).value = 'tiles';
+    showChips();
+  }
+  function closeMatPop(){ $('#matPop').hidden = true; MAT.open = null; }
+  function openMatPop(chip){
+    const part = chip.dataset.part;
+    if(MAT.open === part){ closeMatPop(); return; }
+    MAT.open = part;
+    const pop = $('#matPop'), grid = $('#matPopGrid'), cur = $(MAT.parts[part]).value;
+    $('#matPopTitle').textContent = MAT.titles[part];
+    grid.innerHTML = '';
+    const card = (value, name, sub, ball, title) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'mp-card'; b.setAttribute('aria-pressed', value === cur); b.title = title || name;
+      b.innerHTML = (ball ? `<img loading="lazy" alt="">` : '<div class="mp-none">no tiles yet</div>') + '<span></span><small></small>';
+      if(ball) $('img', b).src = ball;
+      $('span', b).textContent = name; $('small', b).textContent = sub;
+      b.addEventListener('click', () => {
+        $(MAT.parts[part]).value = value; keepMaterials(); showChips(); closeMatPop();
+        log(`${MAT.titles[part]}: ${name}.`);
+        window.dispatchEvent(new Event('materials'));
+      });
+      grid.appendChild(b);
+    };
+    const group = text => { const g = document.createElement('div'); g.className = 'mp-group'; g.textContent = text; grid.appendChild(g); };
+    group('Yours');
+    card('tiles', 'Your tiles', 'from your training', yourBall(part),
+         yourBall(part) ? 'Your material tiles, built from your training' : 'No material tiles yet: train, or build them in the Memory tab');
+    for(const kind of (MAT.lib ? MAT.lib.parts[part] || [] : [])){
+      const list = MAT.lib.materials.filter(m => m.kind === kind);
+      if(!list.length) continue;
+      group(`Scanned ${(KIND_NAME[kind] || kind).toLowerCase()}`);
+      for(const m of list) card(m.id, m.name, `${m.size_m[0]} m across`, API + `/api/materials/${m.id}/ball`,
+                                `${m.title} by ${(m.authors || []).join(', ')}, Poly Haven, ${m.licence}`);
+    }
+    if(!MAT.lib) group('The scanned library is not available: is the server running?');
+    pop.hidden = false;
+    // beside the chip, inside the window
+    const r = chip.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let left = r.right + 10, top = r.top - 8;
+    if(left + pw > innerWidth - 12) left = Math.max(12, r.left);
+    if(left + pw > innerWidth - 12) left = Math.max(12, innerWidth - pw - 12);
+    if(left < r.right && left + pw > r.left) top = r.bottom + 8;          // no room beside it: below
+    top = Math.max(12, Math.min(top, innerHeight - ph - 12));
+    pop.style.left = left + 'px'; pop.style.top = top + 'px';
+  }
+  $$('.matChip').forEach(chip => chip.addEventListener('click', e => { e.stopPropagation(); openMatPop(chip); }));
+  $('#matPop .mp-x').addEventListener('click', closeMatPop);
+  addEventListener('keydown', e => { if(e.key === 'Escape' && MAT.open) closeMatPop(); });
+  addEventListener('pointerdown', e => { if(MAT.open && !e.target.closest('#matPop') && !e.target.closest('.matChip')) closeMatPop(); });
+  addEventListener('resize', () => { if(MAT.open) closeMatPop(); });
+  window.materialChoice = () => ({ street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value,
+                                   match_tone: $('#matTone').checked, names: { street: materialOf('street').name,
+                                   sidewalk: materialOf('sidewalk').name, kerb: materialOf('kerb').name } });
 
   /* ------------------------------------------------ tabs */
   $$('.tab').forEach(t => t.addEventListener('click', () => {
@@ -627,11 +695,14 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
           quality: +$('#quality').value, align_lines: S.gen.alignLines || false,
           output_scale: +$('#outScale').value, soft_edges: $('#softEdges').checked,
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
-          line_width_mode: $('#lineMode').value }) });
+          line_width_mode: $('#lineMode').value,
+          materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked }) });
       S.gen.result = res;
+      S.gen.top = null;
       const s = res.summary;
       log(`Output ${s.size[0]} × ${s.size[1]} (${s.output_scale}× the mask${s.soft_edges ? ', smooth edges' : ''}), grain ${Math.round(s.grain*50)}${s.matched_tone != null ? `, colour matched to tone ${s.matched_tone}` : ''}.`);
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
+      if(s.street_material) log(`  Streets: ${s.street_material}, laid at its real size; your material's lighter and darker areas kept on it.`);
       Object.entries(res.decisions || {}).forEach(([k,d]) => log(`  ${k}: ${d.label || 'none'}${d.rank ? ` (position ${d.rank})` : ''}${d.exhausted ? ', all rejected' : ''}`));
       log(`  ${s.markings.dashes} dashes placed, cycle ${s.markings.cycle_px} px, lines ${s.markings.width_px} px wide${
         s.markings.width_mode === 'learned' ? ` (${(s.markings.width_ratio*100).toFixed(1)}% of each street's width, learned)`
@@ -664,9 +735,34 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
       await showLayer('result');
       renderLayerThumbs();
       renderInfo();
+      buildTopView(res.id);
     }catch(e){ log(e.message, 'bad'); $('#genNote').textContent = e.message; }
     status('Ready.'); $('#btnGenerate').disabled = false; renderMemory();
   });
+
+  // the Top view: the 3D model of this texture (with the 3D model settings and the
+  // materials), drawn from straight above, so the streets, sidewalks and kerbs show
+  // with their materials. Shown once ready if the result is still on screen.
+  async function buildTopView(gid){
+    $('#lp-top').innerHTML = '<div class="ph">building…</div>';
+    log('Top view: building the 3D model to show the streets, sidewalks and kerbs with their materials…');
+    try{
+      const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ...exportSettings(), generation: gid, mesh: 'tiled' }) });
+      if(!window.renderTopView) throw new Error('the top view drawing is not loaded');
+      const canvas = await window.renderTopView(API + res.url, res.size_m);
+      if(!S.gen.result || S.gen.result.id !== gid) return;               // a newer texture since
+      S.gen.top = { canvas, gid };
+      drawInto($('#lp-top'), canvas);
+      const m = res.materials_used || {};
+      log(`Top view ready (${canvas.width} × ${canvas.height}, ${(res.size_m[0] / canvas.width * 100).toFixed(0)} cm per pixel): `
+        + `streets ${m.street || 'your tiles'}, sidewalks ${m.sidewalk || 'your tiles'}, kerbs ${m.kerb || 'your tiles'}. Zoom in to see the materials.`, 'ok');
+      if(S.gen.layer === 'result') showLayer('top');
+    }catch(e){
+      $('#lp-top').innerHTML = '<div class="ph">—</div>';
+      log('Top view not available: ' + e.message, 'bad');
+    }
+  }
 
   // the 3D model settings, shared by the export and the 3D tab's scene (ui/view3d.js)
   const exportSettings = () => ({ mesh: $('#meshMode').value,
@@ -751,9 +847,10 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
   async function showLayer(name){
     const res = S.gen.result;
     if(!res) return;
+    if(name === 'top' && !(S.gen.top && S.gen.top.gid === res.id)) return;
     S.gen.layer = name;
-    const img = await loadImage(API + res.urls[name]);
-    genVp.show(img, `${name}, ${img.width} × ${img.height}`);
+    const img = name === 'top' ? S.gen.top.canvas : await loadImage(API + res.urls[name]);
+    genVp.show(img, name === 'top' ? `Top view of the 3D model, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`);
     $$('.layer').forEach(b => b.setAttribute('aria-pressed', b.dataset.layer === name));
   }
 
@@ -766,7 +863,7 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
   }
 
   $$('.layer').forEach(b => b.addEventListener('click', () => {
-    const map = { material:'material', noise:'wear', markings:'markings' };
+    const map = { material:'material', noise:'wear', markings:'markings', top:'top' };
     if(!S.gen.result) return;
     const name = map[b.dataset.layer];
     showLayer(S.gen.layer === name ? 'result' : name);
@@ -776,8 +873,11 @@ const UI_VERSION = '2026.10.04-look1';   // must match VERSION in server.py
   genVp.canvas.addEventListener('click', async e => {
     if(!S.gen.result || genVp.wasDrag && genVp.wasDrag()) return;
     const c = e.currentTarget, r = c.getBoundingClientRect();
-    const x = Math.floor((e.clientX - r.left) / r.width * c.width);
-    const y = Math.floor((e.clientY - r.top) / r.height * c.height);
+    // in the texture's own pixels (the top view is drawn finer than the texture)
+    const size = S.gen.result.summary && S.gen.result.summary.size;
+    const tw = S.gen.layer === 'top' && size ? size[0] : c.width, th = S.gen.layer === 'top' && size ? size[1] : c.height;
+    const x = Math.floor((e.clientX - r.left) / r.width * tw);
+    const y = Math.floor((e.clientY - r.top) / r.height * th);
     try{
       const res = await api('/api/inspect', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ generation: S.gen.result.id, x, y }) });

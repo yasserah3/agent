@@ -381,6 +381,39 @@ def _at_size(m, scale, shape):
     return out
 
 
+def lay_material(street, trained, road, mpp):
+    """
+    A scanned material (its colour picture, street["colour"], covering
+    street["size_m"] metres) laid over the canvas at its real size, in place of
+    the trained material. At the canvas's scale a pixel covers many of the
+    material's stones, so each pixel takes the average of the ground it covers.
+    The trained material's lighter and darker areas (over 2 m and more) are kept
+    on it, so the streets keep their patches and stains rather than turning
+    flat; with street["match"], its colour takes on the trained material's mean
+    colour on the road.
+    """
+    H, W = road.shape
+    img = Image.fromarray(np.asarray(street["colour"], np.uint8))
+    sw, sh = [float(v) for v in street["size_m"]]
+    # two texture pixels per canvas pixel, averaged down (box filter): the picture
+    # stays one repeat of the material, so it still joins itself
+    nx = int(np.clip(round(2 * sw / mpp), 4, img.width))
+    ny = int(np.clip(round(2 * sh / mpp), 4, img.height))
+    tex = np.asarray(img.resize((nx, ny), Image.BOX), np.float32)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    cx = ((xx + 0.5) * mpp / sw * nx - 0.5).ravel()
+    cy = ((yy + 0.5) * mpp / sh * ny - 0.5).ravel()
+    lay = np.stack([ndi.map_coordinates(tex[..., c], [cy, cx], order=1, mode="grid-wrap").reshape(H, W)
+                    for c in range(3)], axis=-1)
+    if street.get("match"):
+        gain = trained[road].mean(axis=0) / np.maximum(lay[road].mean(axis=0), 1.0)
+        lay = lay * np.clip(gain, 0.25, 4.0)
+    lum = trained.mean(axis=2)
+    broad = ndi.gaussian_filter(lum, max(1.0, 2.0 / mpp))
+    rel = broad / max(float(broad[road].mean()), 1.0)
+    return lay * np.clip(rel, 0.5, 1.6)[:, :, None]
+
+
 def generate(mask_path, libraries, params, out_paths, map_path=None):
     """
     libraries: {"material": {group: npz path}, "wear": {group: npz path}}
@@ -450,6 +483,11 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         lum = material.mean(axis=2)
         shift = float(target) - float(lum[road].mean())
         material = material + shift
+
+    # ---- a scanned material for the streets (app/scans) instead of the trained one
+    street = params.get("street_material")
+    if street is not None and road.any():
+        material = lay_material(street, material, road, mpp_out)
 
     # ---- 2. wear ----
     wear_strength = float(params.get("wear", 0.5))
@@ -538,6 +576,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
                        "library": used.get(k)} for k, v in groups.items()},
         "markings": dash_info,
         "wear_strength": wear_strength,
+        "street_material": (street or {}).get("name"),
         "quality": quality,
         "align_lines": align_lines,
     }
