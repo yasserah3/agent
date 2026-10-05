@@ -1166,8 +1166,44 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
     the lights likely to light it (near, facing it, their beam towards it),
     as Cycles' light tree does, instead of any lamp at random, so night photos
     sharpen many times sooner.
+  - **Compiling**: the first photo in a session compiles the path tracer's
+    shader for the graphics card, which on Windows (DirectX) can take a
+    minute or more. Meanwhile the live view stays and the panel counts the
+    seconds; the samples start once it is done.
 - **Save image** saves what the view shows, live or the photo, as a PNG,
   with its look.
+
+### Baked light
+
+**Bake light** (under Photo render) traces the light as Render photo does
+(the sun's soft shadows, the sky's light, light bounced off walls and blocks,
+every lamp's pool at night), but on the ground from high above, and keeps it
+as a light map. With **Baked light** ticked, the live view takes the light of
+the streets, sidewalks, islands and flat roofs from that map, so you move
+round freely and the ground looks as it does in the photo.
+
+- **Bake**: *Round the view*, a square of about 200 m round where the camera
+  looks, at about 10 cm a pixel (sharp shadows); or *the whole place*, at 20
+  cm a pixel or coarser on a big place (the map is at most 2048 pixels a side).
+- **Quality**: how many samples are traced before the noise is cleared by
+  Open Image Denoise: Draft (32), Good (128), Best (512). The panel counts
+  them and the time left; the view stays live meanwhile, and **Stop baking**
+  stops it. On a good graphics card a Good bake takes about a minute.
+- **What it keeps**: the light reaching each spot, not the surface's colour
+  (the traced picture divided by the colour of what it saw). So Wet roads, and
+  the materials' colours, still change live over a bake. The shine (the sky
+  and the lamps in wet roads, highlights) stays live too, and follows the
+  camera as it should. The live contact shadows are lightened, and the
+  lamps' painted pools hidden, while a bake shows: both are in the bake.
+- **Only the ground seen from above takes it**: walls, kerb faces, objects'
+  sides, and the ground under trees, bridges or the edge of the map keep the
+  live light. Each spot checks that the bake saw that very surface (the same
+  height), so a road under a bridge never takes the bridge's light.
+- **A bake belongs to its light**: the time of day, the sun's strength and the
+  lamps' strength and colour. Change one and the live light shows (the note
+  says so) until you bake again; the last three bakes are kept, so going back
+  to Day after baking Night shows the Day bake again. Generate 3D scene or
+  Update view starts without bakes (the scene changed).
 
 ### Look
 

@@ -10,7 +10,8 @@
 // those of Blender and Cycles. Render
 // photo then traces the light properly (three-gpu-pathtracer), a still that
 // sharpens for as long as the camera stays put, its noise cleared by Intel Open
-// Image Denoise (ui/denoise.js, ported to WebGL2). Dawn, Day and Night set the
+// Image Denoise (ui/denoise.js, ported to WebGL2). Bake light traces the light on
+// the ground the same way, from above, and keeps it for the live view. Dawn, Day and Night set the
 // sun, the sky and the street lamps. Metres, Y up: the map's x is +X, its y +Z,
 // the top of the map north. Everything is bundled in ui/vendor, so it works offline.
 import * as THREE from 'three';
@@ -301,6 +302,7 @@ function setTime(name, render = true){
   if(t.sky) scene.remove(st); else scene.add(st);
   hemi.intensity = t.sky ? 0 : 0.06;
   if(lamps) lampLevel(t.lamps);
+  applyBake();                                                        // this time's bake, if there is one
   if(render) poolAt = null;
   if(!t.sky){
     // night: the moon, and the night sky's light from all round
@@ -496,6 +498,7 @@ async function generate(keep = false){
     note('Loading the model into the view…');
     const gltf = await new GLTFLoader().loadAsync(res.url);
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
+    dropBakes();
     world = gltf.scene;
     prepare(world);
     scene.add(world);
@@ -507,6 +510,7 @@ async function generate(keep = false){
     else frame(c, rad);
     builtFrom = key;
     staleCheck();
+    applyBake();
     let tris = 0;
     world.traverse(o => { if(o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
     note(`${res.size_m[0]} × ${res.size_m[1]} m, ${Math.round(tris).toLocaleString()} triangles`
@@ -514,7 +518,7 @@ async function generate(keep = false){
       + (res.streets_warning ? ' Note: ' + res.streets_warning + '.' : '')
       + (res.materials_used && Object.keys(res.materials_used).length
          ? ' Materials: ' + Object.entries(res.materials_used).map(([k, v]) => `${k} ${v}`).join(', ') + '.' : ''));
-    $('#btnPhoto').disabled = false; $('#btnSaveImg').disabled = false;
+    $('#btnPhoto').disabled = false; $('#btnSaveImg').disabled = false; $('#btnBake').disabled = false;
     window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: (res.lamps || []).length, triangles: Math.round(tris) } }));
   }catch(e){
     note('Could not build the 3D scene: ' + e.message, true);
@@ -558,6 +562,7 @@ function prepare(root){
       if(/RoadMarkings/.test(m.name)){
         m.polygonOffset = true; m.polygonOffsetFactor = -1; m.polygonOffsetUnits = -2;
       }
+      bakePatch(m);                                                     // can take Bake light's light
       m.needsUpdate = true;
     }
   });
@@ -586,79 +591,102 @@ function applyWet(root = world){
 // Path traced: light bounces between the surfaces, soft shadows from the sun
 // and the sky, and the lamps near the view as real lights. It sharpens for as
 // long as nothing moves; moving the camera returns to the live view.
-async function startPhoto(){
-  if(!world || busy) return;
-  if(photo && photo.on){ stopPhoto(); return; }
-  busy = true;
-  note('Preparing the photo render: building the ray-tracing structure of the scene…');
-  await new Promise(r => setTimeout(r, 30));
-  try{
-    const { WebGLPathTracer } = await import('three-gpu-pathtracer');
-    if(!photo){
-      const pt = new WebGLPathTracer(renderer);
-      pt.renderDelay = 0; pt.fadeDuration = 0; pt.minSamples = 0;
-      pt.rasterizeScene = false; pt.dynamicLowRes = false;
-      pt.bounces = 5; pt.filterGlossyFactor = 0.5;
-      pt.tiles.set(2, 2);
-      photo = { pt, on: false };
-      if(NO_TREE) pt._pathTracer.material.setDefine('LIGHT_TREE', 0);
-      // on screen: the denoised picture once there is one, else the samples so far, with the
-      // glow and the look as the live view has them
-      pt.renderToCanvasCallback = (target, r, quad) => {
-        if(DENOISE && photo.clean && photo.clean.shown) quad.material.map = photo.clean.out.texture;
-        if(photo.plain){
-          // as the path tracer draws it itself (no glow, no look): see photoHealth
-          const auto = r.autoClear;
-          r.autoClear = false; quad.render(r); r.autoClear = auto;
-        }else presentPhoto(r, quad);
-      };
-    }
-    photo.clean = null;                                                 // nothing denoised yet
-    photo.checked = false; photo.retried = false;
-    photo.saved = { env: scene.environment, bg: scene.background, envI: scene.environmentIntensity };
-    if(skyNow){
-      // Blender's sky as the tracer's light from all round, without the sun's disc (the sun is
-      // its own light), and with the disc as what the camera sees
-      scene.environment = skyNow.plain; scene.background = skyNow.disc;
-    }else{
-      // the night sky, as a cube the tracer turns into its own all-round picture
-      const cube = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType });
-      new THREE.CubeCamera(1, 10000, cube).update(renderer, envScene);
-      photo.cube = cube;
-      scene.environment = cube.texture; scene.background = cube.texture;
-    }
-    hemi.visible = false;
-    if(stars) stars.visible = false;                                    // points are not traced: the sky has its own
-    // lamps: whole meshes (instances are not traced), real lights for those around the view
-    const extra = new THREE.Group();
-    if(lamps){
-      lamps.group.visible = false;
+// the path tracer, made once and shared by the photo and the bake
+async function pathTracer(){
+  const { WebGLPathTracer } = await import('three-gpu-pathtracer');
+  if(!photo){
+    const pt = new WebGLPathTracer(renderer);
+    pt.renderDelay = 0; pt.fadeDuration = 0; pt.minSamples = 0;
+    pt.rasterizeScene = false; pt.dynamicLowRes = false;
+    pt.bounces = 5; pt.filterGlossyFactor = 0.5;
+    pt.tiles.set(2, 2);
+    photo = { pt, on: false };
+    if(NO_TREE) pt._pathTracer.material.setDefine('LIGHT_TREE', 0);
+    // on screen: the denoised picture once there is one, else the samples so far, with the
+    // glow and the look as the live view has them
+    pt.renderToCanvasCallback = (target, r, quad) => {
+      if(DENOISE && photo.clean && photo.clean.shown) quad.material.map = photo.clean.out.texture;
+      if(photo.plain){
+        // as the path tracer draws it itself (no glow, no look): see photoHealth
+        const auto = r.autoClear;
+        r.autoClear = false; quad.render(r); r.autoClear = auto;
+      }else presentPhoto(r, quad);
+    };
+  }
+  return photo.pt;
+}
+
+// the scene as the tracer sees it: Blender's sky (or the night sky as a cube), and the
+// lamps as real lights, every one up to the nearest lampCount to `around` (the tracer's
+// light tree picks those likely to light each point); with lampMeshes, the lamps as
+// whole meshes too (instances are not traced). Undone by unstage
+function stage({ lampMeshes = true, around = controls.target, lampCount = PHOTO_LAMPS } = {}){
+  const st = { env: scene.environment, bg: scene.background, envI: scene.environmentIntensity, cube: null };
+  if(skyNow){
+    // Blender's sky as the tracer's light from all round, without the sun's disc (the sun is
+    // its own light), and with the disc as what the camera sees
+    scene.environment = skyNow.plain; scene.background = skyNow.disc;
+  }else{
+    const cube = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType });
+    new THREE.CubeCamera(1, 10000, cube).update(renderer, envScene);
+    st.cube = cube;
+    scene.environment = cube.texture; scene.background = cube.texture;
+  }
+  hemi.visible = false;
+  if(stars) stars.visible = false;                                    // points are not traced: the sky has its own
+  const extra = new THREE.Group();
+  if(lamps){
+    lamps.group.visible = false;
+    if(lampMeshes){
       const merged = (geo, mat) => {
         const parts = [], m = new THREE.Matrix4();
         for(let i = 0; i < lamps.items.length; i++){ lamps.poles.getMatrixAt(i, m); parts.push(geo.clone().applyMatrix4(m)); }
         return new THREE.Mesh(mergeGeometries(parts), mat);
       };
       extra.add(merged(lamps.poles.geometry, lamps.metalMat), merged(lamps.heads.geometry, lamps.headMat));
-      if(lamps.level > 0){
-        const tg = controls.target;
-        // every lamp a real light (up to the nearest thousand): the tracer's light tree
-        // picks, at each point, the lamps likely to light it, so many lamps stay cheap
-        const near = lamps.items.map(it => [it.foot.distanceTo(tg), it]).sort((a, b) => a[0] - b[0]).slice(0, PHOTO_LAMPS);
-        for(const [, it] of near){
-          const s = new THREE.SpotLight(LIGHT.colour, LAMP.candela * lamps.level, 0, 1.15, 0.85, 2);
-          s.position.copy(it.head);
-          s.target.position.copy(it.head).addScaledVector(it.dir, 2.0).setY(it.foot.y - 1);
-          extra.add(s, s.target);
-        }
+    }
+    if(lamps.level > 0){
+      const near = lamps.items.map(it => [it.foot.distanceTo(around), it]).sort((a, b) => a[0] - b[0]).slice(0, lampCount);
+      for(const [, it] of near){
+        const s = new THREE.SpotLight(LIGHT.colour, LAMP.candela * lamps.level, 0, 1.15, 0.85, 2);
+        s.position.copy(it.head);
+        s.target.position.copy(it.head).addScaledVector(it.dir, 2.0).setY(it.foot.y - 1);
+        extra.add(s, s.target);
       }
     }
-    scene.add(extra);
-    photo.extra = extra;
-    // every picture the tracer holds (colour, bump, roughness…) at one size: full while they fit
-    const textures = new Set();
-    world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) for(const k of TEXTURE_SLOTS) if(m[k]) textures.add(m[k]); });
-    const tsize = textures.size > 48 ? 512 : 1024;
-    photo.pt.textureSize.set(tsize, tsize);
+  }
+  scene.add(extra);
+  st.extra = extra;
+  // every picture the tracer holds (colour, bump, roughness…) at one size: full while they fit
+  const textures = new Set();
+  world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) for(const k of TEXTURE_SLOTS) if(m[k]) textures.add(m[k]); });
+  const tsize = textures.size > 48 ? 512 : 1024;
+  photo.pt.textureSize.set(tsize, tsize);
+  return st;
+}
+
+function unstage(st){
+  if(!st) return;
+  scene.environment = st.env; scene.background = st.bg; scene.environmentIntensity = st.envI;
+  hemi.visible = true;
+  if(stars) stars.visible = true;
+  if(lamps) lamps.group.visible = true;
+  if(st.extra){ scene.remove(st.extra); st.extra.traverse(o => { if(o.geometry) o.geometry.dispose(); }); st.extra = null; }
+  if(st.cube){ st.cube.dispose(); st.cube = null; }
+}
+
+async function startPhoto(){
+  if(!world || busy || BAKE.busy) return;
+  if(photo && photo.on){ stopPhoto(); return; }
+  busy = true;
+  note('Preparing the photo render: building the ray-tracing structure of the scene…');
+  await new Promise(r => setTimeout(r, 30));
+  try{
+    await pathTracer();
+    photo.clean = null;                                                 // nothing denoised yet
+    photo.checked = false; photo.retried = false;
+    photo.saved = stage();
+    photo.extra = photo.saved.extra;
     const t0 = performance.now();
     photo.pt.setScene(scene, camera);
     photo.on = true; photo.started = performance.now();
@@ -711,12 +739,8 @@ function stopPhoto(why){
   if(!photo || !photo.on) return;
   photo.on = false;
   dropClean();
-  scene.environment = photo.saved.env; scene.background = photo.saved.bg; scene.environmentIntensity = photo.saved.envI;
-  hemi.visible = true;
-  if(stars) stars.visible = true;
-  if(lamps) lamps.group.visible = true;
-  if(photo.extra){ scene.remove(photo.extra); photo.extra.traverse(o => { if(o.geometry) o.geometry.dispose(); }); photo.extra = null; }
-  if(photo.cube){ photo.cube.dispose(); photo.cube = null; }
+  unstage(photo.saved);
+  photo.saved = null; photo.extra = null;
   $('#btnPhoto').textContent = 'Render photo';
   if(why) note(why);
 }
@@ -747,7 +771,19 @@ async function saveImage(){
 // ----------------------------------------------------------------- drawing
 function draw(){
   if(photo && photo.on){
-    photo.pt.renderSample();
+    const pt = photo.pt;
+    // nothing to show until the first sample: the live view stays (not a black picture) while
+    // the tracer's shader compiles, which on Windows (DirectX) can take a minute or more
+    pt.renderToCanvas = pt.samples > 0;
+    pt.renderSample();
+    if(pt.samples === 0){
+      const s = Math.round((performance.now() - photo.started) / 1000);
+      const msg = pt.isCompiling ? `Compiling the path tracer's shader for this graphics card… ${s} s. `
+        + 'The first time in a session this can take a minute or more (on Windows especially); then the samples start.'
+        : `Starting… ${s} s.`;
+      if($('#photoNote').textContent !== msg) $('#photoNote').textContent = msg;
+      return;
+    }
     if(!photo.checked && photo.pt.samples >= 2) photoHealth();
     if(!photo.on) return;
     const n = photo.pt.samples;
@@ -909,17 +945,27 @@ function auxMaterial(m, kind){
   a.fog = false; a.toneMapped = false; a.transparent = false; a.blending = THREE.NoBlending;
   a.onBeforeCompile = sh => {
     const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
-    sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n'
-      + (kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`));
+    let out = kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`;
+    if(kind === 'height'){
+      // the height of the surface over the bake's lowest point (Bake light)
+      sh.uniforms.auxBase = AUX_BASE;
+      sh.vertexShader = 'varying vec3 vBakeWorld;\n' + sh.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n' + BAKE_WORLD_VERT);
+      sh.fragmentShader = 'uniform float auxBase;\nvarying vec3 vBakeWorld;\n' + sh.fragmentShader;
+      out = 'gl_FragColor = vec4(vBakeWorld.y - auxBase, 0.0, 0.0, 1.0);';
+    }
+    sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n' + out);
   };
   a.customProgramCacheKey = () => 'aux-' + kind;
   return c[kind] = a;
 }
 
-function renderAux(w, h){
+// cam: the photo's camera, or the bake's; kinds: albedo, normal (and height for the bake);
+// extra: the lamps' lights added for the tracer
+function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = photo && photo.extra } = {}){
   const make = type => new THREE.WebGLRenderTarget(w, h, { type, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter,
                                                            magFilter: THREE.NearestFilter, depthBuffer: type === THREE.HalfFloatType });
-  const shot = make(THREE.HalfFloatType), out = { albedo: make(THREE.HalfFloatType), normal: make(THREE.HalfFloatType) };
+  const shot = make(THREE.HalfFloatType), out = {};
+  for(const kind of kinds) out[kind] = make(THREE.HalfFloatType);
   if(!auxQuad) auxQuad = new FullScreenQuad(new THREE.ShaderMaterial({
     uniforms: { map: { value: null }, weight: { value: 1 } },
     vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
@@ -931,11 +977,11 @@ function renderAux(w, h){
   const swapped = [], lights = [];
   scene.traverseVisible(o => { if(o.isMesh && o.material) swapped.push([o, o.material]); });
   // the photo's lamp lights do not matter here (and are far too many for drawing)
-  if(photo && photo.extra) photo.extra.traverse(o => { if(o.isLight && o.visible){ o.visible = false; lights.push(o); } });
+  if(extra) extra.traverse(o => { if(o.isLight && o.visible){ o.visible = false; lights.push(o); } });
   const tent = u => (u < 0.5 ? Math.sqrt(2 * u) - 1 : 1 - Math.sqrt(2 - 2 * u));
   renderer.shadowMap.autoUpdate = false;
   try{
-    for(const kind of ['albedo', 'normal']){
+    for(const kind of kinds){
       for(const [o, m] of swapped) o.material = Array.isArray(m) ? m.map(x => auxMaterial(x, kind)) : auxMaterial(m, kind);
       // the sky: as bright as it shows (albedo); no surface (normal)
       scene.background = kind === 'albedo' ? keep.bg : null;
@@ -944,9 +990,9 @@ function renderAux(w, h){
       renderer.setRenderTarget(out[kind]); renderer.clear();
       for(let i = 0; i < AUX_VIEWS; i++){
         const jx = tent(((i % 4) + 0.5) / 4), jy = tent((Math.floor(i / 4) + 0.5) / 4);
-        camera.setViewOffset(w, h, jx, jy, w, h);
+        cam.setViewOffset(w, h, jx, jy, w, h);
         renderer.autoClear = true;
-        renderer.setRenderTarget(shot); renderer.render(scene, camera);
+        renderer.setRenderTarget(shot); renderer.render(scene, cam);
         renderer.autoClear = false;
         auxQuad.material.uniforms.map.value = shot.texture; auxQuad.material.uniforms.weight.value = 1 / AUX_VIEWS;
         renderer.setRenderTarget(out[kind]); auxQuad.render(renderer);
@@ -955,7 +1001,7 @@ function renderAux(w, h){
   }finally{
     for(const [o, m] of swapped) o.material = m;
     for(const l of lights) l.visible = true;
-    camera.clearViewOffset();
+    cam.clearViewOffset();
     scene.background = keep.bg; scene.backgroundIntensity = keep.bgI;
     renderer.setRenderTarget(keep.target); renderer.setClearColor(keep.colour, keep.alpha);
     renderer.autoClear = keep.auto; renderer.shadowMap.autoUpdate = keep.shadows;
@@ -1012,6 +1058,310 @@ async function denoisePhoto(n){
   }
 }
 
+// ----------------------------------------------------------------- baked light
+// Bake light traces the light falling on the streets, sidewalks, islands and flat roofs
+// as the photo does (the sun's soft shadows, the sky, light bounced off the walls, the
+// lamps' pools), but from high above, for the whole area at once, and keeps it as a
+// light map: how much light reaches each spot, without the surface's own colour (the
+// traced picture divided by the colour of what it saw). With Baked light on, the live
+// view takes the matt light of those surfaces from the map instead of working it out,
+// while the shine (the sky and the lamps in wet roads, highlights) stays live, so the
+// camera moves freely with the photo's light. Only what the bake saw from above takes
+// it: walls, kerb faces and the ground under trees or bridges keep the live light. A
+// bake belongs to its light (time of day, sun, lamps): change those and the live light
+// shows until the next bake, and the last three bakes are kept for going back
+const BAKE_PX = 2048;                                // the light map's longest side, at most
+const BAKE_KEEP = 3;
+const BAKE = { busy: false, cancel: false, on: false, list: [], shown: null };
+const AUX_BASE = { value: 0 };
+// shared by every street material: the map, where a world point falls in it, and the
+// heights that count as the same surface
+const BAKE_U = { bakeMap: { value: null }, bakeMatrix: { value: new THREE.Matrix4() }, bakeOn: { value: 0 },
+                 bakeTol: { value: new THREE.Vector4(0.05, 0.1, 0, 0) } };
+const BAKE_WORLD_VERT = `{
+  vec4 bp = vec4( transformed, 1.0 );
+  #ifdef USE_BATCHING
+    bp = batchingMatrix * bp;
+  #endif
+  #ifdef USE_INSTANCING
+    bp = instanceMatrix * bp;
+  #endif
+  vBakeWorld = ( modelMatrix * bp ).xyz;
+}`;
+const BAKE_FRAG = `
+if( bakeOn > 0.5 ){
+  // the four texels round this point, each counting only if it was traced on this
+  // surface (the same height), not on a roof or a tree above it or the road below
+  vec4 bq = bakeMatrix * vec4( vBakeWorld, 1.0 );
+  vec2 buv = bq.xy / bq.w;
+  ivec2 bn = textureSize( bakeMap, 0 );
+  vec2 bp = buv * vec2( bn ) - 0.5, bf = fract( bp );
+  ivec2 b0 = ivec2( floor( bp ) );
+  vec3 bsum = vec3( 0.0 );
+  float bwsum = 0.0;
+  for( int k = 0; k < 4; k ++ ){
+    ivec2 o = ivec2( k & 1, k >> 1 );
+    vec4 s = texelFetch( bakeMap, clamp( b0 + o, ivec2( 0 ), bn - 1 ), 0 );
+    float w = ( o.x == 1 ? bf.x : 1.0 - bf.x ) * ( o.y == 1 ? bf.y : 1.0 - bf.y );
+    w *= 1.0 - smoothstep( bakeTol.x, bakeTol.y, abs( s.a + bakeTol.z - vBakeWorld.y ) );
+    bsum += s.rgb * w; bwsum += w;
+  }
+  vec2 bedge = min( buv, 1.0 - buv ) * vec2( bn );
+  // facing up (not walls or kerb faces), traced here, and away from the map's edge
+  #ifdef DOUBLE_SIDED
+    float bup = vBakeUp * faceDirection;
+  #else
+    float bup = vBakeUp;
+  #endif
+  float bw = smoothstep( 0.55, 0.8, bup ) * smoothstep( 0.05, 0.35, bwsum )
+           * smoothstep( 1.0, 8.0, min( bedge.x, bedge.y ) );
+  if( bw > 0.0 ){
+    vec3 bE = bsum / max( bwsum, 1e-4 );
+    reflectedLight.directDiffuse *= 1.0 - bw;
+    reflectedLight.indirectDiffuse = mix( reflectedLight.indirectDiffuse, bE * BRDF_Lambert( material.diffuseContribution ), bw );
+  }
+}`;
+
+// a street material that can take the baked light (prepare)
+function bakePatch(m){
+  if(!m.isMeshStandardMaterial || m.userData.bakeable) return;
+  m.userData.bakeable = true;
+  m.onBeforeCompile = sh => {
+    Object.assign(sh.uniforms, BAKE_U);
+    sh.vertexShader = 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\n' + sh.vertexShader.replace('#include <project_vertex>',
+      '#include <project_vertex>\n' + BAKE_WORLD_VERT + '\nvBakeUp = normalize( ( vec4( transformedNormal, 0.0 ) * viewMatrix ).xyz ).y;');
+    sh.fragmentShader = 'uniform highp sampler2D bakeMap;\nuniform mat4 bakeMatrix;\nuniform float bakeOn;\nuniform vec4 bakeTol;\n'
+      + 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\n'
+      + sh.fragmentShader.replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + BAKE_FRAG);
+  };
+  m.customProgramCacheKey = () => 'bakeable';
+}
+
+// the light the bakes are for: the time of day, the sun, the lamps
+const bakeKey = () => JSON.stringify([time, LIGHT.sun, LIGHT.lamps, LIGHT.colour]);
+const TIME_NAMES = { dawn: 'Dawn', day: 'Day', night: 'Night' };
+
+// shows the bake for the light now (if Baked light is on and there is one), else the live light
+function applyBake(){
+  const b = BAKE.on ? BAKE.list.find(x => x.key === bakeKey()) || null : null;
+  BAKE.shown = b;
+  BAKE_U.bakeOn.value = b ? 1 : 0;
+  BAKE_U.bakeMap.value = b ? b.map.texture : null;
+  if(b){ BAKE_U.bakeMatrix.value.copy(b.matrix); BAKE_U.bakeTol.value.set(b.tol[0], b.tol[1], b.base, 0); }
+  // the lamps' painted pools and the contact shadows are in the bake already
+  if(lamps) lamps.glows.visible = lamps.level > 0 && !b;
+  if(gtao) gtao.blendIntensity = b ? 0.4 : 0.9;
+  bakeNote();
+}
+
+function bakeNote(text, bad){
+  const n = $('#bakeNote');
+  if(!n) return;
+  const box = $('#bakeOn');
+  box.disabled = !BAKE.list.length; box.checked = BAKE.on;
+  if(text === undefined){
+    const any = BAKE.list.find(x => x.key === bakeKey());
+    const about = b => `${TIME_NAMES[b.time]}, ${b.area === 'view' ? 'round the view' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel, ${b.samples} samples`;
+    if(BAKE.busy) return;
+    if(BAKE.shown) text = `Baked light on (${about(BAKE.shown)}). Move round freely: the streets, sidewalks and islands have the photo's light; walls, kerb faces and the ground under trees keep the live light.`;
+    else if(BAKE.on && BAKE.list.length) text = `No bake for this light yet (${TIME_NAMES[time]}${LIGHT.sun !== 1 || LIGHT.lamps !== 1 ? ', with these sun and lamp settings' : ''}): showing the live light. Bake light bakes it; going back to a baked light shows its bake again.`;
+    else if(any) text = `Baked (${about(any)}). Tick Baked light to see it in the live view.`;
+    else text = 'Bake light traces the light on the ground as Render photo does and keeps it, so the live view shows the photo\'s light while you move round. Round the view: about 10 cm a pixel; the whole place: coarser.';
+    bad = false;
+  }
+  n.textContent = text; n.classList.toggle('bad', !!bad);
+}
+
+// the bakes are of this scene: a new scene starts without them
+function dropBakes(){
+  BAKE.cancel = true;
+  for(const b of BAKE.list) b.map.dispose();
+  BAKE.list = [];
+  applyBake();
+}
+
+// the area to bake: a square round where the camera looks, or the whole place, in
+// square pixels, and a camera high above it (looking almost straight down, so the
+// tracer's own camera, the same as the photo's, is used)
+function bakeArea(kind){
+  const box = new THREE.Box3().setFromObject(world);
+  let x0 = box.min.x - 2, x1 = box.max.x + 2, z0 = box.min.z - 2, z1 = box.max.z + 2;
+  const most = Math.min(BAKE_PX, renderer.capabilities.maxTextureSize);
+  let mpp = Math.max(0.2, Math.max(x1 - x0, z1 - z0) / most);
+  if(kind === 'view'){
+    const t = controls.target, s = most * 0.1 / 2;
+    const a = [Math.max(x0, t.x - s), Math.min(x1, t.x + s), Math.max(z0, t.z - s), Math.min(z1, t.z + s)];
+    if(a[1] - a[0] > 10 && a[3] - a[2] > 10){ [x0, x1, z0, z1] = a; mpp = 0.1; }
+    else kind = 'whole';
+  }
+  const w = Math.max(16, Math.ceil((x1 - x0) / mpp)), h = Math.max(16, Math.ceil((z1 - z0) / mpp));
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, sx = w * mpp, sz = h * mpp;
+  const base = box.min.y, top = box.max.y, D = Math.max(400, 6 * Math.max(sx, sz));
+  const cam = new THREE.PerspectiveCamera(THREE.MathUtils.radToDeg(2 * Math.atan(sz / 2 / D)), sx / sz,
+                                          Math.max(1, D - (top - base) - 5), D + 10);
+  cam.position.set(cx, base + D, cz);
+  cam.up.set(0, 0, -1);                                                // the top of the map: north
+  cam.lookAt(cx, base, cz);
+  cam.updateMatrixWorld(); cam.updateProjectionMatrix();
+  // a world point to its place in the map (0..1), as the tracer saw it
+  const matrix = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 1, 0, 0, 0, 0, 1)
+    .multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+  return { kind, w, h, mpp, base, cam, matrix, centre: new THREE.Vector3(cx, base, cz) };
+}
+
+let bakeQuad = null;
+// the light reaching each spot: the traced (denoised) picture over the colour of what it
+// saw, and the height of that surface; nothing where the surface is too dark to tell
+function lightMap(light, aux, w, h){
+  if(!bakeQuad) bakeQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, depthTest: false, depthWrite: false,
+    uniforms: { light: { value: null }, albedo: { value: null }, height: { value: null } },
+    vertexShader: 'precision highp float; uniform mat4 modelViewMatrix; uniform mat4 projectionMatrix; in vec3 position;\n'
+      + 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: 'precision highp float; uniform sampler2D light, albedo, height; out vec4 outColor;\n'
+      + 'void main(){ ivec2 p = ivec2(gl_FragCoord.xy); vec3 c = texelFetch(light, p, 0).rgb;\n' + SANE_GLSL + '\n'
+      + 'vec3 a = texelFetch(albedo, p, 0).rgb; float hgt = texelFetch(height, p, 0).r;\n'
+      + 'bool ok = max(max(a.r, a.g), a.b) > 0.01 && !isnan(hgt);\n'
+      + 'outColor = ok ? vec4(min(3.14159265 * c / max(a, vec3(0.02)), vec3(6.0e4)), hgt) : vec4(0.0, 0.0, 0.0, 1.0e4); }' }));
+  const map = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+  const u = bakeQuad.material.uniforms;
+  u.light.value = light; u.albedo.value = aux.albedo.texture; u.height.value = aux.height.texture;
+  const keep = renderer.getRenderTarget();
+  renderer.setRenderTarget(map);
+  bakeQuad.render(renderer);
+  renderer.setRenderTarget(keep);
+  return map;
+}
+
+// samples until there are `samples`, a few tiles at a time, waiting for the graphics card
+// between them, so the live view keeps moving meanwhile
+async function traceBake(pt, samples, progress){
+  const gl = renderer.getContext();
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  let k = 1;
+  while(pt.samples < samples){
+    if(BAKE.cancel) return false;
+    if(pt.isCompiling){ progress(); await pause(250); pt.renderSample(); continue; }
+    const t = performance.now();
+    for(let i = 0; i < k && pt.samples < samples; i++) pt.renderSample();
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    while(gl.getSyncParameter(sync, gl.SYNC_STATUS) !== gl.SIGNALED) await pause(4);
+    gl.deleteSync(sync);
+    const dt = performance.now() - t;
+    k = dt < 30 ? Math.min(k * 2, 256) : dt > 90 ? Math.max(1, k >> 1) : k;
+    progress();
+    await pause(0);
+  }
+  return true;
+}
+
+async function bakeLight(){
+  if(BAKE.busy){ BAKE.cancel = true; return; }                       // the button stops it
+  if(!world || busy) return;
+  if(photo && photo.on) stopPhoto();
+  const kind = $('#bakeArea').value, samples = Math.max(1, Math.round(+$('#bakeQuality').value) || 128), key = bakeKey(), bakeTime = time;
+  BAKE.busy = true; BAKE.cancel = false;
+  $('#btnBake').textContent = 'Stop baking'; $('#btnPhoto').disabled = true;
+  const started = performance.now();
+  const secs = () => Math.round((performance.now() - started) / 1000);
+  bakeNote('Preparing the bake: building the ray-tracing structure of the scene…');
+  await new Promise(r => setTimeout(r, 30));
+  let pt;
+  try{ pt = await pathTracer(); }
+  catch(e){
+    BAKE.busy = false;
+    $('#btnBake').textContent = 'Bake light'; $('#btnPhoto').disabled = !world;
+    bakeNote('Bake light is not available here: ' + e.message, true);
+    return;
+  }
+  const a = bakeArea(kind);
+  const keepPt = { sync: pt.synchronizeRenderSize, tiles: pt.tiles.clone() };
+  let aux = null, out = null, done = false;
+  try{
+    // traced as the photo, but matt: what comes back is the light the surfaces take in and
+    // give back evenly, not their shine (that stays live)
+    const st = stage({ lampMeshes: false, around: a.centre, lampCount: 4000 });
+    const matt = new Map();
+    try{
+      scene.traverseVisible(o => {
+        if(!o.isMesh) return;
+        for(const m of [].concat(o.material)) if(m.isMeshStandardMaterial && !matt.has(m)){
+          matt.set(m, { metalness: m.metalness, metalnessMap: m.metalnessMap, own: Object.prototype.hasOwnProperty.call(m, 'specularIntensity'), spec: m.specularIntensity });
+          m.metalness = 0; m.metalnessMap = null; m.specularIntensity = 0;
+        }
+      });
+      pt.synchronizeRenderSize = false;
+      pt._pathTracer.setSize(a.w, a.h);
+      pt.tiles.set(Math.ceil(a.w / 512), Math.ceil(a.h / 512));
+      pt.setScene(scene, a.cam);
+    }finally{
+      for(const [m, v] of matt){
+        m.metalness = v.metalness; m.metalnessMap = v.metalnessMap;
+        if(v.own) m.specularIntensity = v.spec; else delete m.specularIntensity;
+      }
+    }
+    // what the tracer sees, drawn without noise: colour, direction and height
+    AUX_BASE.value = a.base;
+    try{ aux = renderAux(a.w, a.h, { cam: a.cam, kinds: ['albedo', 'normal', 'height'], extra: st.extra }); }
+    finally{ unstage(st); }
+    pt.reset();
+    const ok = await traceBake(pt, samples, () => {
+      const n = Math.floor(pt.samples), s = secs();
+      bakeNote(pt.isCompiling && !n ? `Compiling the path tracer's shader for this graphics card… ${s} s (the first time in a session it can take a minute or more).`
+        : `Baking the light ${a.kind === 'view' ? 'round the view' : 'of the whole place'} (${a.w} × ${a.h} px): ${n} of ${samples} samples, ${s} s`
+          + (n >= 2 ? `, about ${Math.max(1, Math.round(s / n * (samples - n)))} s left.` : '.') + ' The view stays live meanwhile.');
+    });
+    if(!ok) throw new Error('stopped');
+    const c = (() => { try{ return lightIn(pt.target); }catch(e){ return null; } })();
+    if(c && c.lit === 0) throw new Error(`the traced light came out ${c.bad ? 'invalid' : 'black'} on this graphics card (${gpuInfo().name})`);
+    // the noise cleared as the photo's is (if the denoiser is there), then into the light map
+    let light = pt.target.texture;
+    if(DENOISE){
+      try{
+        bakeNote('Clearing the noise (Open Image Denoise)…');
+        if(!denoiser){
+          denoiserLoad = denoiserLoad || Denoiser.load(renderer.getContext(), new URL('./vendor/oidn/rt_hdr_calb_cnrm.tza', import.meta.url).href);
+          denoiser = await denoiserLoad;
+        }
+        if(BAKE.cancel) throw new Error('stopped');
+        out = new THREE.WebGLRenderTarget(a.w, a.h, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                      minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+        renderer.initRenderTarget(out);
+        const tex = rt => renderer.properties.get(rt.texture).__webglTexture;
+        try{
+          denoiser.denoise({ color: tex(pt.target), albedo: tex(aux.albedo), normal: tex(aux.normal), output: tex(out), width: a.w, height: a.h });
+        }finally{ renderer.resetState(); }
+        light = out.texture;
+      }catch(e){
+        if(e.message === 'stopped') throw e;
+        console.error('Bake light: denoiser', e);
+      }
+    }
+    const map = lightMap(light, aux, a.w, a.h);
+    BAKE.list = BAKE.list.filter(b => { if(b.key !== key) return true; b.map.dispose(); return false; });
+    BAKE.list.unshift({ key, time: bakeTime, area: a.kind, mpp: a.mpp, samples, map, matrix: a.matrix,
+                        base: a.base, tol: [0.03 + 0.1 * a.mpp, 0.06 + 0.2 * a.mpp], seconds: secs() });
+    while(BAKE.list.length > BAKE_KEEP) BAKE.list.pop().map.dispose();
+    BAKE.on = true;
+    done = true;
+  }catch(e){
+    if(e.message !== 'stopped'){ console.error('Bake light:', e); bakeNote('The bake did not work here: ' + e.message, true); }
+  }finally{
+    if(aux) for(const rt of Object.values(aux)) rt.dispose();
+    if(out) out.dispose();
+    // the tracer back as the photo has it, its big pictures let go
+    pt.synchronizeRenderSize = keepPt.sync; pt.tiles.copy(keepPt.tiles);
+    pt._pathTracer.setSize(16, 16);
+    pt.reset();
+    BAKE.busy = false;
+    $('#btnBake').textContent = 'Bake light'; $('#btnPhoto').disabled = !world;
+  }
+  if(done){ applyBake(); bakeNote(`Baked in ${secs()} s. ` + $('#bakeNote').textContent); }
+  else if(BAKE.cancel){ applyBake(); bakeNote('The bake was stopped. ' + $('#bakeNote').textContent); }
+}
+
 function loop(){
   if(!visible){ running = false; return; }
   if(!(photo && photo.on)) controls.update();                        // the photo's camera stays exactly put
@@ -1052,11 +1402,13 @@ $('#sunStrength').addEventListener('input', () => {
   if(photo && photo.on) stopPhoto();
   // the sun (or moon) brighter or dimmer; the exposure stays, so the picture follows
   sun.intensity = sunBase * LIGHT.sun;
+  applyBake();
 });
 $('#lampStrength').addEventListener('input', () => {
   LIGHT.lamps = +$('#lampStrength').value / 100; showLight(); saveLight();
   if(photo && photo.on) stopPhoto();
   if(lamps) { lampLevel(TIMES[time].lamps); poolAt = null; }
+  applyBake();
 });
 $('#wetRoads').addEventListener('input', () => {
   LIGHT.wet = +$('#wetRoads').value / 100; showLight(); saveLight();
@@ -1067,10 +1419,19 @@ $('#lampColour').addEventListener('input', () => {
   LIGHT.colour = $('#lampColour').value; saveLight();
   if(photo && photo.on) stopPhoto();
   if(lamps) lampLevel(TIMES[time].lamps);
+  applyBake();
 });
 // the Look panel: a change shows at once, in the live view and the photo alike (no new render)
 const lookApi = lookPanel(look, () => { if(bloomFrom) setBloom(...bloomFrom); });
 $('#btnPhoto').addEventListener('click', startPhoto);
+$('#btnBake').addEventListener('click', bakeLight);
+$('#bakeOn').addEventListener('change', () => { BAKE.on = $('#bakeOn').checked; if(renderer) applyBake(); });
+for(const id of ['bakeArea', 'bakeQuality']){
+  const el = $('#' + id);
+  try{ const v = localStorage.getItem('rta.view3d.' + id); if(v && [...el.options].some(o => o.value === v)) el.value = v; }catch(e){}
+  el.addEventListener('change', () => { try{ localStorage.setItem('rta.view3d.' + id, el.value); }catch(e){} });
+}
+bakeNote();
 $('#btnSaveImg').addEventListener('click', saveImage);
 $('#photoDenoise').checked = DENOISE;
 $('#photoDenoise').addEventListener('change', () => {
@@ -1083,9 +1444,21 @@ $('#btnView3dReset').addEventListener('click', () => { if(renderer) frame(centre
 window.view3dState = () => renderer ? { children: scene.children.length, width: host.clientWidth, height: host.clientHeight,
   camera: camera.position.toArray().map(v => Math.round(v)), time, lamps: lamps ? lamps.items.length : 0,
   world: !!world, photo: !!(photo && photo.on), samples: photo && photo.on ? photo.pt.samples : 0,
-  denoised: photo && photo.on && photo.clean ? { at: photo.clean.at, ms: Math.round(photo.clean.ms || 0), ...photo.clean.info } : null } : null;
+  denoised: photo && photo.on && photo.clean ? { at: photo.clean.at, ms: Math.round(photo.clean.ms || 0), ...photo.clean.info } : null,
+  bake: { busy: BAKE.busy, on: BAKE.on, shown: !!BAKE.shown, list: BAKE.list.map(b => ({ time: b.time, area: b.area, w: b.map.width, h: b.map.height,
+          mpp: b.mpp, samples: b.samples, seconds: b.seconds })) } } : null;
 window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.assign(TIMES[n], patch); if(patch.candela) LAMP.candela = patch.candela; setTime(n); }, view: (pos, tgt) => { camera.position.set(...pos); controls.target.set(...tgt); controls.update(); poolAt = null; },
-  photo: startPhoto, stop: stopPhoto, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
+  photo: startPhoto, stop: stopPhoto,
+  bake: (area, samples) => {
+    if(area) $('#bakeArea').value = area;
+    if(samples){
+      const q = $('#bakeQuality');
+      if(![...q.options].some(o => o.value === String(samples))) q.add(new Option(`${samples} samples`, String(samples)));
+      q.value = String(samples);
+    }
+    return bakeLight();
+  },
+  baked: on => { BAKE.on = !!on; applyBake(); }, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
   // for comparisons: the path tracer's light tree on or off (off: each light as likely)
   lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
   capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi };

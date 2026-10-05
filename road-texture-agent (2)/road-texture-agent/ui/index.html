@@ -708,6 +708,20 @@
         </div>
       </section>
       <section class="panel">
+        <div class="panel-h">Baked light <small>the photo's light, live</small></div>
+        <div class="panel-b">
+          <div class="field"><label for="bakeArea">Bake</label>
+            <select id="bakeArea" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Round the view: a square of about 200 m round where the camera looks, at about 10 cm a pixel (sharp shadows). The whole place: all of it, coarser (20 cm a pixel or more on a big place)">
+              <option value="view" selected>Round the view</option><option value="whole">Whole place</option></select></div>
+          <div class="field"><label for="bakeQuality">Quality</label>
+            <select id="bakeQuality" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="How many light paths are traced per spot before the noise is cleared: more is smoother and slower">
+              <option value="32">Draft (32)</option><option value="128" selected>Good (128)</option><option value="512">Best (512)</option></select></div>
+          <button class="btn" id="btnBake" disabled title="Trace the light on the streets, sidewalks and islands as Render photo does, and keep it for the live view">Bake light</button>
+          <div class="field"><label for="bakeOn">Baked light</label><input type="checkbox" id="bakeOn" disabled style="justify-self:start;accent-color:var(--blue)" title="Ticked: the live view shows the baked light on the ground (soft shadows, bounced light, lamp pools) while you move round. Unticked: the live light"></div>
+          <div class="note" id="bakeNote"></div>
+        </div>
+      </section>
+      <section class="panel">
         <div class="panel-h">Look <small>after the render</small></div>
         <div class="panel-b">
           <select id="lookPreset" class="select-full" title="A built-in preset, a look that came with the program, or one you saved"></select>
