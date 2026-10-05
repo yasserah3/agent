@@ -1071,6 +1071,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             groups.setdefault(("paving", frames.variant_of(k) % len(tiles["sidewalk"])), []).append((vs, None, k))
 
     prims = []
+    tone_all = None
     for (part, vk), polys in sorted(groups.items()):
         if part == "paving":
             mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk],
@@ -1078,6 +1079,8 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
         else:
             mat = add_tile_material("Kerb_stone", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
+        if tone_all is None and frames.regions:
+            tone_all = frames.tone(Wh[:, 0], Wh[:, 2])          # every vertex at once, not one by one
 
         def vid(vi, owner, k):
             key = (vi, owner, k)
@@ -1089,7 +1092,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                     c = 1.0 + (float(vfac[vi]) - 1.0) * 0.5
                 else:                                          # paving: its area's layout
                     uvs.append(frames.uv(k, Wh[vi, 0], Wh[vi, 2]))
-                    c = float(frames.tone(Wh[vi, 0], Wh[vi, 2])[0]) if frames.regions else 1.0 + (float(vfac[vi]) - 1.0) * 0.5
+                    c = float(tone_all[vi]) if frames.regions else 1.0 + (float(vfac[vi]) - 1.0) * 0.5
                 col.append((c, c, c, 1.0))
             return remap[key]
 
@@ -1329,7 +1332,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
             import shapely
             from shapely.ops import unary_union
             # grown a hair, as _sidewalk_union does, so pieces with a hairline between them join
-            grown = list(shapely.buffer(np.array(parts, object), 0.001))
+            grown = list(shapely.buffer(np.array(parts, object), 0.001, quad_segs=16))   # as geometry.buffer()
             tree = shapely.STRtree(grown)
             cut = []
             for g in polys:
@@ -1470,28 +1473,42 @@ def _grid_mesh(polys, cell):
             V.append((x, y))
         return i
 
+    import shapely
     for g in polys:
-        pg = prep(g)
+        shapely.prepare(g)
         minx, miny, maxx, maxy = g.bounds
-        for ix in range(int(math.floor(minx / cell)), int(math.ceil(maxx / cell))):
-            for iy in range(int(math.floor(miny / cell)), int(math.ceil(maxy / cell))):
-                x0, y0 = ix * cell, iy * cell
-                b = box(x0, y0, x0 + cell, y0 + cell)
-                if not pg.intersects(b):
+        # the block's squares, in the same order as one by one, each tested in one
+        # call for all of them (one call per square was most of the time)
+        cells = [(ix, iy) for ix in range(int(math.floor(minx / cell)), int(math.ceil(maxx / cell)))
+                 for iy in range(int(math.floor(miny / cell)), int(math.ceil(maxy / cell)))]
+        if not cells:
+            continue
+        X0 = np.array([ix * cell for ix, _ in cells]); Y0 = np.array([iy * cell for _, iy in cells])
+        boxes = shapely.box(X0, Y0, X0 + cell, Y0 + cell)
+        hits = shapely.intersects(g, boxes)
+        inside = np.zeros(len(cells), bool)
+        inside[hits] = shapely.contains(g, boxes[hits])
+        cut = {}
+        edge = hits & ~inside
+        if edge.any():
+            cut = dict(zip(np.nonzero(edge)[0].tolist(), shapely.intersection(g, boxes[edge])))
+        for n, (ix, iy) in enumerate(cells):
+            if not hits[n]:
+                continue
+            x0, y0 = ix * cell, iy * cell
+            if inside[n]:
+                a, b2, c, d = vid(x0, y0), vid(x0 + cell, y0), vid(x0 + cell, y0 + cell), vid(x0, y0 + cell)
+                T.extend([(a, b2, c), (a, c, d)])
+                quads += 1
+                continue
+            piece = cut[n]
+            parts = piece.geoms if hasattr(piece, "geoms") else [piece]
+            for part in parts:
+                if part.geom_type != "Polygon" or part.area < 1e-6:
                     continue
-                if pg.contains(b):
-                    a, b2, c, d = vid(x0, y0), vid(x0 + cell, y0), vid(x0 + cell, y0 + cell), vid(x0, y0 + cell)
-                    T.extend([(a, b2, c), (a, c, d)])
-                    quads += 1
-                    continue
-                piece = g.intersection(b)
-                parts = piece.geoms if hasattr(piece, "geoms") else [piece]
-                for part in parts:
-                    if part.geom_type != "Polygon" or part.area < 1e-6:
-                        continue
-                    pv, pt = triangulate([part])
-                    ids = [vid(float(x), float(y)) for x, y in pv]
-                    T.extend((ids[i], ids[j], ids[k]) for i, j, k in pt)
+                pv, pt = triangulate([part])
+                ids = [vid(float(x), float(y)) for x, y in pv]
+                T.extend((ids[i], ids[j], ids[k]) for i, j, k in pt)
     return np.array(V, float), np.array(T, np.int64).reshape(-1, 3), quads
 
 
@@ -1507,21 +1524,30 @@ def _sidewalk_union(mesh):
     return unary_union([p.buffer(0.001) for p in parts]).buffer(-0.001)
 
 
+def _polygons_of(V, rings):
+    """Polygons from rows of vertex ids (all the same length), made all at once."""
+    import shapely
+    R = np.asarray(rings, np.int64)
+    if R.ndim != 2 or not len(R):
+        from shapely.geometry import Polygon
+        return np.array([Polygon([V[i] for i in r]) for r in rings], object)
+    return shapely.polygons(np.asarray(V, float)[R])
+
+
 def _sidewalk_parts(mesh):
     """The sidewalk's quads and triangles as polygons, in texture pixels."""
-    from shapely.geometry import Polygon
-    V = mesh.v
+    import shapely
     parts = []
-    for q in mesh.sw_quads:
-        pg = Polygon([V[i] for i in q])
-        if not pg.is_valid:
-            pg = pg.buffer(0)
-        if not pg.is_empty and pg.area > 0:
-            parts.append(pg)
-    for tri in getattr(mesh, "sw_tris", []):
-        pg = Polygon([V[i] for i in tri])
-        if pg.is_valid and pg.area > 0:
-            parts.append(pg)
+    if mesh.sw_quads:
+        pg = _polygons_of(mesh.v, mesh.sw_quads)
+        bad = ~shapely.is_valid(pg)
+        if bad.any():
+            pg[bad] = shapely.buffer(pg[bad], 0)
+        parts.extend(pg[~shapely.is_empty(pg) & (shapely.area(pg) > 0)])
+    tris = getattr(mesh, "sw_tris", [])
+    if tris:
+        pg = _polygons_of(mesh.v, tris)
+        parts.extend(pg[shapely.is_valid(pg) & (shapely.area(pg) > 0)])
     return parts
 
 

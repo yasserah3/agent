@@ -1767,25 +1767,33 @@ def _kerb_apron(mesh, road, scale, mpp, depth_m=1.0):
     V = np.array(mesh.v, float) / scale
     D = depth_m / mpp
 
-    def poly(ids):
-        g = Polygon(V[list(ids)])
-        return g if g.is_valid else g.buffer(0)
+    import shapely
+    from shapely.geometry import box
 
-    front = []
-    for q, f in zip(mesh.kerb_quads, mesh.kerb_facing):
-        a, b = V[q[0]], V[q[1]]
-        if np.hypot(*(b - a)) < 1e-9:
-            continue
-        f = np.asarray(f, float)
-        front.append(Polygon([a, b, b + f * D, a + f * D]).buffer(0))
-    walk = [poly(q) for q in mesh.sw_quads] + [poly(t) for t in mesh.sw_tris]
+    def polys(rings):
+        # polygons from rows of vertex ids, all at once; the invalid ones repaired
+        if not len(rings):
+            return []
+        R = np.asarray(rings, np.int64)
+        g = shapely.polygons(V[R]) if R.ndim == 2 else np.array([Polygon(V[list(r)]) for r in rings], object)
+        bad = ~shapely.is_valid(g)
+        if bad.any():
+            g[bad] = shapely.buffer(g[bad], 0)
+        return list(g)
+
+    # the strip in front of each kerb, up to depth_m deep, all at once
+    KQ = np.asarray([q[:2] for q in mesh.kerb_quads], np.int64)
+    A, B = V[KQ[:, 0]], V[KQ[:, 1]]
+    F = np.asarray(mesh.kerb_facing, float)
+    ok = np.hypot(*(B - A).T) >= 1e-9
+    A, B, F = A[ok], B[ok], F[ok]
+    front = list(shapely.buffer(shapely.polygons(np.stack([A, B, B + F * D, A + F * D], axis=1)), 0)) if len(A) else []
+    walk = polys(mesh.sw_quads) + polys(mesh.sw_tris)
     walk = [g for g in walk if not g.is_empty]
     front = [g for g in front if not g.is_empty]
     # worked out tile by tile, then joined: the same shape as the whole front
     # strip minus the road and the sidewalk, without uniting and cutting shapes
     # the size of a city (minutes on a big map)
-    import shapely
-    from shapely.geometry import box
     found = []
     if front:
         ft, wt = shapely.STRtree(front), shapely.STRtree(walk) if walk else None
@@ -1800,7 +1808,12 @@ def _kerb_apron(mesh, road, scale, mpp, depth_m=1.0):
                 m = unary_union([front[i] for i in fi]).intersection(tb)
                 if m.is_empty:
                     continue
-                m = m.difference(road)
+                # the road cut down to this tile first (a quick clip), not the whole city's
+                rt = shapely.clip_by_rect(road, tx - 1, ty - 1, tx + T + 1, ty + T + 1)
+                try:
+                    m = m.difference(rt if rt.is_valid else road)
+                except Exception:
+                    m = m.difference(road)
                 if wt is not None and not m.is_empty:
                     wi = wt.query(m)
                     if len(wi):
