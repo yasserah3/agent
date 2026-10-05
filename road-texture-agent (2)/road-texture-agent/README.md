@@ -1158,6 +1158,10 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
     shader's error, the graphics card, and whether it can draw, filter and
     blend float pictures. A single invalid pixel (not a number) is shown as
     one dark dot and never spreads.
+  - **Windows (DirectX 11)** allows a shader 16 textures at once. The path
+    tracer uses exactly 16; the light tree keeps its data in the lights'
+    texture rather than one of its own (with its own, 17 textures, the photo
+    could not render on Windows at all).
   - **Light tree**: with hundreds of lamps, each point of the picture picks
     the lights likely to light it (near, facing it, their beam towards it),
     as Cycles' light tree does, instead of any lamp at random, so night photos

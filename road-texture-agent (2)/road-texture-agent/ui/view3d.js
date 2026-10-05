@@ -777,7 +777,18 @@ function gpuInfo(){
   const dbg = gl.getExtension('WEBGL_debug_renderer_info');
   const has = n => !!gl.getExtension(n);
   return { name: String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)),
+           textures: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
            floatTarget: has('EXT_color_buffer_float'), floatLinear: has('OES_texture_float_linear'), floatBlend: has('EXT_float_blend') };
+}
+
+// what went wrong with a program, from all its logs: the errors first (the link step's,
+// on DirectX the real one), warnings only if there is nothing else
+function programError(d){
+  const logs = [d.programLog, d.fragmentShader && d.fragmentShader.log, d.vertexShader && d.vertexShader.log]
+    .map(l => String(l || '').replace(/\x00/g, '')).join('\n').split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const errors = logs.filter(l => /error/i.test(l) && !/^warning/i.test(l));
+  const rest = logs.filter(l => !/^warning/i.test(l));
+  return (errors.length ? errors : rest.length ? rest : logs).slice(0, 4).join(' ') || 'no log';
 }
 
 // a grid of pixels of a float picture: how many have light, how many are invalid,
@@ -816,7 +827,7 @@ function displayErrors(){
   for(const m of [cleanQuad && cleanQuad.material, bloom && bloom.materialHighPassFilter, look.material]){
     const prog = m && renderer.properties.get(m).currentProgram;
     const d = prog && prog.diagnostics;
-    if(d && !d.runnable) return `${m.name || m.type}: ` + String((d.fragmentShader && d.fragmentShader.log) || d.programLog || '').replace(/[\x00-\x1f]+/g, ' ').trim();
+    if(d && !d.runnable) return `${m.name || m.type}: ` + programError(d);
   }
   return null;
 }
@@ -826,7 +837,7 @@ function photoHealth(){
   const mat = photo.pt._pathTracer.material;
   const prog = renderer.properties.get(mat).currentProgram;
   const d = prog && prog.diagnostics;
-  const shader = d && !d.runnable ? String((d.fragmentShader && d.fragmentShader.log) || d.programLog || 'no log').replace(/[\x00-\x1f]+/g, ' ').trim() : null;
+  const shader = d && !d.runnable ? programError(d) : null;
   let c = null;
   try{ c = lightIn(photo.pt._pathTracer.target); }catch(e){}
   const tree = mat.defines.LIGHT_TREE !== 0;
@@ -854,9 +865,9 @@ function photoHealth(){
     return;
   }
   const g = gpuInfo();
-  const why = shader ? 'the path tracer\'s shader did not compile on this graphics card: ' + shader.split('\n').slice(0, 4).join(' ')
+  const why = shader ? 'the path tracer\'s shader did not compile on this graphics card: ' + shader
             : c.bad === c.read ? 'every pixel came out invalid (not a number)' : 'the picture came out black, with no light at all';
-  const facts = `Graphics: ${g.name}. Float pictures ${g.floatTarget ? 'yes' : 'NO'}, float filtering ${g.floatLinear ? 'yes' : 'NO'}, `
+  const facts = `Graphics: ${g.name}, ${g.textures} textures per shader. Float pictures ${g.floatTarget ? 'yes' : 'NO'}, float filtering ${g.floatLinear ? 'yes' : 'NO'}, `
               + `float blending ${g.floatBlend ? 'yes' : 'NO'}. Light tree ${tree ? 'on' : 'off'}.`;
   console.error('Render photo came out empty:', why, facts, shader || '');
   if(tree && !photo.retried){

@@ -4,6 +4,8 @@
 // are picked by their importance at each point, the sky and directional lights by
 // theirs; the environment's mean luminance is kept for it (EquirectHdrInfoUniform).
 // Without the tree (area lights, or more than four directional lights) it works as before.
+// The tree's nodes are kept in the lights' texture, after the lights: the shader then uses 16
+// textures, as the original, which is all DirectX 11 allows (17 failed to link there).
 // LIGHT_TREE (define, 1 by default) 0 compiles it out. The MIS weight of two zero pdfs is 0, not 0/0.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
@@ -2428,10 +2430,12 @@ class LightsInfoUniformStruct {
 
 	}
 
-	updateFrom( lights, iesTextures = [] ) {
+	updateFrom( lights, iesTextures = [], extra = null ) {
 
+		// extra: texels (RGBA floats) kept after the lights' own, in the same texture (the
+		// light tree's nodes): no texture of their own, as DirectX allows only 16 at once
 		const tex = this.tex;
-		const pixelCount = Math.max( lights.length * LIGHT_PIXELS, 1 );
+		const pixelCount = Math.max( lights.length * LIGHT_PIXELS + ( extra ? extra.length / 4 : 0 ), 1 );
 		const dimension = Math.ceil( Math.sqrt( pixelCount ) );
 
 		if ( tex.image.width !== dimension ) {
@@ -2607,6 +2611,7 @@ class LightsInfoUniformStruct {
 		}
 
 		this.count = lights.length;
+		if ( extra ) floatArray.set( extra, lights.length * LIGHT_PIXELS * 4 );
 
 		const hash = bufferToHash( floatArray.buffer );
 		if ( this.hash !== hash ) {
@@ -2631,20 +2636,14 @@ class LightsInfoUniformStruct {
 // to how much it is likely to light it; the sun (directional lights) and the sky
 // are picked by their own importance next to the tree. Used when there are no
 // area lights and at most four directional lights.
-const TREE_NODES_PER_ROW = 256;
 class LightTreeUniform {
 
 	constructor() {
 
-		const tex = new DataTexture( new Float32Array( 16 ), 4, 1 );
-		tex.format = RGBAFormat;
-		tex.type = FloatType;
-		tex.wrapS = ClampToEdgeWrapping;
-		tex.wrapT = ClampToEdgeWrapping;
-		tex.generateMipmaps = false;
-		tex.minFilter = NearestFilter;
-		tex.magFilter = NearestFilter;
-		this.tex = tex;
+		// the nodes go into the lights' texture after the lights (see LightsInfoUniformStruct):
+		// data, and offset the texel where they start
+		this.data = new Float32Array( 0 );
+		this.offset = 0;
 		this.enabled = 0;
 		this.root = - 1;
 		this.distantCount = 0;
@@ -2749,27 +2748,15 @@ class LightTreeUniform {
 
 		// four texels a node: min and energy; max and its light (-1: not a leaf); the cone's axis and
 		// cos theta_o; sin theta_o, cos theta_e and the children
-		const tex = this.tex;
-		const width = TREE_NODES_PER_ROW * 4, height = Math.max( 1, Math.ceil( nodes.length / TREE_NODES_PER_ROW ) );
-		if ( tex.image.width !== width || tex.image.height !== height ) {
-
-			tex.dispose();
-			tex.image.data = new Float32Array( width * height * 4 );
-			tex.image.width = width;
-			tex.image.height = height;
-
-		}
-
-		const data = tex.image.data;
-		data.fill( 0 );
+		const data = this.data.length === nodes.length * 16 ? this.data : new Float32Array( nodes.length * 16 );
 		nodes.forEach( ( n, i ) => {
 
-			const o = ( Math.floor( i / TREE_NODES_PER_ROW ) * width + ( i % TREE_NODES_PER_ROW ) * 4 ) * 4;
 			data.set( [ n.min.x, n.min.y, n.min.z, n.energy, n.max.x, n.max.y, n.max.z, n.leaf,
-				n.axis.x, n.axis.y, n.axis.z, Math.cos( n.thetaO ), Math.sin( n.thetaO ), Math.cos( n.thetaE ), n.left, n.right ], o );
+				n.axis.x, n.axis.y, n.axis.z, Math.cos( n.thetaO ), Math.sin( n.thetaO ), Math.cos( n.thetaE ), n.left, n.right ], i * 16 );
 
 		} );
-		tex.needsUpdate = true;
+		this.data = data;
+		this.offset = lights.length * LIGHT_PIXELS;
 
 	}
 
@@ -4423,7 +4410,7 @@ const lights_struct = /* glsl */`
 	// the light tree (see LightTreeUniform)
 	struct LightTree {
 
-		sampler2D tex;
+		int offset;
 		int enabled;
 		int root;
 		int distantCount;
@@ -6884,7 +6871,7 @@ const direct_light_contribution_function = /*glsl*/`
 	// ---- light tree (see LightTreeUniform)
 	vec4 lightTreeTexel( int node, int k ) {
 
-		return texelFetch( lightTree.tex, ivec2( ( ( node & 255 ) << 2 ) + k, node >> 8 ), 0 );
+		return texelFetch1D( lights.tex, uint( lightTree.offset + node * 4 + k ) );
 
 	}
 
@@ -9223,8 +9210,8 @@ class WebGLPathTracer {
 
 		const lights = getLights( scene );
 		const iesTextures = getIesTextures( lights );
-		material.lights.updateFrom( lights, iesTextures );
 		material.lightTree.updateFrom( lights );
+		material.lights.updateFrom( lights, iesTextures, material.lightTree.data );
 		material.iesProfiles.setTextures( renderer, iesTextures );
 		this.reset();
 
