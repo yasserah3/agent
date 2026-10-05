@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -78,6 +78,8 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
     };
   }
   window.trackJob = trackJob;
+  // a line from the 3D tab (ui/view3d.js) for the console
+  window.addEventListener('rta-log', e => log(String(e.detail), e.detail && e.detail.kind));
 
   async function api(path, opts){
     let job = null;
@@ -133,8 +135,9 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
   // the materials of streets, sidewalks and kerbs: your trained tiles, or one of the
   // scanned library's (app/scans). Each part has a chip; clicking it opens a choice of
   // balls with their names. The choice is kept in this browser for the next time.
-  const MAT = { lib: null, parts: { street: '#matStreet', sidewalk: '#matSidewalk', kerb: '#matKerb' },
-                titles: { street: 'Street surface', sidewalk: 'Sidewalk surface', kerb: 'Kerb surface' },
+  // squares: the blocks and islands between the roads, paved as the sidewalks unless chosen
+  const MAT = { lib: null, parts: { street: '#matStreet', sidewalk: '#matSidewalk', kerb: '#matKerb', square: '#matSquare' },
+                titles: { street: 'Street surface', sidewalk: 'Sidewalk surface', kerb: 'Kerb surface', square: 'Squares, blocks and islands' },
                 open: null };
   const KIND_NAME = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete' };
   try{
@@ -145,11 +148,16 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
     }
   }catch(_){}
   const keepMaterials = () => { try{ localStorage.setItem('rta.materials', JSON.stringify({
-    street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value, tone: $('#matTone').checked })); }catch(_){} };
+    street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value, square: $('#matSquare').value,
+    tone: $('#matTone').checked })); }catch(_){} };
   $('#matTone').addEventListener('change', () => { keepMaterials(); window.dispatchEvent(new Event('materials')); });
   const yourBall = part => MAT.lib && MAT.lib.yours && MAT.lib.yours[part] ? API + `/api/materials/tiles/${part}/ball?v=${MAT.lib.yours[part]}` : null;
   function materialOf(part){
     const v = $(MAT.parts[part]).value;
+    if(part === 'square' && (v === 'same' || v === 'tiles')){
+      const sw = materialOf('sidewalk');
+      return { id: 'same', name: 'Same as sidewalks', ball: sw.ball, same: sw };
+    }
     const m = MAT.lib && MAT.lib.materials.find(x => x.id === v);
     return m ? { id: m.id, name: m.name, ball: API + `/api/materials/${m.id}/ball`, m } : { id: 'tiles', name: 'Your tiles', ball: yourBall(part) };
   }
@@ -160,14 +168,16 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
       const img = $('img', chip);
       if(cur.ball){ img.src = cur.ball; img.style.visibility = ''; } else { img.removeAttribute('src'); }
       chip.title = cur.m ? `${cur.m.title} by ${(cur.m.authors || []).join(', ')}, Poly Haven, ${cur.m.licence}; ${cur.m.size_m[0]} m across. Click to change`
-                         : 'Your material tiles, built from your training. Click to change';
+                 : cur.same ? `Paved as the sidewalks (${cur.same.name}). Click to give the squares, blocks and islands their own, such as cobblestone fans`
+                 : 'Your material tiles, built from your training. Click to change';
     }
   }
   async function loadMaterials(){
     try{ MAT.lib = await api('/api/materials'); }catch(_){ return; }
     // a kept choice that is no longer in the library goes back to your tiles
     for(const [part, id] of Object.entries(MAT.parts))
-      if($(id).value !== 'tiles' && !MAT.lib.materials.some(m => m.id === $(id).value && (MAT.lib.parts[part] || []).includes(m.kind))) $(id).value = 'tiles';
+      if(!['tiles', 'same'].includes($(id).value) && !MAT.lib.materials.some(m => m.id === $(id).value && (MAT.lib.parts[part] || []).includes(m.kind)))
+        $(id).value = part === 'square' ? 'same' : 'tiles';
     showChips();
   }
   function closeMatPop(){ $('#matPop').hidden = true; MAT.open = null; }
@@ -193,12 +203,16 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
     };
     const group = text => { const g = document.createElement('div'); g.className = 'mp-group'; g.textContent = text; grid.appendChild(g); };
     group('Yours');
-    card('tiles', 'Your tiles', 'from your training', yourBall(part),
+    if(part === 'square'){
+      const sw = materialOf('sidewalk');
+      card('same', 'Same as sidewalks', sw.name, sw.ball, 'The blocks and islands paved as the sidewalks, their paving running on from them');
+    }else card('tiles', 'Your tiles', 'from your training', yourBall(part),
          yourBall(part) ? 'Your material tiles, built from your training' : 'No material tiles yet: train, or build them in the Memory tab');
     for(const kind of (MAT.lib ? MAT.lib.parts[part] || [] : [])){
       const list = MAT.lib.materials.filter(m => m.kind === kind);
       if(!list.length) continue;
       group(`Scanned ${(KIND_NAME[kind] || kind).toLowerCase()}`);
+      list.sort((a, b) => (b.pattern === 'fan') - (a.pattern === 'fan'));      // cobblestone fans first
       for(const m of list) card(m.id, m.name, `${m.size_m[0]} m across`, API + `/api/materials/${m.id}/ball`,
                                 `${m.title} by ${(m.authors || []).join(', ')}, Poly Haven, ${m.licence}`);
     }
@@ -219,8 +233,9 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
   addEventListener('pointerdown', e => { if(MAT.open && !e.target.closest('#matPop') && !e.target.closest('.matChip')) closeMatPop(); });
   addEventListener('resize', () => { if(MAT.open) closeMatPop(); });
   window.materialChoice = () => ({ street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value,
+                                   square: $('#matSquare').value,
                                    match_tone: $('#matTone').checked, names: { street: materialOf('street').name,
-                                   sidewalk: materialOf('sidewalk').name, kerb: materialOf('kerb').name } });
+                                   sidewalk: materialOf('sidewalk').name, kerb: materialOf('kerb').name, square: materialOf('square').name } });
 
   /* ------------------------------------------------ tabs */
   $$('.tab').forEach(t => t.addEventListener('click', () => {
@@ -847,7 +862,8 @@ const UI_VERSION = '2026.10.05-kerb1';   // must match VERSION in server.py
           mesh_detail: $('#meshDetail').value,
           blocks: $('#blocksOn').checked,
           surface_detail: $('#surfDetail').value,
-          materials: { street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value },
+          materials: { street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value,
+                       square: $('#matSquare').value },
           match_tone: $('#matTone').checked,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,

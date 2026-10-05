@@ -97,6 +97,14 @@
   .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
   .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
   .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .sky-list{ display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:2px 0 8px; }
+  .sky-card{ display:flex; flex-direction:column; gap:3px; padding:4px; border-radius:6px; border:1px solid var(--line); background:var(--field);
+             color:inherit; font:inherit; text-align:left; cursor:pointer; min-width:0; }
+  .sky-card:hover{ border-color:var(--blue); }
+  .sky-card[aria-pressed="true"]{ border-color:var(--blue); box-shadow:0 0 0 1px var(--blue) inset; }
+  .sky-card .sky-thumb{ height:34px; border-radius:4px; background-size:cover; background-position:center; }
+  .sky-card b{ font-weight:500; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sky-card small{ color:var(--muted); font-size:11px; margin-top:-3px; }
   .matChips{ display:grid; gap:6px; margin:6px 0 4px; }
   .matChip{ display:grid; grid-template-columns:40px 1fr auto; align-items:center; gap:10px; width:100%; padding:5px 8px; border-radius:6px;
             background:var(--panel-2); border:1px solid var(--line); color:var(--ink); cursor:pointer; text-align:left; }
@@ -516,10 +524,11 @@
           <div style="margin-top:12px;font-weight:600;font-size:13px">Materials</div>
           <div class="matChips">
             <button type="button" class="matChip" data-part="street" title="Choose the street surface"><img alt=""><span class="mc-t"><small>Streets</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
-            <button type="button" class="matChip" data-part="sidewalk" title="Choose the sidewalk surface (blocks and islands use it too)"><img alt=""><span class="mc-t"><small>Sidewalks</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
+            <button type="button" class="matChip" data-part="sidewalk" title="Choose the sidewalk surface (blocks and islands too, unless they have their own below)"><img alt=""><span class="mc-t"><small>Sidewalks</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
             <button type="button" class="matChip" data-part="kerb" title="Choose the kerb surface (bridge decks use it too)"><img alt=""><span class="mc-t"><small>Kerbs</small><b>Your tiles</b></span><span class="mc-c">Change</span></button>
+            <button type="button" class="matChip" data-part="square" title="Choose the surface of the squares, blocks and islands between the roads"><img alt=""><span class="mc-t"><small>Squares, blocks and islands</small><b>Same as sidewalks</b></span><span class="mc-c">Change</span></button>
           </div>
-          <input type="hidden" id="matStreet" value="tiles"><input type="hidden" id="matSidewalk" value="tiles"><input type="hidden" id="matKerb" value="tiles">
+          <input type="hidden" id="matStreet" value="tiles"><input type="hidden" id="matSidewalk" value="tiles"><input type="hidden" id="matKerb" value="tiles"><input type="hidden" id="matSquare" value="same">
           <div class="field"><label for="matTone">Match the tone of your tiles</label><input type="checkbox" id="matTone" style="justify-self:start;accent-color:var(--blue)" title="A scanned material takes on the mean colour of what it replaces, so it fits the generated texture's tone. Unticked: its own colour"></div>
           <div class="note" style="margin:-2px 0 6px" id="matNote">Generate texture lays the street surface into the texture; its Top view and the 3D tab show streets, sidewalks and kerbs.</div>
           <button class="btn secondary" id="btnGenJunctions" disabled>Detect junctions</button>
@@ -679,6 +688,23 @@
         </div>
       </section>
       <section class="panel">
+        <div class="panel-h">Sky <small>physical or a photographed HDRI</small></div>
+        <div class="panel-b">
+          <div class="sky-list" id="skyList" role="listbox" aria-label="Sky"></div>
+          <div class="field"><label for="skyRotation">Rotation <span id="skyRotationVal" class="mono" style="color:var(--faint)">0°</span></label><input type="range" id="skyRotation" min="0" max="359" value="0" disabled title="Turns the sky round, its sun and its shadows with it. Double-click: back to 0"></div>
+          <div class="field"><label for="skyStrength">Strength <span id="skyStrengthVal" class="mono" style="color:var(--faint)">0 EV</span></label><input type="range" id="skyStrength" min="-30" max="30" value="0" disabled title="How bright the sky and its sun are, in stops: +1 twice as bright, -1 half. Double-click: back to 0"></div>
+          <div class="field" id="skyKindRow" hidden><label for="skyKind">Light like</label>
+            <select id="skyKind" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="An HDR picture does not say how bright its sky really was: what kind of light it is decides the exposure and whether the street lamps are on">
+              <option value="day">Day</option><option value="overcast">Overcast</option><option value="sunset">Sunset or dawn</option><option value="night">Night</option></select></div>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnSkyImport" title="Use your own sky: an equirectangular (2:1) panorama, .hdr or .exr (or a .jpg or .png). Kept in the workspace">Import HDRI…</button>
+            <button class="btn secondary" id="btnSkyDelete" disabled title="Remove this sky of yours from the workspace">Delete</button>
+          </div>
+          <input type="file" id="skyFile" accept=".hdr,.exr,.jpg,.jpeg,.png" hidden>
+          <div class="note" id="skyNote"></div>
+        </div>
+      </section>
+      <section class="panel">
         <div class="panel-h">Time of day</div>
         <div class="panel-b">
           <div class="btn-row three">
@@ -686,7 +712,7 @@
             <button class="btn secondary toggle" data-time3d="day" aria-pressed="true" title="High sun, clear sky with a few clouds">Day</button>
             <button class="btn secondary toggle" data-time3d="night" aria-pressed="false" title="Moonlight and stars, the street lamps lighting the streets">Night</button>
           </div>
-          <div class="note">The sun, sky and shadows change with the time; at dawn and at night the street lamps are on.</div>
+          <div class="note">The sun, sky and shadows change with the time; at dawn and at night the street lamps are on. With an HDRI sky, the sky sets the light: a time here goes back to the physical sky.</div>
         </div>
       </section>
       <section class="panel">
@@ -695,6 +721,8 @@
           <div class="field"><label for="sunStrength">Sun strength <span id="sunStrengthVal" class="mono" style="color:var(--faint)">100%</span></label><input type="range" id="sunStrength" min="0" max="200" value="100" title="How bright the sun (or the moon at night) is"></div>
           <div class="field"><label for="lampStrength">Street lamps <span id="lampStrengthVal" class="mono" style="color:var(--faint)">100%</span></label><input type="range" id="lampStrength" min="0" max="300" value="100" title="How bright the street lamps are when they are on (at dawn and at night). 0: off"></div>
           <div class="field"><label for="wetRoads">Wet roads <span id="wetRoadsVal" class="mono" style="color:var(--faint)">0%</span></label><input type="range" id="wetRoads" min="0" max="100" value="0" title="How wet the streets, sidewalks and kerbs are: darker, and glossy so the lamps and the sky shine in them. 0: dry"></div>
+          <div class="field"><label for="puddles">Puddles <span id="puddlesVal" class="mono" style="color:var(--faint)">40%</span></label><input type="range" id="puddles" min="0" max="100" value="40" title="Standing water on wet streets (live view): patches smooth as a mirror, reflecting the buildings, lamps and sky. Shows when Wet roads is above 0"></div>
+          <div class="field"><label for="liveMirror">Live reflections</label><input type="checkbox" id="liveMirror" checked style="justify-self:start;accent-color:var(--blue)" title="On wet streets the live view mirrors the scene in the water (buildings, lamps, sky), drawing it a second time at half size. Unticked: only the sky shines in them (faster). Render photo traces its own reflections either way"></div>
           <div class="field"><label for="lampColour">Lamp colour</label><input type="color" id="lampColour" value="#ffcf96" title="The colour of the street lamps' light" style="justify-self:start;width:52px;height:26px;padding:0;border:1px solid var(--line);background:none"></div>
           <div class="note">Kept for the next time. They also apply to Render photo.</div>
         </div>
@@ -714,10 +742,13 @@
           <div class="field"><label for="bakeArea">Bake</label>
             <select id="bakeArea" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="What you see: the ground in the view now, as sharp as its size allows (10 cm a pixel close up, coarser from high above). The whole place: all of it, coarser (20 cm a pixel or more on a big place)">
               <option value="view" selected>What you see</option><option value="whole">Whole place</option></select></div>
+          <div class="field"><label for="bakeWalls">Walls and objects</label>
+            <select id="bakeWalls" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Also bake the light on walls, kerb faces, lamp poles and your objects, traced from where the camera stands: what you see now, or all round you (four views, about four times longer). Moving away, what those views did not see keeps the live light. None: only the ground, from above">
+              <option value="view" selected>What you see</option><option value="around">All round you (4 views)</option><option value="none">None (the ground only)</option></select></div>
           <div class="field"><label for="bakeQuality">Quality</label>
             <select id="bakeQuality" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="How many light paths are traced per spot before the noise is cleared: more is smoother and slower">
               <option value="32">Draft (32)</option><option value="128" selected>Good (128)</option><option value="512">Best (512)</option></select></div>
-          <button class="btn" id="btnBake" disabled title="Trace the light on the streets, sidewalks and islands as Render photo does, and keep it for the live view">Bake light</button>
+          <button class="btn" id="btnBake" disabled title="Trace the light on the streets, sidewalks and islands (and walls and objects, as chosen) as Render photo does, and keep it for the live view">Bake light</button>
           <div class="field"><label for="bakeOn">Baked light</label><input type="checkbox" id="bakeOn" disabled style="justify-self:start;accent-color:var(--blue)" title="Ticked: the live view shows the baked light on the ground (soft shadows, bounced light, lamp pools) while you move round. Unticked: the live light"></div>
           <div class="note" id="bakeNote"></div>
         </div>
@@ -734,6 +765,17 @@
             <div style="display:flex;gap:4px;align-items:center"><select id="lookLut" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="A colour lookup table: a film emulation or a colour grade from a .cube file or a Hald CLUT picture. Import one with Import"><option value="">None</option></select>
             <button class="btn secondary" id="btnLutDelete" disabled title="Remove this LUT of yours from the workspace" style="width:auto;margin:0;padding:4px 8px">×</button></div></div>
           <div id="lookLutMix"></div>
+          <div style="margin-top:10px;font-weight:600;font-size:13px">Depth of field</div>
+          <div class="field"><label for="camLens">Lens</label>
+            <select id="camLens" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="The camera's focal length on a 35 mm frame: a wider lens sees more and keeps more sharp, a longer one sees less (zoomed in) and blurs more behind and before the focus. Applies to the live view and Render photo">
+              <option value="0">25 mm (the view as it was)</option><option value="18">18 mm, very wide</option><option value="35">35 mm</option><option value="50">50 mm, as the eye</option><option value="85">85 mm, portrait</option><option value="135">135 mm, telephoto</option></select></div>
+          <div class="field"><label for="dofOn">Blur by distance</label><input type="checkbox" id="dofOn" style="justify-self:start;accent-color:var(--blue)" title="What is at the focus distance stays sharp; nearer and further is blurred, as a camera lens does. Render photo traces the lens itself, with the same settings"></div>
+          <div class="field"><label for="dofFstop">Aperture <span id="dofFstopVal" class="mono" style="color:var(--faint)">f/2.8</span></label><input type="range" id="dofFstop" min="0" max="100" value="75" title="The lens opening, as a camera's f-stop: a small number (f/1.4) blurs a lot, a large one (f/16) keeps more sharp. Below f/1 is more than real lenses do: towards f/0.005 a whole street looks like a model (a miniature look). The blur also grows with a longer Lens"></div>
+          <div class="field"><label for="dofFocus">Focus</label>
+            <select id="dofFocus" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Where the lens is focused">
+              <option value="auto">On the middle of the view</option><option value="fixed">At a fixed distance</option></select></div>
+          <div class="field"><label for="dofDist">Distance (m) <span id="dofFocusVal" class="mono" style="color:var(--faint)"></span></label><input type="number" id="dofDist" min="0.3" step="0.5" value="25" title="The focus distance in metres (Focus: at a fixed distance). Pick focus sets it by clicking a spot in the view"></div>
+          <button class="btn secondary" id="btnDofPick" title="Click a spot in the view: the lens focuses at its distance">Pick focus in the view</button>
           <div class="btn-row">
             <button class="btn secondary" id="btnLookImport" title="Import a LUT (.cube, or a Hald CLUT .png) or a look file (.look.json) downloaded from here">Import…</button>
             <button class="btn secondary" id="btnLookDownload" title="Download this look as a file (its LUT inside), to keep or to share">Download</button>

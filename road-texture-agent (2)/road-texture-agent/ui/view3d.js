@@ -17,6 +17,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
@@ -25,7 +27,7 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { buildSkyMaps } from './sky_blender.js';
 import { Denoiser } from './denoise.js';
-import { GradePass, lookPanel } from './look.js';
+import { GradePass, lookPanel, DofPass } from './look.js';
 
 const $ = s => document.querySelector(s);
 const host = $('#view3d'), msg = $('#view3dMsg');
@@ -52,7 +54,7 @@ const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emis
 
 // the Light panel: the sun's (or moon's) strength, the street lamps' brightness
 // and colour, and how wet the streets are, kept in this browser for the next time
-const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0 };
+const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0, puddles: 0.4, mirror: true };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
 // the Ground plane panel: the land round the place, moved, turned and sized (metres);
@@ -73,6 +75,11 @@ let renderer = null, scene, camera, controls, composer, renderPass, gtao, bloom,
 // the Look panel's pass: from the scene's light to the finished picture (film response, then the
 // adjustments), for the live view and the photo alike
 const look = new GradePass();
+// the Look panel's depth of field (see the section on it below)
+const dof = new DofPass();
+const DOF = { on: false, fstop: 2.8, focus: 'auto', distance: 25, lens: 0 };
+try{ Object.assign(DOF, JSON.parse(localStorage.getItem('rta.view3d.dof') || '{}')); }catch(e){}
+const saveDof = () => { try{ localStorage.setItem('rta.view3d.dof', JSON.stringify(DOF)); }catch(e){} };
 let envScene, pmrem, envRT = null, nightTex = null, stars = null, ground, skyNow = null, skyToken = 0, sunBase = 1;
 let sun, hemi, world = null, lamps = null, time = 'day', radius = 300, centre = new THREE.Vector3();
 let visible = false, running = false, poolAt = null, photo = null, busy = false;
@@ -96,6 +103,7 @@ function init(){
 
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(45, 1, 0.5, 8000);
+  applyLens();
   // left drag: orbit, right drag (or Shift + drag): pan, wheel: zoom
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -149,7 +157,8 @@ function init(){
   hp.fragmentShader = hp.fragmentShader.replace('vec4 texel = texture2D( tDiffuse, vUv );',
     'vec4 texel = texture2D( tDiffuse, vUv );\n' + SANE_GLSL.replace(/c\b/g, 'texel.rgb'));
   hp.needsUpdate = true;
-  composer.addPass(renderPass); composer.addPass(gtao); composer.addPass(bloom); composer.addPass(look);
+  composer.addPass(renderPass); composer.addPass(gtao); composer.addPass(dof); composer.addPass(bloom); composer.addPass(look);
+  dof.depth = gtao.depthTexture; dof.camera = camera; dof.enabled = DOF.on;
   // the pools of lamp light are painted on, not surfaces: left out of the contact shadows
   const hide = gtao._overrideVisibility.bind(gtao);
   gtao._overrideVisibility = function(){
@@ -159,7 +168,9 @@ function init(){
 
   setTime(time, false);
   // the other skies are worked out meanwhile, so changing the time is quick
-  for(const t of Object.values(TIMES)) if(t.sky) skyFor(t);
+  for(const t of Object.values(TIMES)) if(t.sky && !t.hdri) skyFor(t);
+  // the HDRI sky in use last time, once the list is here
+  if(SKY.id !== 'physical') skiesReady.then(() => useSky(SKY.id, false));
   frame(new THREE.Vector3(), 250);
   new ResizeObserver(resize).observe(host);
   return true;
@@ -176,6 +187,14 @@ function placeGround(){
   ground.material.color.set(GROUND.colour || TIMES[time].ground);
 }
 
+// the Look panel's Lens: the camera's focal length on a 35 mm frame (0: the 45 degree view it
+// always had, about 25 mm)
+function applyLens(){
+  if(!camera) return;
+  if(DOF.lens) camera.setFocalLength(DOF.lens); else camera.fov = 45;
+  camera.updateProjectionMatrix();
+}
+
 function resize(){
   const w = host.clientWidth, h = host.clientHeight;
   if(!renderer || !w || !h) return;
@@ -184,7 +203,7 @@ function resize(){
   renderer.setSize(w, h);
   composer.setSize(w, h);
   camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  applyLens();                                                         // the same lens at the new shape
   if(photo && photo.on) stopPhoto('The view changed size: back to the live view.');
 }
 
@@ -447,6 +466,27 @@ function setTime(name, render = true){
   if(lamps) lampLevel(t.lamps);
   applyBake();                                                        // this time's bake, if there is one
   if(render) poolAt = null;
+  if(t.hdri && hdri){
+    // an HDRI sky: its picture, its light from all round, its sun, turned and as strong as set
+    const h = hdri, s = h.scale * Math.pow(2, SKY.strength), r = THREE.MathUtils.degToRad(SKY.rotation);
+    skyNow = { plain: h.env, disc: h.bg.texture };                     // the photo and the bake trace these
+    scene.background = h.bg.texture; scene.backgroundIntensity = s;
+    scene.environment = h.pmrem.texture; scene.environmentIntensity = s;
+    scene.backgroundRotation.set(0, r, 0); scene.environmentRotation.set(0, r, 0);
+    scene.fog = new THREE.FogExp2(new THREE.Color().setRGB(h.horizon[0] * s, h.horizon[1] * s, h.horizon[2] * s, THREE.LinearSRGBColorSpace), t.fog[1]);
+    const y = h.sun.Y || 1;
+    sun.color.setRGB(h.sun.rgb[0] / y, h.sun.rgb[1] / y, h.sun.rgb[2] / y, THREE.LinearSRGBColorSpace);
+    sunBase = t.elev > -1 ? h.sun.Y * s : 0;                            // a sun under the horizon gives no light
+    sun.intensity = sunBase * LIGHT.sun;
+    // exposed as the time of day it stands for (Strength then brightens or darkens it)
+    const kind = SKY_KINDS[h.kind] || SKY_KINDS.day;
+    const exposure = kind.exposure || kind.bias * Math.PI / Math.max(h.level * h.scale, 1e-6);
+    renderer.toneMappingExposure = exposure;
+    setBloom(t, exposure);
+    msg.textContent = '';
+    return;
+  }
+  scene.backgroundRotation.set(0, 0, 0); scene.environmentRotation.set(0, 0, 0);
   if(!t.sky){
     // night: the moon, and the night sky's light from all round
     skyNow = null;
@@ -517,6 +557,236 @@ function fitShadow(){
   sc.updateProjectionMatrix();
 }
 
+// ----------------------------------------------------------------- HDRI skies
+// Instead of the physical sky, a photographed sky (an HDRI): the ones that come with the
+// program (ui/skies, CC0 from Poly Haven) or your own (.hdr, .exr, or a .jpg or .png
+// panorama). What the camera sees is the sharp picture (4k), its light the HDR: the sun
+// in it is found (the brightest spot, less the sky round it) and becomes the sun's light
+// with its shadows, the rest lights the scene from all round. HDR pictures do not say how
+// bright they really are, so each kind of sky is brought to the light of the time of day
+// it stands for (a clear day, dusk), and night skies kept dim under the street lamps.
+// Rotation turns the sky (and its sun) round; Strength makes it brighter or darker.
+const SKY_KINDS = {
+  day:      { label: 'Day', level: 139.7, bias: 0.9, lamps: 0, bloom: TIMES.day.bloom, fog: TIMES.day.fog[1], ground: TIMES.day.ground },
+  overcast: { label: 'Overcast', level: 45, bias: 0.5, lamps: 0, bloom: [0.1, 0.4, 6.0], fog: 0.0005, ground: 0x56604a },
+  sunset:   { label: 'Sunset or dawn', level: 8.28, bias: 0.4, lamps: 0.6, bloom: TIMES.dawn.bloom, fog: TIMES.dawn.fog[1], ground: TIMES.dawn.ground },
+  night:    { label: 'Night', skyY: 0.02, exposure: 0.9, lamps: 1, bloom: TIMES.night.bloom, fog: TIMES.night.fog[1], ground: TIMES.night.ground },
+};
+// the sky in use ('physical': Blender's, by the time of day), how far it is turned and how strong
+const SKY = { id: 'physical', rotation: 0, strength: 0 };
+try{ Object.assign(SKY, JSON.parse(localStorage.getItem('rta.view3d.sky') || '{}')); }catch(e){}
+const saveSky = () => { try{ localStorage.setItem('rta.view3d.sky', JSON.stringify(SKY)); }catch(e){} };
+let skyList = [], hdri = null, hdriLoading = null, skyQuad = null;
+
+// a sky picture into a picture of the light (linear, half floats), w x h: the sharp picture
+// unsqueezed (mode 0, its k), an HDR as it is (1), or an ordinary photo from sRGB (2); each
+// pixel the average of 4 x 4 samples, so a larger picture made smaller keeps its light
+function skyTarget(src, mode, k, w, h, type = THREE.HalfFloatType){
+  if(!skyQuad) skyQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, depthTest: false, depthWrite: false,
+    uniforms: { map: { value: null }, mode: { value: 0 }, k: { value: 1 }, texel: { value: new THREE.Vector2() } },
+    vertexShader: 'precision highp float; uniform mat4 modelViewMatrix; uniform mat4 projectionMatrix; in vec3 position; in vec2 uv; out vec2 vUv;\n'
+      + 'void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: `precision highp float; uniform sampler2D map; uniform int mode; uniform float k; uniform vec2 texel; in vec2 vUv; out vec4 outColor;
+      vec3 light(vec2 at){
+        vec3 c = texture(map, vec2(fract(at.x), clamp(at.y, 0.0, 1.0))).rgb;
+        if(mode == 0){ vec3 t = min(pow(c, vec3(2.2)), vec3(0.9995)); return t / (1.0 - t) / k; }
+        if(mode == 2) return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+        return c;
+      }
+      void main(){
+        vec3 s = vec3(0.0);
+        for(int y = 0; y < 4; y++) for(int x = 0; x < 4; x++) s += light(vUv + (vec2(x, y) - 1.5) / 4.0 * texel);
+        s /= 16.0;
+        if(any(isnan(s)) || any(isinf(s))) s = vec3(0.0);
+        outColor = vec4(clamp(s, 0.0, 6.0e4), 1.0);
+      }` }));
+  const rt = new THREE.WebGLRenderTarget(w, h, { type, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+                                                 generateMipmaps: false, wrapS: THREE.RepeatWrapping });
+  rt.texture.mapping = THREE.EquirectangularReflectionMapping;
+  rt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+  const u = skyQuad.material.uniforms;
+  u.map.value = src; u.mode.value = mode; u.k.value = k; u.texel.value.set(1 / w, 1 / h);
+  const keep = renderer.getRenderTarget();
+  renderer.setRenderTarget(rt); skyQuad.render(renderer); renderer.setRenderTarget(keep);
+  return rt;
+}
+
+// what the sky's light is: the sun (its direction, colour and the light it gives a surface
+// facing it), the rest of the sky without it (to light from all round), the light on a level
+// surface, the colour just above the horizon. data: RGBA floats, the bottom row first
+function analyseSky(data, W, H){
+  const lat = j => ((j + 0.5) / H - 0.5) * Math.PI;
+  const dir = (i, j) => { const a = ((i + 0.5) / W - 0.5) * 2 * Math.PI, l = lat(j);
+                          return [Math.cos(a) * Math.cos(l), Math.sin(l), Math.sin(a) * Math.cos(l)]; };
+  const dOmega = j => (2 * Math.PI / W) * (Math.PI / H) * Math.cos(lat(j));
+  const Y = k => 0.2126 * data[k] + 0.7152 * data[k + 1] + 0.0722 * data[k + 2];
+  // the brightest spot, from a little under the horizon (a setting sun) up
+  let best = -1, bi = 0, bj = 0;
+  for(let j = Math.floor(H * 0.48); j < H; j++) for(let i = 0; i < W; i++){
+    const y = Y((j * W + i) * 4);
+    if(y > best){ best = y; bi = i; bj = j; }
+  }
+  const d0 = dir(bi, bj), band = Math.ceil(20 / 180 * H) + 1;
+  const near = [];                                           // [k, cos of the angle to the spot, j, i]
+  for(let j = Math.max(0, bj - band); j < Math.min(H, bj + band); j++) for(let i = 0; i < W; i++){
+    const d = dir(i, j), c = d[0] * d0[0] + d[1] * d0[1] + d[2] * d0[2];
+    if(c > Math.cos(THREE.MathUtils.degToRad(20))) near.push([(j * W + i) * 4, c, j, i]);
+  }
+  // the sky round it (12 to 20 degrees off), the darker 60%: what is left without the sun
+  const ring = near.filter(p => p[1] < Math.cos(THREE.MathUtils.degToRad(12))).map(p => p[0]).sort((a, b) => Y(a) - Y(b));
+  const keepN = Math.max(1, Math.floor(ring.length * 0.6)), bg = [0, 0, 0];
+  for(let n = 0; n < keepN; n++) for(let c = 0; c < 3; c++) bg[c] += data[ring[n] + c] / keepN;
+  const bgY = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
+  const env = data.slice();
+  const sunRGB = [0, 0, 0], sd = [0, 0, 0];
+  for(const [k, c, j, i] of near){
+    if(c < Math.cos(THREE.MathUtils.degToRad(12)) || Y(k) < 1.5 * bgY) continue;
+    const w = dOmega(j), d = dir(i, j);
+    let ey = 0;
+    for(let ch = 0; ch < 3; ch++){
+      const ex = Math.max(data[k + ch] - bg[ch], 0);
+      sunRGB[ch] += ex * w; env[k + ch] = data[k + ch] - ex;
+      ey += [0.2126, 0.7152, 0.0722][ch] * ex;
+    }
+    for(let a = 0; a < 3; a++) sd[a] += ey * w * d[a];
+  }
+  const sunY = 0.2126 * sunRGB[0] + 0.7152 * sunRGB[1] + 0.0722 * sunRGB[2];
+  const sl = Math.hypot(...sd) || 1, sdir = sunY > 0 ? sd.map(v => v / sl) : d0;
+  // the rest of the sky's light on a level surface, its middle brightness, the horizon's colour
+  let skyLevel = 0;
+  const ups = [], hz = Array.from({ length: 16 }, () => [0, 0, 0, 0]);
+  for(let j = Math.floor(H / 2); j < H; j++){
+    const l = lat(j), w = dOmega(j) * Math.sin(l);
+    for(let i = 0; i < W; i++){
+      const k = (j * W + i) * 4, y = 0.2126 * env[k] + 0.7152 * env[k + 1] + 0.0722 * env[k + 2];
+      skyLevel += y * w;
+      if((i & 3) === 0) ups.push(y);
+      if(l > THREE.MathUtils.degToRad(0.5) && l < THREE.MathUtils.degToRad(3)){
+        const h = hz[Math.floor(i / W * 16)];
+        for(let c = 0; c < 3; c++) h[c] += env[k + c];
+        h[3]++;
+      }
+    }
+  }
+  ups.sort((a, b) => a - b);
+  const elev = Math.asin(THREE.MathUtils.clamp(sdir[1], -1, 1));
+  return { env, sun: { dir: sdir, rgb: sunRGB, Y: sunY, sharp: best / Math.max(bgY, 1e-6) },
+           level: skyLevel + sunY * Math.max(Math.sin(elev), 0), skyY: ups[ups.length >> 1] || 0,
+           horizon: [0, 1, 2].map(c => { const v = hz.map(h => h[c] / Math.max(h[3], 1)).sort((a, b) => a - b); return (v[7] + v[8]) / 2; }) };
+}
+
+const loadTexture = url => new Promise((ok, bad) => new THREE.TextureLoader().load(url, ok, undefined, () => bad(new Error('could not load ' + url))));
+const loadHDR = (url, type) => new HDRLoader().setDataType(type).loadAsync(url);
+const loadEXR = (url, type) => new EXRLoader().setDataType(type).loadAsync(url);
+
+// a sky of the list, ready to use: its picture, its light (with and without the sun) and what
+// the light is (see analyseSky)
+async function buildHdri(e){
+  let bgSrc, mode = 1, k = 1, light;
+  const toFree = [];
+  if(e.builtin){
+    const base = new URL('./', import.meta.url).href;
+    [bgSrc, light] = await Promise.all([loadTexture(base + e.background_url), loadHDR(base + e.light_url, THREE.FloatType)]);
+    bgSrc.colorSpace = THREE.NoColorSpace; mode = 0; k = e.background_k;
+    toFree.push(bgSrc, light);
+  }else{
+    const url = e.file_url, f = (e.format || '').toLowerCase();
+    bgSrc = f === 'exr' ? await loadEXR(url, THREE.HalfFloatType) : f === 'hdr' ? await loadHDR(url, THREE.HalfFloatType) : await loadTexture(url);
+    if(!(f === 'exr' || f === 'hdr')){ bgSrc.colorSpace = THREE.NoColorSpace; mode = 2; }
+    toFree.push(bgSrc);
+  }
+  bgSrc.wrapS = THREE.RepeatWrapping; bgSrc.needsUpdate = true;
+  const max = Math.min(4096, renderer.capabilities.maxTextureSize);
+  const bw = Math.min(max, (bgSrc.image && bgSrc.image.width) || 4096);
+  const bg = skyTarget(bgSrc, mode, k, bw, bw / 2);
+  // the light at 1024 x 512, as floats here to look at (the bottom row first)
+  let data, W = 1024, H = 512;
+  if(light){
+    W = light.image.width; H = light.image.height;
+    const src = light.image.data;
+    data = new Float32Array(W * H * 4);
+    // the loader's rows run from the top (it flips them when drawing): turned round here
+    for(let j = 0; j < H; j++) data.set(src.subarray((H - 1 - j) * W * 4, (H - j) * W * 4), j * W * 4);
+  }else{
+    const rt = skyTarget(bgSrc, mode, k, W, H, THREE.FloatType);
+    data = new Float32Array(W * H * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, W, H, data);
+    rt.dispose();
+  }
+  for(const t of toFree) t.dispose();
+  const a = analyseSky(data, W, H);
+  const half = new Uint16Array(W * H * 4);
+  for(let i = 0; i < half.length; i++) half[i] = (i & 3) === 3 ? 0x3c00 : THREE.DataUtils.toHalfFloat(Math.min(a.env[i], 6.0e4));
+  const env = new THREE.DataTexture(half, W, H, THREE.RGBAFormat, THREE.HalfFloatType);
+  env.mapping = THREE.EquirectangularReflectionMapping; env.colorSpace = THREE.LinearSRGBColorSpace;
+  env.magFilter = env.minFilter = THREE.LinearFilter; env.generateMipmaps = false; env.wrapS = THREE.RepeatWrapping;
+  env.needsUpdate = true;
+  const kind = SKY_KINDS[e.kind] || SKY_KINDS.day;
+  // brought to its kind's light: a level surface lit as the time of day's, or (night) the
+  // sky's middle brightness that of a night sky
+  const scale = e.kind === 'night' ? kind.skyY / Math.max(a.skyY, 1e-6) : kind.level / Math.max(a.level, 1e-6);
+  return { id: e.id, entry: e, kind: e.kind || 'day', bg, env, pmrem: pmrem.fromEquirectangular(env),
+           sun: a.sun, level: a.level, skyY: a.skyY, horizon: a.horizon, scale };
+}
+
+function dropHdri(h){
+  if(!h) return;
+  h.bg.dispose(); h.env.dispose(); h.pmrem.dispose();
+}
+
+// the sun of the sky in use, turned with it: its height and bearing (as the times of day give them)
+function hdriSun(h){
+  const r = THREE.MathUtils.degToRad(SKY.rotation);
+  const v = new THREE.Vector3(...h.sun.dir).applyAxisAngle(new THREE.Vector3(0, 1, 0), r);
+  return { elev: THREE.MathUtils.radToDeg(Math.asin(THREE.MathUtils.clamp(v.y, -1, 1))),
+           azim: (THREE.MathUtils.radToDeg(Math.atan2(v.x, -v.z)) + 360) % 360 };
+}
+
+// the HDRI sky as the time of day 'hdri': what setTime needs of it
+function hdriTime(h){
+  const kind = SKY_KINDS[h.kind] || SKY_KINDS.day, s = hdriSun(h);
+  return { elev: s.elev, azim: s.azim, sky: true, hdri: true, bias: kind.bias || 1, env: 1, lamps: kind.lamps,
+           bloom: kind.bloom, fog: [0, kind.fog], ground: kind.ground };
+}
+
+// use a sky: 'physical' (the time of day's), or one of the list, loaded the first time
+async function useSky(id, render = true){
+  SKY.id = id; saveSky(); showSky();
+  if(!renderer) return;
+  if(id === 'physical'){
+    if(time === 'hdri') setTime('day', render);
+    return;
+  }
+  const e = skyList.find(x => x.id === id);
+  if(!e){ skyNoteText('That sky is not in the list any more: back to the physical sky.', true); SKY.id = 'physical'; saveSky(); showSky(); return; }
+  if(hdri && hdri.id === id){ TIMES.hdri = hdriTime(hdri); setTime('hdri', render); return; }
+  const token = {};
+  hdriLoading = token;
+  skyNoteText(`Loading ${e.name}…`);
+  try{
+    const h = await buildHdri(e);
+    if(hdriLoading !== token){ dropHdri(h); return; }               // another sky was picked meanwhile
+    const old = hdri;
+    hdri = h; hdriLoading = null;
+    TIMES.hdri = hdriTime(h);
+    setTime('hdri', render);
+    dropHdri(old);
+    showSky();
+  }catch(err){
+    console.error('HDRI sky:', err);
+    if(hdriLoading === token) hdriLoading = null;
+    skyNoteText(`${e.name} could not be loaded here: ${err.message}`, true);
+  }
+}
+
+// a change of rotation or strength: the same sky, turned or brighter
+function hdriChanged(){
+  if(time !== 'hdri' || !hdri) return;
+  TIMES.hdri = hdriTime(hdri);
+  setTime('hdri');
+}
+
 // ----------------------------------------------------------------- street lamps
 function lampGeometry(){
   // a pole on a base, an arm out over the road, and a flat lamp head under its end
@@ -547,6 +817,7 @@ function buildLamps(list){
   const n = list.length, { metal, head } = lampGeometry();
   const metalMat = new THREE.MeshStandardMaterial({ color: 0x3b3f44, metalness: 0.7, roughness: 0.45 });
   const headMat = new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0xffd49a, emissiveIntensity: 0, roughness: 0.3 });
+  bakePatch(metalMat); bakePatch(headMat);                            // the walls' bake lights them too
   const poles = new THREE.InstancedMesh(metal, metalMat, n), heads = new THREE.InstancedMesh(head, headMat, n);
   poles.castShadow = true; poles.receiveShadow = true;
   const glowMat = new THREE.MeshBasicMaterial({ map: glowTexture(), color: 0xffc98a, transparent: true, opacity: 0,
@@ -742,6 +1013,76 @@ function applyWet(root = world){
   });
 }
 
+// ----------------------------------------------------------------- depth of field
+// Where the lens is focused: on what is in the middle of the view (found once the camera
+// has stopped for a moment, then eased to, as a camera's autofocus does), or at a fixed
+// distance, picked by clicking a spot. Rays are cast against the scene's surfaces, indexed
+// the first time (three-mesh-bvh), so it is quick on a whole city too
+let focusNow = null, focusAim = null, focusMoved = 0, focusBusy = false, bvhFor = null, bvhLib = null;
+const focusSeen = new THREE.Matrix4(), focusRay = new THREE.Raycaster();
+
+async function indexScene(){
+  if(!world) return false;
+  if(!bvhLib) bvhLib = await import('three-mesh-bvh');
+  if(bvhFor !== world){
+    world.traverse(o => {
+      if(!o.isMesh || o.isInstancedMesh || !o.geometry || o.geometry.boundsTree) return;
+      o.geometry.computeBoundsTree = bvhLib.computeBoundsTree; o.geometry.computeBoundsTree();
+      o.raycast = bvhLib.acceleratedRaycast;
+    });
+    bvhFor = world;
+  }
+  return true;
+}
+
+// the distance to the first surface along the view through ndc (x, y from -1 to 1), or null
+function surfaceAt(x, y){
+  if(!world || bvhFor !== world) return null;
+  camera.updateMatrixWorld();
+  focusRay.setFromCamera(new THREE.Vector2(x, y), camera);
+  focusRay.firstHitOnly = true;
+  const hit = focusRay.intersectObject(world, true)[0];
+  return hit ? hit.distance : null;
+}
+
+// the focus distance now (metres); now: worked out at once (for the photo), not eased
+function focusDistance(now = false){
+  if(DOF.focus === 'fixed') return Math.max(0.3, +DOF.distance || 25);
+  const t = performance.now();
+  if(!focusSeen.equals(camera.matrixWorld)){ focusSeen.copy(camera.matrixWorld); focusMoved = t; focusAim = null; }
+  if((now || (focusAim === null && t - focusMoved > 150)) && !focusBusy){
+    if(bvhFor === world){
+      const d = surfaceAt(0, 0);
+      focusAim = d === null ? 2000 : d;                                 // the sky: far away
+    }else if(world){
+      focusBusy = true;
+      indexScene().then(() => { focusBusy = false; focusAim = null; focusMoved = 0; });
+    }
+  }
+  if(focusAim !== null){
+    if(focusNow === null || now) focusNow = focusAim;
+    else focusNow *= Math.pow(focusAim / focusNow, 0.2);              // eased, as an autofocus pulls
+  }
+  if(focusNow === null) focusNow = camera.position.distanceTo(controls.target);
+  const v = $('#dofFocusVal');
+  if(v){ const txt = focusNow >= 1000 ? 'now: far' : `now ${focusNow < 10 ? focusNow.toFixed(1) : Math.round(focusNow)} m`; if(v.textContent !== txt) v.textContent = txt; }
+  return focusNow;
+}
+
+// the camera the photo traces: with depth of field, a physical camera (the same view, its
+// lens open to the f-stop, focused as the live view is)
+async function photoCamera(){
+  if(!DOF.on) return camera;
+  const { PhysicalCamera } = await import('three-gpu-pathtracer');
+  if(DOF.focus === 'auto' && await indexScene()) focusAim = null;   // focused on what is in the middle now
+  const c = new PhysicalCamera(camera.fov, camera.aspect, camera.near, camera.far);
+  c.position.copy(camera.position); c.quaternion.copy(camera.quaternion);
+  c.filmGauge = camera.filmGauge; c.zoom = camera.zoom;
+  c.updateProjectionMatrix(); c.updateMatrixWorld();
+  c.fStop = DOF.fstop; c.focusDistance = focusDistance(true); c.apertureBlades = 0;
+  return c;
+}
+
 // ----------------------------------------------------------------- photo render
 // Path traced: light bounces between the surfaces, soft shadows from the sun
 // and the sky, and the lamps near the view as real lights. It sharpens for as
@@ -843,7 +1184,9 @@ async function startPhoto(){
     photo.saved = stage();
     photo.extra = photo.saved.extra;
     const t0 = performance.now();
-    photo.pt.setScene(scene, camera);
+    photo.cam = await photoCamera();
+    photo.lens = DOF.on ? { radius: camera.getFocalLength() / DOF.fstop / 2000, focus: focusDistance(true) } : null;
+    photo.pt.setScene(scene, photo.cam);
     photo.on = true; photo.started = performance.now();
     note(`Rendering the photo (set up in ${((performance.now() - t0) / 1000).toFixed(1)} s). It gets sharper while the camera stays put; Save image keeps it.`);
     $('#btnPhoto').textContent = 'Back to live view';
@@ -955,6 +1298,8 @@ function draw(){
   fitShadow();
   assignPool();
   if(stars) stars.position.copy(camera.position);                      // as far away as the sky
+  if(dof.enabled){ dof.fStop = DOF.fstop; dof.focus = focusDistance(); }
+  mirrorPass();
   composer.render();
 }
 
@@ -1101,6 +1446,13 @@ function auxMaterial(m, kind){
   a.onBeforeCompile = sh => {
     const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
     let out = kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`;
+    if(kind === 'dist'){
+      // how far the surface is from the bake's camera (Bake light, walls and objects)
+      sh.uniforms.auxCam = AUX_CAM;
+      sh.vertexShader = 'varying vec3 vBakeWorld;\n' + sh.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n' + BAKE_WORLD_VERT);
+      sh.fragmentShader = 'uniform vec3 auxCam;\nvarying vec3 vBakeWorld;\n' + sh.fragmentShader;
+      out = 'gl_FragColor = vec4(distance(vBakeWorld, auxCam), 0.0, 0.0, 1.0);';
+    }
     if(kind === 'height'){
       // the height of the surface over the bake's lowest point (Bake light)
       sh.uniforms.auxBase = AUX_BASE;
@@ -1116,7 +1468,7 @@ function auxMaterial(m, kind){
 
 // cam: the photo's camera, or the bake's; kinds: albedo, normal (and height for the bake);
 // extra: the lamps' lights added for the tracer
-function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = photo && photo.extra } = {}){
+function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = photo && photo.extra, lens = null } = {}){
   const make = type => new THREE.WebGLRenderTarget(w, h, { type, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter,
                                                            magFilter: THREE.NearestFilter, depthBuffer: type === THREE.HalfFloatType });
   const shot = make(THREE.HalfFloatType), out = {};
@@ -1134,6 +1486,10 @@ function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = p
   // the photo's lamp lights do not matter here (and are far too many for drawing)
   if(extra) extra.traverse(o => { if(o.isLight && o.visible){ o.visible = false; lights.push(o); } });
   const tent = u => (u < 0.5 ? Math.sqrt(2 * u) - 1 : 1 - Math.sqrt(2 - 2 * u));
+  // with depth of field, each view from another spot on the lens, aimed so the focus stays put
+  const p0 = cam.position.clone(), right = new THREE.Vector3(), up = new THREE.Vector3();
+  if(lens){ cam.updateMatrixWorld(); right.setFromMatrixColumn(cam.matrixWorld, 0); up.setFromMatrixColumn(cam.matrixWorld, 1); }
+  const fpx = h / 2 / Math.tan(THREE.MathUtils.degToRad(cam.fov || 45) / 2);
   renderer.shadowMap.autoUpdate = false;
   try{
     for(const kind of kinds){
@@ -1144,7 +1500,14 @@ function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = p
       renderer.setClearColor(0x000000, 0);
       renderer.setRenderTarget(out[kind]); renderer.clear();
       for(let i = 0; i < AUX_VIEWS; i++){
-        const jx = tent(((i % 4) + 0.5) / 4), jy = tent((Math.floor(i / 4) + 0.5) / 4);
+        let jx = tent(((i % 4) + 0.5) / 4), jy = tent((Math.floor(i / 4) + 0.5) / 4);
+        if(lens){
+          const r = lens.radius * Math.sqrt((i + 0.5) / AUX_VIEWS), a = i * 2.39996323;
+          const lx = r * Math.cos(a), ly = r * Math.sin(a);
+          cam.position.copy(p0).addScaledVector(right, lx).addScaledVector(up, ly);
+          cam.updateMatrixWorld();
+          jx -= lx * fpx / lens.focus; jy += ly * fpx / lens.focus;
+        }
         cam.setViewOffset(w, h, jx, jy, w, h);
         renderer.autoClear = true;
         renderer.setRenderTarget(shot); renderer.render(scene, cam);
@@ -1157,6 +1520,7 @@ function renderAux(w, h, { cam = camera, kinds = ['albedo', 'normal'], extra = p
     for(const [o, m] of swapped) o.material = m;
     for(const l of lights) l.visible = true;
     cam.clearViewOffset();
+    if(lens){ cam.position.copy(p0); cam.updateMatrixWorld(); }
     scene.background = keep.bg; scene.backgroundIntensity = keep.bgI;
     renderer.setRenderTarget(keep.target); renderer.setClearColor(keep.colour, keep.alpha);
     renderer.autoClear = keep.auto; renderer.shadowMap.autoUpdate = keep.shadows;
@@ -1179,7 +1543,7 @@ async function denoisePhoto(n){
     const target = ph.pt.target, w = target.width, h = target.height;
     if(!ph.clean || ph.clean.w !== w || ph.clean.h !== h){
       if(ph.clean) for(const rt of [ph.clean.albedo, ph.clean.normal, ph.clean.out]) rt.dispose();
-      const aux = renderAux(w, h);
+      const aux = renderAux(w, h, { cam: ph.cam || camera, lens: ph.lens });
       const out = new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false,
                                                       minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
       renderer.initRenderTarget(out);
@@ -1232,7 +1596,11 @@ const AUX_BASE = { value: 0 };
 // shared by every street material: the map, where a world point falls in it, and the
 // heights that count as the same surface
 const BAKE_U = { bakeMap: { value: null }, bakeMatrix: { value: new THREE.Matrix4() }, bakeOn: { value: 0 },
-                 bakeTol: { value: new THREE.Vector4(0.05, 0.1, 0, 0) } };
+                 bakeTol: { value: new THREE.Vector4(0.05, 0.1, 0, 0) },
+                 // walls and objects: the light seen from the bake's camera, up to 4 views side by side in one map
+                 vbMap: { value: null }, vbOn: { value: 0 }, vbN: { value: 0 }, vbPos: { value: new THREE.Vector3() },
+                 vbMat: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) }, vbRect: { value: [0, 1, 2, 3].map(() => new THREE.Vector4()) } };
+const AUX_CAM = { value: new THREE.Vector3() };
 const BAKE_WORLD_VERT = `{
   vec4 bp = vec4( transformed, 1.0 );
   #ifdef USE_BATCHING
@@ -1245,6 +1613,8 @@ const BAKE_WORLD_VERT = `{
 }`;
 const BAKE_FRAG = `
 if( bakeOn > 0.5 ){
+  vec3 bE = vec3( 0.0 );
+  float bw = 0.0;
   // the four texels round this point, each counting only if it was traced on this
   // surface (the same height), not on a roof or a tree above it or the road below
   vec4 bq = bakeMatrix * vec4( vBakeWorld, 1.0 );
@@ -1269,33 +1639,196 @@ if( bakeOn > 0.5 ){
   #else
     float bup = vBakeUp;
   #endif
-  float bw = smoothstep( 0.55, 0.8, bup ) * smoothstep( 0.05, 0.35, bwsum )
-           * smoothstep( 1.0, max( 8.0, 0.06 * float( min( bn.x, bn.y ) ) ), min( bedge.x, bedge.y ) );
-  if( bw > 0.0 ){
-    vec3 bE = bsum / max( bwsum, 1e-4 );
-    reflectedLight.directDiffuse *= 1.0 - bw;
-    reflectedLight.indirectDiffuse = mix( reflectedLight.indirectDiffuse, bE * BRDF_Lambert( material.diffuseContribution ), bw );
+  bw = smoothstep( 0.55, 0.8, bup ) * smoothstep( 0.05, 0.35, bwsum )
+     * smoothstep( 1.0, max( 8.0, 0.06 * float( min( bn.x, bn.y ) ) ), min( bedge.x, bedge.y ) );
+  bE = bsum / max( bwsum, 1e-4 );
+  // walls, kerb faces, poles and objects (and the ground near by): the light the bake's camera
+  // saw on this very surface (the same distance from it, facing it), from the first of its
+  // views that saw it
+  vec3 vE = vec3( 0.0 );
+  float vw = 0.0;
+  if( vbOn > 0.5 ){
+    float dz = distance( vBakeWorld, vbPos );
+    #ifdef DOUBLE_SIDED
+      vec3 vn = normalize( vBakeN ) * faceDirection;
+    #else
+      vec3 vn = normalize( vBakeN );
+    #endif
+    float facing = dot( vn, ( vbPos - vBakeWorld ) / max( dz, 1e-4 ) );
+    if( facing > 0.05 ){
+      for( int i = 0; i < 4; i ++ ){
+        if( i >= vbN ) break;
+        vec4 q = vbMat[ i ] * vec4( vBakeWorld, 1.0 );
+        if( q.w <= 0.0 ) continue;
+        vec2 uv = q.xy / q.w;
+        if( any( lessThan( uv, vec2( 0.0 ) ) ) || any( greaterThan( uv, vec2( 1.0 ) ) ) ) continue;
+        vec4 r = vbRect[ i ];
+        vec2 p = r.xy + uv * r.zw - 0.5, f = fract( p );
+        ivec2 p0 = ivec2( floor( p ) ), lo = ivec2( r.xy ), hi = ivec2( r.xy + r.zw ) - 1;
+        float tol = 0.02 + 0.004 * dz / max( facing, 0.2 );
+        vec3 s3 = vec3( 0.0 );
+        float ws = 0.0;
+        for( int k = 0; k < 4; k ++ ){
+          ivec2 o = ivec2( k & 1, k >> 1 );
+          vec4 s = texelFetch( vbMap, clamp( p0 + o, lo, hi ), 0 );
+          float w = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
+          w *= 1.0 - smoothstep( tol, 2.0 * tol, abs( s.a - dz ) );
+          s3 += s.rgb * w; ws += w;
+        }
+        if( ws > 0.05 ){
+          vec2 e = min( uv, 1.0 - uv ) * r.zw;
+          vE = s3 / ws;
+          vw = smoothstep( 0.05, 0.35, ws ) * smoothstep( 0.05, 0.25, facing ) * smoothstep( 0.5, 6.0, min( e.x, e.y ) );
+          break;
+        }
+      }
+    }
+  }
+  float tw = vw + bw * ( 1.0 - vw );
+  if( tw > 0.0 ){
+    vec3 E = ( vE * vw + bE * bw * ( 1.0 - vw ) ) / tw;
+    reflectedLight.directDiffuse *= 1.0 - tw;
+    reflectedLight.indirectDiffuse = mix( reflectedLight.indirectDiffuse, E * BRDF_Lambert( material.diffuseContribution ), tw );
   }
 }`;
 
-// a street material that can take the baked light (prepare)
+// a material that can take the baked light (prepare); a street surface (wet: the street
+// materials Wet roads works on) also the wet roads' reflections and puddles
 function bakePatch(m){
   if(!m.isMeshStandardMaterial || m.userData.bakeable) return;
   m.userData.bakeable = true;
+  const wet = !!m.userData.dry;
   m.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, BAKE_U);
-    sh.vertexShader = 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\n' + sh.vertexShader.replace('#include <project_vertex>',
-      '#include <project_vertex>\n' + BAKE_WORLD_VERT + '\nvBakeUp = normalize( ( vec4( transformedNormal, 0.0 ) * viewMatrix ).xyz ).y;');
-    sh.fragmentShader = 'uniform highp sampler2D bakeMap;\nuniform mat4 bakeMatrix;\nuniform float bakeOn;\nuniform vec4 bakeTol;\n'
-      + 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\n'
+    if(wet) Object.assign(sh.uniforms, REFL_U);
+    sh.vertexShader = 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\nvarying vec3 vBakeN;\n' + sh.vertexShader.replace('#include <project_vertex>',
+      '#include <project_vertex>\n' + BAKE_WORLD_VERT + '\nvBakeN = normalize( ( vec4( transformedNormal, 0.0 ) * viewMatrix ).xyz ); vBakeUp = vBakeN.y;');
+    let f = 'uniform highp sampler2D bakeMap;\nuniform mat4 bakeMatrix;\nuniform float bakeOn;\nuniform vec4 bakeTol;\n'
+      + 'uniform highp sampler2D vbMap;\nuniform float vbOn;\nuniform int vbN;\nuniform vec3 vbPos;\nuniform mat4 vbMat[ 4 ];\nuniform vec4 vbRect[ 4 ];\n'
+      + 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\nvarying vec3 vBakeN;\n'
       + sh.fragmentShader.replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + BAKE_FRAG);
+    if(wet) f = REFL_PARS + f.replace('#include <color_fragment>', '#include <color_fragment>\n' + REFL_PUDDLE)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix( roughnessFactor, 0.03, rPud );')
+      .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\nnormal = normalize( mix( normal, nonPerturbedNormal, 0.9 * rPud ) );')
+      .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + REFL_FRAG);
+    sh.fragmentShader = f;
   };
-  m.customProgramCacheKey = () => 'bakeable';
+  m.customProgramCacheKey = () => wet ? 'bakeable-wet' : 'bakeable';
+}
+
+// ----------------------------------------------------------------- wet roads: reflections
+// With Wet roads, the live view mirrors the scene in the water: the scene drawn once more
+// from under the street (the camera reflected in it, as in a mirror), half as sharp, and
+// the street surfaces show it where the sky would shine in them, blurred as much as they
+// are rough, with Fresnel (strong at a glancing view, faint looking down) as any shine.
+// Puddles: standing water in patches, smooth as a mirror and a little darker. The photo
+// render traces its own reflections (wet roads evenly, without the puddles)
+const REFL_U = { reflMap: { value: null }, reflMatrix: { value: new THREE.Matrix4() }, reflOn: { value: 0 },
+                 reflPlane: { value: 0 }, reflLod: { value: 6 }, puddles: { value: 0 } };
+const REFL_PARS = `
+uniform sampler2D reflMap;
+uniform mat4 reflMatrix;
+uniform float reflOn, reflPlane, reflLod, puddles;
+float rPud = 0.0;
+float rHash( vec2 p ){ return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 ); }
+float rNoise( vec2 p ){
+  vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
+  return mix( mix( rHash( i ), rHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( rHash( i + vec2( 0.0, 1.0 ) ), rHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+}
+`;
+// the puddles: where a broad pattern (metres across, with finer edges) is above the level
+// the amount sets; only on the level street surfaces
+const REFL_PUDDLE = `
+if( puddles > 0.0 ){
+  vec2 pq = vBakeWorld.xz;
+  float pn = 0.55 * rNoise( pq / 6.5 ) + 0.3 * rNoise( pq / 2.1 + 17.0 ) + 0.15 * rNoise( pq / 0.7 + 3.0 );
+  float lev = 1.0 - 0.62 * puddles;
+  rPud = smoothstep( lev, lev + 0.05, pn ) * smoothstep( 0.85, 0.97, vBakeUp )
+       * ( 1.0 - smoothstep( 0.25, 0.6, abs( vBakeWorld.y - reflPlane ) ) );
+  diffuseColor.rgb *= 1.0 - 0.3 * rPud;
+}
+`;
+const REFL_FRAG = `
+#if defined( RE_IndirectSpecular )
+if( reflOn > 0.5 ){
+  vec4 rq = reflMatrix * vec4( vBakeWorld, 1.0 );
+  // a little rippled by the surface's bump
+  vec2 ruv = rq.xy / rq.w + ( normal.xy - nonPerturbedNormal.xy ) * 0.06;
+  float rIn = step( 0.0, rq.w ) * step( 0.0, ruv.x ) * step( ruv.x, 1.0 ) * step( 0.0, ruv.y ) * step( ruv.y, 1.0 );
+  float rw = rIn * smoothstep( 0.8, 0.95, vBakeUp ) * ( 1.0 - smoothstep( 0.25, 0.6, abs( vBakeWorld.y - reflPlane ) ) );
+  if( rw > 0.0 ){
+    vec3 rc = textureLod( reflMap, clamp( ruv, 0.0, 1.0 ), clamp( material.roughness * 12.0, 0.0, reflLod ) ).rgb;
+    radiance = mix( radiance, rc, rw );
+  }
+}
+#endif
+`;
+let reflRT = null;
+const reflCam = new THREE.PerspectiveCamera(), reflV = {
+  pos: new THREE.Vector3(), cam: new THREE.Vector3(), view: new THREE.Vector3(), look: new THREE.Vector3(), target: new THREE.Vector3(),
+  rot: new THREE.Matrix4(), normal: new THREE.Vector3(0, 1, 0), plane: new THREE.Plane(), clip: new THREE.Vector4(), q: new THREE.Vector4() };
+
+// the mirror picture for this frame (or none: dry, or reflections off)
+function mirrorPass(){
+  const wanted = world && LIGHT.wet > 0 && LIGHT.mirror && !(photo && photo.on);
+  REFL_U.puddles.value = world && LIGHT.wet > 0 ? LIGHT.puddles * Math.min(1, LIGHT.wet * 1.5) : 0;
+  if(!wanted){ REFL_U.reflOn.value = 0; REFL_U.reflMap.value = null; return; }
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const w = Math.max(16, Math.floor(size.x / 2)), h = Math.max(16, Math.floor(size.y / 2));
+  if(!reflRT || reflRT.width !== w || reflRT.height !== h){
+    if(reflRT) reflRT.dispose();
+    reflRT = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, generateMipmaps: true,
+                                                minFilter: THREE.LinearMipmapLinearFilter, magFilter: THREE.LinearFilter });
+    REFL_U.reflLod.value = Math.max(0, Math.log2(Math.min(w, h)) - 3);
+  }
+  // the camera reflected in the street's level (three's Reflector, for a level plane)
+  const V = reflV, y = STREET_Y;
+  camera.updateMatrixWorld();
+  V.pos.set(0, y, 0); V.cam.setFromMatrixPosition(camera.matrixWorld);
+  V.pos.x = V.cam.x; V.pos.z = V.cam.z;
+  if(V.cam.y <= y + 0.01){ REFL_U.reflOn.value = 0; REFL_U.reflMap.value = null; return; }
+  V.view.subVectors(V.pos, V.cam).reflect(V.normal).negate().add(V.pos);
+  V.rot.extractRotation(camera.matrixWorld);
+  V.look.set(0, 0, -1).applyMatrix4(V.rot).add(V.cam);
+  V.target.subVectors(V.pos, V.look).reflect(V.normal).negate().add(V.pos);
+  reflCam.position.copy(V.view);
+  reflCam.up.set(0, 1, 0).applyMatrix4(V.rot).reflect(V.normal);
+  reflCam.lookAt(V.target);
+  reflCam.far = camera.far; reflCam.near = camera.near;
+  reflCam.updateMatrixWorld();
+  reflCam.projectionMatrix.copy(camera.projectionMatrix);
+  REFL_U.reflMatrix.value.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+    .multiply(reflCam.projectionMatrix).multiply(reflCam.matrixWorldInverse);
+  // nothing under the street drawn: the near plane tilted onto it (oblique clipping), 15 cm
+  // above, so the street, the sidewalks and the blocks (10 cm up) are left out of their own
+  // reflection, which would otherwise show their undersides
+  V.plane.setFromNormalAndCoplanarPoint(V.normal, new THREE.Vector3(0, y + 0.15, 0)).applyMatrix4(reflCam.matrixWorldInverse);
+  V.clip.set(V.plane.normal.x, V.plane.normal.y, V.plane.normal.z, V.plane.constant);
+  const P = reflCam.projectionMatrix.elements;
+  V.q.set((Math.sign(V.clip.x) + P[8]) / P[0], (Math.sign(V.clip.y) + P[9]) / P[5], -1, (1 + P[10]) / P[14]);
+  V.clip.multiplyScalar(2 / V.clip.dot(V.q));
+  P[2] = V.clip.x; P[6] = V.clip.y; P[10] = V.clip.z + 1; P[14] = V.clip.w;
+  reflCam.projectionMatrixInverse.copy(reflCam.projectionMatrix).invert();
+  // drawn without the mirror itself (it cannot show in its own picture), the painted lamp
+  // pools on the ground, or new shadows
+  REFL_U.reflOn.value = 0; REFL_U.reflMap.value = null;
+  const glows = lamps && lamps.glows.visible, keep = renderer.getRenderTarget(), shadows = renderer.shadowMap.autoUpdate;
+  if(glows) lamps.glows.visible = false;
+  renderer.shadowMap.autoUpdate = false;
+  renderer.setRenderTarget(reflRT);
+  renderer.state.buffers.depth.setMask(true);
+  renderer.clear();
+  renderer.render(scene, reflCam);
+  renderer.setRenderTarget(keep);
+  renderer.shadowMap.autoUpdate = shadows;
+  if(glows) lamps.glows.visible = true;
+  REFL_U.reflMap.value = reflRT.texture; REFL_U.reflOn.value = 1; REFL_U.reflPlane.value = y;
 }
 
 // the light the bakes are for: the time of day, the sun, the lamps
-const bakeKey = () => JSON.stringify([time, LIGHT.sun, LIGHT.lamps, LIGHT.colour]);
+const bakeKey = () => JSON.stringify([time, LIGHT.sun, LIGHT.lamps, LIGHT.colour].concat(time === 'hdri' ? [SKY.id, SKY.rotation, SKY.strength] : []));
 const TIME_NAMES = { dawn: 'Dawn', day: 'Day', night: 'Night' };
+const lightName = (t, sky) => t === 'hdri' ? (sky || (hdri ? hdri.entry.name : 'HDRI sky')) : TIME_NAMES[t];
 
 // shows the bake for the light now (if Baked light is on and there is one), else the live light
 function applyBake(){
@@ -1304,6 +1837,14 @@ function applyBake(){
   BAKE_U.bakeOn.value = b ? 1 : 0;
   BAKE_U.bakeMap.value = b ? b.map.texture : null;
   if(b){ BAKE_U.bakeMatrix.value.copy(b.matrix); BAKE_U.bakeTol.value.set(b.tol[0], b.tol[1], b.base, 0); }
+  // walls and objects, from where that bake's camera stood
+  const v = b && b.walls;
+  BAKE_U.vbOn.value = v ? 1 : 0; BAKE_U.vbMap.value = v ? v.map.texture : null; BAKE_U.vbN.value = v ? v.mats.length : 0;
+  if(v){
+    BAKE_U.vbPos.value.copy(v.pos);
+    v.mats.forEach((m, i) => BAKE_U.vbMat.value[i].copy(m));
+    v.rects.forEach((r, i) => BAKE_U.vbRect.value[i].copy(r));
+  }
   // the lamps' painted pools and the contact shadows are in the bake already
   if(lamps) lamps.glows.visible = lamps.level > 0 && !b;
   if(gtao) gtao.blendIntensity = b ? 0.4 : 0.9;
@@ -1317,12 +1858,15 @@ function bakeNote(text, bad){
   box.disabled = !BAKE.list.length; box.checked = BAKE.on;
   if(text === undefined){
     const any = BAKE.list.find(x => x.key === bakeKey());
-    const about = b => `${TIME_NAMES[b.time]}, ${b.area === 'view' ? 'what you saw' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel, ${b.samples} samples`;
+    const about = b => `${lightName(b.time, b.sky)}, ${b.area === 'view' ? 'what you saw' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel`
+      + (b.walls ? `, walls and objects ${b.walls.mode === 'around' ? 'all round' : 'in view'}` : '') + `, ${b.samples} samples`;
     if(BAKE.busy) return;
-    if(BAKE.shown) text = `Baked light on (${about(BAKE.shown)}). Move round freely: the streets, sidewalks and islands have the photo's light; walls, kerb faces and the ground under trees keep the live light.`;
-    else if(BAKE.on && BAKE.list.length) text = `No bake for this light yet (${TIME_NAMES[time]}${LIGHT.sun !== 1 || LIGHT.lamps !== 1 ? ', with these sun and lamp settings' : ''}): showing the live light. Bake light bakes it; going back to a baked light shows its bake again.`;
+    if(BAKE.shown) text = `Baked light on (${about(BAKE.shown)}). Move round freely: the streets, sidewalks and islands have the photo's light`
+      + (BAKE.shown.walls ? `, and so do the walls, kerb faces, poles and objects the bake saw from where it was made; what it did not see keeps the live light.`
+                          : `; walls, kerb faces and the ground under trees keep the live light.`);
+    else if(BAKE.on && BAKE.list.length) text = `No bake for this light yet (${lightName(time)}${LIGHT.sun !== 1 || LIGHT.lamps !== 1 ? ', with these sun and lamp settings' : ''}): showing the live light. Bake light bakes it; going back to a baked light shows its bake again.`;
     else if(any) text = `Baked (${about(any)}). Tick Baked light to see it in the live view.`;
-    else text = 'Bake light traces the light on the ground as Render photo does (it does not need a photo first) and keeps it, so the live view shows the photo\'s light while you move round. What you see: the ground in view now, as sharp as its size allows; the whole place: all of it, coarser.';
+    else text = 'Bake light traces the light on the ground as Render photo does (it does not need a photo first) and keeps it, so the live view shows the photo\'s light while you move round. What you see: the ground in view now, as sharp as its size allows; the whole place: all of it, coarser. Walls and objects: the light on them too, from where you stand.';
     bad = false;
   }
   n.textContent = text; n.classList.toggle('bad', !!bad);
@@ -1331,7 +1875,7 @@ function bakeNote(text, bad){
 // the bakes are of this scene: a new scene starts without them
 function dropBakes(){
   BAKE.cancel = true;
-  for(const b of BAKE.list) b.map.dispose();
+  for(const b of BAKE.list) dropBake(b);
   BAKE.list = [];
   applyBake();
 }
@@ -1378,27 +1922,66 @@ function bakeArea(kind){
   return { kind, w, h, mpp, base, cam, matrix, centre: new THREE.Vector3(cx, base, cz) };
 }
 
+// the walls' bake, made from where the camera stands: the view itself (as sharp as the bake's
+// size allows), or all round (four views a little wider than a quarter turn each, side by side
+// in one map); each with where a world point falls in it
+function wallViews(mode){
+  if(mode !== 'view' && mode !== 'around') return { mode: 'none', list: [] };
+  camera.updateMatrixWorld();
+  const most = Math.min(BAKE_PX, renderer.capabilities.maxTextureSize), pos = camera.position.clone();
+  const make = (cam, w, h, rect) => {
+    cam.updateProjectionMatrix(); cam.updateMatrixWorld();
+    const matrix = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 1, 0, 0, 0, 0, 1)
+      .multiply(cam.projectionMatrix).multiply(cam.matrixWorldInverse);
+    return { cam, w, h, rect, matrix };
+  };
+  if(mode === 'view'){
+    const asp = camera.aspect, side = Math.min(most, 1600);
+    const w = asp >= 1 ? side : Math.max(16, Math.round(side * asp)), h = asp >= 1 ? Math.max(16, Math.round(side / asp)) : side;
+    const cam = new THREE.PerspectiveCamera(camera.fov, asp, Math.max(0.05, camera.near), camera.far);
+    cam.position.copy(camera.position); cam.quaternion.copy(camera.quaternion);
+    return { mode, pos, W: w, H: h, list: [make(cam, w, h, [0, 0, w, h])] };
+  }
+  const S = Math.min(1024, Math.floor(most / 2));
+  const list = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dz], i) => {
+    const cam = new THREE.PerspectiveCamera(95, 1, 0.05, camera.far);
+    cam.position.copy(pos); cam.lookAt(pos.x + dx, pos.y, pos.z + dz);
+    return make(cam, S, S, [(i % 2) * S, Math.floor(i / 2) * S, S, S]);
+  });
+  return { mode, pos, W: 2 * S, H: 2 * S, list };
+}
+
+function dropBake(b){
+  b.map.dispose();
+  if(b.walls) b.walls.map.dispose();
+}
+
 let bakeQuad = null;
 // the light reaching each spot: the traced (denoised) picture over the colour of what it
 // saw, and the height of that surface; nothing where the surface is too dark to tell
-function lightMap(light, aux, w, h){
+function lightMap(light, aux, w, h, into = null, at = null){
   if(!bakeQuad) bakeQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
     glslVersion: THREE.GLSL3, depthTest: false, depthWrite: false,
-    uniforms: { light: { value: null }, albedo: { value: null }, height: { value: null } },
+    uniforms: { light: { value: null }, albedo: { value: null }, height: { value: null }, offset: { value: new THREE.Vector2() } },
     vertexShader: 'precision highp float; uniform mat4 modelViewMatrix; uniform mat4 projectionMatrix; in vec3 position;\n'
       + 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-    fragmentShader: 'precision highp float; uniform sampler2D light, albedo, height; out vec4 outColor;\n'
-      + 'void main(){ ivec2 p = ivec2(gl_FragCoord.xy); vec3 c = texelFetch(light, p, 0).rgb;\n' + SANE_GLSL + '\n'
+    fragmentShader: 'precision highp float; uniform sampler2D light, albedo, height; uniform vec2 offset; out vec4 outColor;\n'
+      + 'void main(){ ivec2 p = ivec2(gl_FragCoord.xy - offset); vec3 c = texelFetch(light, p, 0).rgb;\n' + SANE_GLSL + '\n'
       + 'vec3 a = texelFetch(albedo, p, 0).rgb; float hgt = texelFetch(height, p, 0).r;\n'
       + 'bool ok = max(max(a.r, a.g), a.b) > 0.01 && !isnan(hgt);\n'
       + 'outColor = ok ? vec4(min(3.14159265 * c / max(a, vec3(0.02)), vec3(6.0e4)), hgt) : vec4(0.0, 0.0, 0.0, 1.0e4); }' }));
-  const map = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false,
-                                                  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+  const map = into || new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                          minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
   const u = bakeQuad.material.uniforms;
-  u.light.value = light; u.albedo.value = aux.albedo.texture; u.height.value = aux.height.texture;
-  const keep = renderer.getRenderTarget();
+  u.light.value = light; u.albedo.value = aux.albedo.texture; u.height.value = (aux.height || aux.dist).texture;
+  u.offset.value.set(at ? at[0] : 0, at ? at[1] : 0);
+  const keep = renderer.getRenderTarget(), auto = renderer.autoClear;
+  if(at) map.viewport.set(at[0], at[1], w, h);
+  renderer.autoClear = !at;                                            // into its part only: the other views stay
   renderer.setRenderTarget(map);
   bakeQuad.render(renderer);
+  if(at) map.viewport.set(0, 0, map.width, map.height);
+  renderer.autoClear = auto;
   renderer.setRenderTarget(keep);
   return map;
 }
@@ -1449,8 +2032,9 @@ async function bakeLight(){
     return;
   }
   const a = bakeArea(kind);
+  const faces = wallViews($('#bakeWalls') ? $('#bakeWalls').value : 'none');
   const keepPt = { sync: pt.synchronizeRenderSize, tiles: pt.tiles.clone() };
-  let aux = null, out = null, done = false;
+  let aux = null, faux = [], atlas = null, done = false;
   try{
     // traced as the photo, but matt: what comes back is the light the surfaces take in and
     // give back evenly, not their shine (that stays live)
@@ -1476,62 +2060,100 @@ async function bakeLight(){
         if(v.own) m.specularIntensity = v.spec; else delete m.specularIntensity;
       }
     }
-    // what the tracer sees, drawn without noise: colour, direction and height
+    // what the tracer sees, drawn without noise: colour, direction and height (from above), or
+    // distance (from the walls' views)
     AUX_BASE.value = a.base;
-    try{ aux = renderAux(a.w, a.h, { cam: a.cam, kinds: ['albedo', 'normal', 'height'], extra: st.extra }); }
-    finally{ unstage(st); }
-    pt.reset();
-    // the time left from the samples' own pace (the shader compiling first is not part of it)
-    let first = null;
-    const ok = await traceBake(pt, samples, () => {
-      const n = Math.floor(pt.samples), s = secs();
-      if(n >= 1 && first === null) first = { n, t: performance.now() };
-      const left = first && n - first.n >= 2 ? (performance.now() - first.t) / 1000 / (n - first.n) * (samples - n) : null;
-      bakeNote(pt.isCompiling && !n ? `Compiling the path tracer's shader for this graphics card… ${s} s (the first time in a session it can take a minute or more).`
-        : `Baking the light ${a.kind === 'view' ? 'of what you see' : 'of the whole place'} (${a.w} × ${a.h} px): ${n} of ${samples} samples, ${s} s`
-          + (left != null ? `, about ${Math.max(1, Math.round(left))} s left.` : '.') + ' The view stays live meanwhile.');
-      if(job) job.set(pt.isCompiling && !n ? "compiling the path tracer's shader (once a session)" : `${n} of ${samples} samples`,
-                      pt.isCompiling && !n ? null : n / samples, left);
-    });
-    if(!ok) throw new Error('stopped');
-    const c = (() => { try{ return lightIn(pt.target); }catch(e){ return null; } })();
-    if(c && c.lit === 0) throw new Error(`the traced light came out ${c.bad ? 'invalid' : 'black'} on this graphics card (${gpuInfo().name})`);
-    // the noise cleared as the photo's is (if the denoiser is there), then into the light map
-    let light = pt.target.texture;
-    if(DENOISE){
-      try{
-        bakeNote('Clearing the noise (Open Image Denoise)…');
-        if(job) job.set('clearing the noise (Open Image Denoise)');
-        if(!denoiser){
-          denoiserLoad = denoiserLoad || Denoiser.load(renderer.getContext(), new URL('./vendor/oidn/rt_hdr_calb_cnrm.tza', import.meta.url).href);
-          denoiser = await denoiserLoad;
-        }
-        if(BAKE.cancel) throw new Error('stopped');
-        out = new THREE.WebGLRenderTarget(a.w, a.h, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false,
-                                                      minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
-        renderer.initRenderTarget(out);
-        const tex = rt => renderer.properties.get(rt.texture).__webglTexture;
-        try{
-          denoiser.denoise({ color: tex(pt.target), albedo: tex(aux.albedo), normal: tex(aux.normal), output: tex(out), width: a.w, height: a.h });
-        }finally{ renderer.resetState(); }
-        light = out.texture;
-      }catch(e){
-        if(e.message === 'stopped') throw e;
-        console.error('Bake light: denoiser', e);
+    try{
+      aux = renderAux(a.w, a.h, { cam: a.cam, kinds: ['albedo', 'normal', 'height'], extra: st.extra });
+      for(const f of faces.list){
+        AUX_CAM.value.copy(f.cam.position);
+        faux.push(renderAux(f.w, f.h, { cam: f.cam, kinds: ['albedo', 'normal', 'dist'], extra: st.extra }));
       }
+    }finally{ unstage(st); }
+    // the time left from the samples' own pace (the shader compiling first is not part of it):
+    // the work is every view's pixels times the samples
+    const views = [{ w: a.w, h: a.h, cam: null, aux, label: a.kind === 'view' ? 'the ground you see' : 'the whole place' }]
+      .concat(faces.list.map((f, i) => ({ ...f, aux: faux[i], label: faces.list.length > 1 ? `walls and objects, view ${i + 1} of ${faces.list.length}` : 'walls and objects you see' })));
+    const work = views.reduce((k, v) => k + v.w * v.h * samples, 0);
+    let workDone = 0, paced = null;
+    const lights = [];
+    for(let vi = 0; vi < views.length; vi++){
+      const v = views[vi];
+      if(vi > 0){
+        pt._pathTracer.setSize(v.w, v.h);
+        pt.tiles.set(Math.ceil(v.w / 512), Math.ceil(v.h / 512));
+        pt.setCamera(v.cam);
+      }
+      pt.reset();
+      const ok = await traceBake(pt, samples, () => {
+        const n = Math.floor(pt.samples), s = secs(), now = workDone + n * v.w * v.h;
+        if(n >= 1 && paced === null) paced = { work: now, t: performance.now() };
+        const rate = paced && now - paced.work > 0 ? (now - paced.work) / ((performance.now() - paced.t) / 1000) : 0;
+        const left = rate > 0 ? (work - now) / rate : null;
+        bakeNote(pt.isCompiling && !n ? `Compiling the path tracer's shader for this graphics card… ${s} s (the first time in a session it can take a minute or more).`
+          : `Baking the light of ${v.label} (${v.w} × ${v.h} px): ${n} of ${samples} samples, ${s} s`
+            + (left != null ? `, about ${Math.max(1, Math.round(left))} s left.` : '.') + ' The view stays live meanwhile.');
+        if(job) job.set(pt.isCompiling && !n ? "compiling the path tracer's shader (once a session)" : `${v.label}: ${n} of ${samples} samples`,
+                        pt.isCompiling && !n ? null : now / work, left);
+      });
+      if(!ok) throw new Error('stopped');
+      workDone += samples * v.w * v.h;
+      const c = (() => { try{ return lightIn(pt.target); }catch(e){ return null; } })();
+      if(c && c.lit === 0) throw new Error(`the traced light came out ${c.bad ? 'invalid' : 'black'} on this graphics card (${gpuInfo().name})`);
+      // the noise cleared as the photo's is (if the denoiser is there), then into the light map
+      let light = pt.target.texture, out = null;
+      if(DENOISE){
+        try{
+          bakeNote('Clearing the noise (Open Image Denoise)…');
+          if(job) job.set('clearing the noise (Open Image Denoise)', workDone / work);
+          if(!denoiser){
+            denoiserLoad = denoiserLoad || Denoiser.load(renderer.getContext(), new URL('./vendor/oidn/rt_hdr_calb_cnrm.tza', import.meta.url).href);
+            denoiser = await denoiserLoad;
+          }
+          if(BAKE.cancel) throw new Error('stopped');
+          out = new THREE.WebGLRenderTarget(v.w, v.h, { type: THREE.FloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                        minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+          renderer.initRenderTarget(out);
+          const tex = rt => renderer.properties.get(rt.texture).__webglTexture;
+          try{
+            denoiser.denoise({ color: tex(pt.target), albedo: tex(v.aux.albedo), normal: tex(v.aux.normal), output: tex(out), width: v.w, height: v.h });
+          }finally{ renderer.resetState(); }
+          light = out.texture;
+        }catch(e){
+          if(out){ out.dispose(); out = null; }
+          if(e.message === 'stopped') throw e;
+          console.error('Bake light: denoiser', e);
+        }
+      }
+      if(vi === 0) lights.push(lightMap(light, v.aux, v.w, v.h));
+      else{
+        if(!atlas){
+          atlas = new THREE.WebGLRenderTarget(faces.W, faces.H, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, depthBuffer: false,
+                                                                  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+          const keep = renderer.getRenderTarget(), cc = renderer.getClearColor(new THREE.Color()), ca = renderer.getClearAlpha();
+          renderer.setRenderTarget(atlas); renderer.setClearColor(0x000000, 1e4); renderer.clear();
+          renderer.setClearColor(cc, ca); renderer.setRenderTarget(keep);
+        }
+        lightMap(light, v.aux, v.w, v.h, atlas, v.rect);
+      }
+      if(out) out.dispose();
     }
-    const map = lightMap(light, aux, a.w, a.h);
-    BAKE.list = BAKE.list.filter(b => { if(b.key !== key) return true; b.map.dispose(); return false; });
-    BAKE.list.unshift({ key, time: bakeTime, area: a.kind, mpp: a.mpp, samples, map, matrix: a.matrix,
-                        base: a.base, tol: [0.03 + 0.1 * a.mpp, 0.06 + 0.2 * a.mpp], seconds: secs() });
-    while(BAKE.list.length > BAKE_KEEP) BAKE.list.pop().map.dispose();
+    const map = lights[0];
+    const walls = atlas ? { map: atlas, mode: faces.mode, pos: faces.pos.clone(), mats: faces.list.map(f => f.matrix),
+                            rects: faces.list.map(f => new THREE.Vector4(...f.rect)) } : null;
+    BAKE.list = BAKE.list.filter(b => { if(b.key !== key) return true; dropBake(b); return false; });
+    BAKE.list.unshift({ key, time: bakeTime, sky: bakeTime === 'hdri' && hdri ? hdri.entry.name : null, area: a.kind, mpp: a.mpp, samples, map, matrix: a.matrix,
+                        base: a.base, tol: [0.03 + 0.1 * a.mpp, 0.06 + 0.2 * a.mpp], seconds: secs(), walls });
+    atlas = null;
+    while(BAKE.list.length > BAKE_KEEP) dropBake(BAKE.list.pop());
     BAKE.on = true;
     done = true;
   }catch(e){
     if(e.message !== 'stopped'){ console.error('Bake light:', e); bakeNote('The bake did not work here: ' + e.message, true); }
   }finally{
     if(aux) for(const rt of Object.values(aux)) rt.dispose();
-    if(out) out.dispose();
+    for(const fa of faux) for(const rt of Object.values(fa)) rt.dispose();
+    if(atlas) atlas.dispose();
     // the tracer back as the photo has it, its big pictures let go
     pt.synchronizeRenderSize = keepPt.sync; pt.tiles.copy(keepPt.tiles);
     pt._pathTracer.setSize(16, 16);
@@ -1581,6 +2203,9 @@ const showLight = () => {
   $('#lampStrength').value = Math.round(LIGHT.lamps * 100); $('#lampStrengthVal').textContent = Math.round(LIGHT.lamps * 100) + '%';
   $('#lampColour').value = LIGHT.colour;
   $('#wetRoads').value = Math.round(LIGHT.wet * 100); $('#wetRoadsVal').textContent = Math.round(LIGHT.wet * 100) + '%';
+  $('#puddles').value = Math.round(LIGHT.puddles * 100); $('#puddlesVal').textContent = Math.round(LIGHT.puddles * 100) + '%';
+  $('#liveMirror').checked = !!LIGHT.mirror;
+  $('#puddles').disabled = !(LIGHT.wet > 0); $('#liveMirror').disabled = !(LIGHT.wet > 0);
 };
 showLight();
 $('#sunStrength').addEventListener('input', () => {
@@ -1602,14 +2227,122 @@ $('#wetRoads').addEventListener('input', () => {
   if(photo && photo.on) stopPhoto();
   applyWet();
 });
+$('#puddles').addEventListener('input', () => { LIGHT.puddles = +$('#puddles').value / 100; showLight(); saveLight(); });
+$('#liveMirror').addEventListener('change', () => { LIGHT.mirror = $('#liveMirror').checked; saveLight(); });
 $('#lampColour').addEventListener('input', () => {
   LIGHT.colour = $('#lampColour').value; saveLight();
   if(photo && photo.on) stopPhoto();
   if(lamps) lampLevel(TIMES[time].lamps);
   applyBake();
 });
+// the Sky panel: the physical sky or an HDRI, its rotation and strength, your own skies
+const PHYSICAL_THUMB = 'linear-gradient(#3f6fb0, #8fb5df 70%, #d8e3ea)';
+function skyNoteText(text, bad){
+  const n = $('#skyNote');
+  if(n){ n.textContent = text; n.classList.toggle('bad', !!bad); }
+}
+function showSky(){
+  const box = $('#skyList');
+  if(!box) return;
+  const base = new URL('./', import.meta.url).href;
+  const cards = [{ id: 'physical', name: 'Physical sky', sub: 'by the time of day', bg: PHYSICAL_THUMB }].concat(skyList.map(e => ({
+    id: e.id, name: e.name, sub: (SKY_KINDS[e.kind] || SKY_KINDS.day).label + (e.builtin ? '' : ', yours'),
+    bg: e.thumb_url ? `url("${base + e.thumb_url}")` : 'linear-gradient(#56606e, #9aa4b0)' })));
+  box.innerHTML = '';
+  for(const c of cards){
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'sky-card'; b.setAttribute('aria-pressed', c.id === SKY.id ? 'true' : 'false');
+    b.innerHTML = '<div class="sky-thumb"></div><b></b><small></small>';
+    b.querySelector('.sky-thumb').style.backgroundImage = c.bg;
+    b.querySelector('b').textContent = c.name; b.querySelector('small').textContent = c.sub;
+    b.title = c.id === 'physical' ? "Blender's physical sky, set by the time of day below" : `Use the sky "${c.name}"`;
+    b.addEventListener('click', () => { if(c.id !== SKY.id || (c.id !== 'physical' && time !== 'hdri')) useSky(c.id); });
+    box.appendChild(b);
+  }
+  const e = skyList.find(x => x.id === SKY.id), on = !!e;
+  $('#skyRotation').disabled = !on; $('#skyStrength').disabled = !on;
+  $('#skyRotation').value = SKY.rotation; $('#skyRotationVal').textContent = Math.round(SKY.rotation) + '°';
+  $('#skyStrength').value = Math.round(SKY.strength * 10);
+  $('#skyStrengthVal').textContent = (SKY.strength > 0 ? '+' : '') + SKY.strength.toFixed(1) + ' EV';
+  $('#skyKindRow').hidden = !(e && !e.builtin);
+  if(e) $('#skyKind').value = e.kind || 'day';
+  $('#btnSkyDelete').disabled = !(e && !e.builtin);
+  if(hdriLoading) return;
+  if(!e) skyNoteText(SKY.id === 'physical' ? "Physical sky: Blender's sky for the time of day below. Pick a photographed sky (HDRI) for clouds, "
+    + 'its own sun and light; Import HDRI uses your own.' : 'Loading the list of skies…');
+  else{
+    const sunNote = hdri && hdri.id === e.id ? (hdri.sun.sharp > 300 && hdriSun(hdri).elev > -1
+      ? ` Its sun is at ${Math.round(hdriSun(hdri).elev)}° and casts the shadows.` : ' No sharp sun in it: soft light from the whole sky.') : '';
+    skyNoteText((e.builtin ? `${e.title}, by ${(e.authors || []).join(', ')}, Poly Haven, ${e.licence}.` : `Your sky, from ${e.original || e.file}.`)
+      + sunNote + ' Render photo and Bake light use it too.');
+  }
+}
+async function refreshSkies(){
+  try{
+    const r = await fetch('/api/skies');
+    if(!r.ok) throw new Error(r.statusText);
+    skyList = (await r.json()).skies || [];
+  }catch(e){ skyList = []; }
+  showSky();
+}
+const skiesReady = refreshSkies();
+$('#skyRotation').addEventListener('input', () => {
+  SKY.rotation = +$('#skyRotation').value; saveSky(); showSky();
+  if(photo && photo.on) stopPhoto();
+  hdriChanged();
+});
+$('#skyStrength').addEventListener('input', () => {
+  SKY.strength = +$('#skyStrength').value / 10; saveSky(); showSky();
+  if(photo && photo.on) stopPhoto();
+  hdriChanged();
+});
+$('#skyRotation').addEventListener('dblclick', () => { SKY.rotation = 0; saveSky(); showSky(); hdriChanged(); });
+$('#skyStrength').addEventListener('dblclick', () => { SKY.strength = 0; saveSky(); showSky(); hdriChanged(); });
+$('#skyKind').addEventListener('change', async () => {
+  const e = skyList.find(x => x.id === SKY.id);
+  if(!e || e.builtin) return;
+  try{
+    const r = await fetch(`/api/skies/${e.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: $('#skyKind').value }) });
+    if(!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    Object.assign(e, await r.json());
+  }catch(err){ skyNoteText('Could not change it: ' + err.message, true); return; }
+  if(hdri && hdri.id === e.id){
+    // the same picture, brought to its new kind of light
+    const kind = SKY_KINDS[e.kind] || SKY_KINDS.day;
+    hdri.kind = e.kind;
+    hdri.scale = e.kind === 'night' ? kind.skyY / Math.max(hdri.skyY, 1e-6) : kind.level / Math.max(hdri.level, 1e-6);
+    if(photo && photo.on) stopPhoto();
+    hdriChanged();
+  }
+  showSky();
+});
+$('#btnSkyImport').addEventListener('click', () => $('#skyFile').click());
+$('#skyFile').addEventListener('change', async () => {
+  const f = $('#skyFile').files[0];
+  $('#skyFile').value = '';
+  if(!f) return;
+  const fd = new FormData();
+  fd.append('file', f); fd.append('kind', /night/i.test(f.name) ? 'night' : /sunset|sunrise|dusk|dawn/i.test(f.name) ? 'sunset' : /overcast|cloudy/i.test(f.name) ? 'overcast' : 'day');
+  skyNoteText(`Importing ${f.name} (${(f.size / 1048576).toFixed(1)} MB)…`);
+  try{
+    const r = await fetch('/api/skies/import', { method: 'POST', body: fd });
+    const res = await r.json();
+    if(!r.ok) throw new Error(res.detail || r.statusText);
+    await refreshSkies();
+    window.dispatchEvent(new CustomEvent('rta-log', { detail: `Sky imported: ${res.name} (light like: ${(SKY_KINDS[res.kind] || SKY_KINDS.day).label}; change it under the sky list if it is not).` }));
+    useSky(res.id);
+  }catch(err){ skyNoteText(`${f.name} could not be imported: ${err.message}`, true); }
+});
+$('#btnSkyDelete').addEventListener('click', async () => {
+  const e = skyList.find(x => x.id === SKY.id);
+  if(!e || e.builtin || !confirm(`Delete the sky "${e.name}" from the workspace?`)) return;
+  try{ await fetch(`/api/skies/${e.id}`, { method: 'DELETE' }); }catch(_){}
+  if(hdri && hdri.id === e.id){ const h = hdri; hdri = null; useSky('physical'); dropHdri(h); }
+  else useSky('physical');
+  await refreshSkies();
+});
 // the Ground plane panel
-const GROUND_FIELDS = { gndX: 'x', gndY: 'y', gndZ: 'z', gndTurn: 'turn', gndW: 'width', gndL: 'length' };
+const GROUND_FIELDS ={ gndX: 'x', gndY: 'y', gndZ: 'z', gndTurn: 'turn', gndW: 'width', gndL: 'length' };
 const showGround = () => {
   $('#gndShow').checked = !!GROUND.show;
   for(const [id, k] of Object.entries(GROUND_FIELDS)) $('#' + id).value = GROUND[k];
@@ -1637,10 +2370,56 @@ $('#gndColour').addEventListener('input', () => { GROUND.colour = $('#gndColour'
 $('#btnGndReset').addEventListener('click', () => { Object.assign(GROUND, GROUND_DEFAULT); showGround(); groundChanged(); });
 // the Look panel: a change shows at once, in the live view and the photo alike (no new render)
 const lookApi = lookPanel(look, () => { if(bloomFrom) setBloom(...bloomFrom); });
+// its depth of field: kept in this browser; the photo is traced again with a new setting
+// the slider: f/0.005 to f/22 evenly in stops (below f/1, more than a real lens: a whole street
+// looks like a model, the miniature look)
+const FSTOP = v => 0.005 * Math.pow(22 / 0.005, v / 100), FSTOP_V = n => Math.round(100 * Math.log(n / 0.005) / Math.log(22 / 0.005));
+const showDof = () => {
+  $('#dofOn').checked = DOF.on;
+  $('#dofFstop').value = FSTOP_V(DOF.fstop);
+  $('#dofFstopVal').textContent = 'f/' + (DOF.fstop < 0.1 ? DOF.fstop.toFixed(3) : DOF.fstop < 1 ? DOF.fstop.toFixed(2) : DOF.fstop < 10 ? DOF.fstop.toFixed(1) : Math.round(DOF.fstop));
+  $('#dofFocus').value = DOF.focus; $('#dofDist').value = +(+DOF.distance).toFixed(1);
+  $('#camLens').value = String(DOF.lens || 0);
+  $('#dofDist').disabled = DOF.focus !== 'fixed';
+  if(DOF.focus === 'fixed') $('#dofFocusVal').textContent = '';
+  for(const id of ['dofFstop', 'dofFocus', 'btnDofPick']) $('#' + id).disabled = !DOF.on;
+  if(!DOF.on) $('#dofDist').disabled = true;
+};
+const dofChanged = () => {
+  saveDof(); showDof();
+  dof.enabled = DOF.on;
+  if(photo && photo.on) stopPhoto('Depth of field changed: back to the live view (Render photo traces it again).');
+};
+showDof();
+$('#dofOn').addEventListener('change', () => { DOF.on = $('#dofOn').checked; dofChanged(); if(DOF.on && renderer) indexScene(); });
+$('#camLens').addEventListener('change', () => { DOF.lens = +$('#camLens').value; saveDof(); applyLens(); if(photo && photo.on) stopPhoto('The lens changed: back to the live view.'); });
+$('#dofFstop').addEventListener('input', () => { const n = FSTOP(+$('#dofFstop').value); DOF.fstop = +n.toFixed(n < 0.1 ? 3 : n < 1 ? 2 : 1); dofChanged(); });
+$('#dofFocus').addEventListener('change', () => {
+  if($('#dofFocus').value === 'fixed' && focusNow) DOF.distance = +focusNow.toFixed(1);   // from where it is focused now
+  DOF.focus = $('#dofFocus').value; dofChanged();
+});
+$('#dofDist').addEventListener('input', () => { const v = parseFloat($('#dofDist').value); if(v > 0){ DOF.distance = v; saveDof(); if(photo && photo.on) stopPhoto(); } });
+// Pick focus: the next click in the view focuses at that spot
+let dofPicking = false;
+$('#btnDofPick').addEventListener('click', async () => {
+  if(!renderer || !world) return;
+  await indexScene();
+  dofPicking = true;
+  host.style.cursor = 'crosshair';
+  $('#btnDofPick').textContent = 'Click a spot in the view…';
+});
+host.addEventListener('click', e => {
+  if(!dofPicking) return;
+  dofPicking = false; host.style.cursor = ''; $('#btnDofPick').textContent = 'Pick focus in the view';
+  const b = renderer.domElement.getBoundingClientRect();
+  const d = surfaceAt(((e.clientX - b.left) / b.width) * 2 - 1, -((e.clientY - b.top) / b.height) * 2 + 1);
+  if(d === null) return;
+  DOF.focus = 'fixed'; DOF.distance = +d.toFixed(2); dofChanged();
+}, true);
 $('#btnPhoto').addEventListener('click', startPhoto);
 $('#btnBake').addEventListener('click', bakeLight);
 $('#bakeOn').addEventListener('change', () => { BAKE.on = $('#bakeOn').checked; if(renderer) applyBake(); });
-for(const id of ['bakeArea', 'bakeQuality']){
+for(const id of ['bakeArea', 'bakeQuality', 'bakeWalls']){
   const el = $('#' + id);
   try{ const v = localStorage.getItem('rta.view3d.' + id); if(v && [...el.options].some(o => o.value === v)) el.value = v; }catch(e){}
   el.addEventListener('change', () => { try{ localStorage.setItem('rta.view3d.' + id, el.value); }catch(e){} });
@@ -1653,7 +2432,11 @@ $('#photoDenoise').addEventListener('change', () => {
   try{ localStorage.setItem('rta.view3d.denoise', DENOISE ? 'on' : 'off'); }catch(e){}
   if(photo && photo.on && DENOISE && photo.clean) photo.clean.next = 0;    // denoise what there is now
 });
-document.querySelectorAll('[data-time3d]').forEach(b => b.addEventListener('click', () => { if(renderer) setTime(b.dataset.time3d); else time = b.dataset.time3d; }));
+// a time of day is the physical sky's: picking one leaves an HDRI sky
+document.querySelectorAll('[data-time3d]').forEach(b => b.addEventListener('click', () => {
+  if(SKY.id !== 'physical'){ SKY.id = 'physical'; saveSky(); hdriLoading = null; showSky(); }
+  if(renderer) setTime(b.dataset.time3d); else time = b.dataset.time3d;
+}));
 $('#btnView3dReset').addEventListener('click', () => { if(renderer) frame(centre, radius); });
 window.view3dState = () => renderer ? { children: scene.children.length, width: host.clientWidth, height: host.clientHeight,
   camera: camera.position.toArray().map(v => Math.round(v)), time, lamps: lamps ? lamps.items.length : 0,
@@ -1663,8 +2446,9 @@ window.view3dState = () => renderer ? { children: scene.children.length, width: 
           mpp: b.mpp, samples: b.samples, seconds: b.seconds })) } } : null;
 window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.assign(TIMES[n], patch); if(patch.candela) LAMP.candela = patch.candela; setTime(n); }, view: (pos, tgt) => { camera.position.set(...pos); controls.target.set(...tgt); controls.update(); poolAt = null; },
   photo: startPhoto, stop: stopPhoto,
-  bake: (area, samples) => {
+  bake: (area, samples, walls) => {
     if(area) $('#bakeArea').value = area;
+    if(walls) $('#bakeWalls').value = walls;
     if(samples){
       const q = $('#bakeQuality');
       if(![...q.options].some(o => o.value === String(samples))) q.add(new Option(`${samples} samples`, String(samples)));
@@ -1672,7 +2456,19 @@ window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.
     }
     return bakeLight();
   },
-  baked: on => { BAKE.on = !!on; applyBake(); }, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
+  baked: on => { BAKE.on = !!on; applyBake(); },
+  wet: (wet, puddles, mirror = true) => { LIGHT.wet = wet; if(puddles != null) LIGHT.puddles = puddles; LIGHT.mirror = mirror; showLight(); applyWet(); }, draw: () => draw(), denoise: () => photo && photo.on ? denoisePhoto(Math.floor(photo.pt.samples)) : null,
   // for comparisons: the path tracer's light tree on or off (off: each light as likely)
   lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
-  capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi };
+  capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi,
+  dof: async patch => { Object.assign(DOF, patch); dofChanged(); applyLens(); if(DOF.on) await indexScene(); focusAim = null; focusMoved = 0;
+                        return { ...DOF, now: DOF.on ? focusDistance(true) : null }; },
+  // the sky: an id of the list (or 'physical'), turned and as strong as given; resolves when shown
+  sky: async (id, rotation, strength) => {
+    await skiesReady;
+    if(rotation != null) SKY.rotation = rotation;
+    if(strength != null) SKY.strength = strength;
+    await useSky(id);
+    return { time, id: SKY.id, sun: hdri && time === 'hdri' ? { ...hdriSun(hdri), sharp: hdri.sun.sharp, Y: hdri.sun.Y } : null,
+             scale: hdri ? hdri.scale : null, exposure: renderer.toneMappingExposure, skies: skyList.map(e => e.id) };
+  } };

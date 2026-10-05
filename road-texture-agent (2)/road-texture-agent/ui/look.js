@@ -203,6 +203,90 @@ export class GradePass extends Pass {
   dispose(){ this.material.dispose(); this.quad.dispose(); if(this.lut) this.lut.texture.dispose(); }
 }
 
+// ----------------------------------------------------------------- depth of field
+// What a camera lens does: what is at the focus distance sharp, nearer and further
+// blurred by the circle a point makes on the film, worked out as the lens would (thin
+// lens: the focal length from the view's angle on a 35 mm frame, the aperture its f-stop),
+// so the live view blurs as Render photo does with the same settings (its path tracer
+// traces the lens itself). Each pixel gathers the pixels round it whose own blur reaches
+// it, so a sharp subject keeps its edges against a blurred background, and a blurred
+// foreground spreads over what is behind it.
+const DOF_FRAG = `
+precision highp float;
+uniform sampler2D tDiffuse, tDepth;
+uniform vec2 texel;
+uniform float near, far, focus, lensF, aperture, filmH, maxCoc;
+in vec2 vUv;
+out vec4 outColor;
+float viewZ(vec2 at){
+  float d = texture(tDepth, at).x;
+  return near * far / max(far - d * (far - near), 1e-6);
+}
+// the blur circle's radius in pixels for something z metres away (in front: negative)
+float coc(float z){
+  float c = aperture * lensF * (z - focus) / max(z * (focus - lensF), 1e-6);
+  return clamp(0.5 * c / filmH / texel.y, -maxCoc, maxCoc);
+}
+vec3 src(vec2 at){
+  vec3 c = texture(tDiffuse, at).rgb;
+  if(any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+  return clamp(c, 0.0, 6.0e4);
+}
+void main(){
+  float zc = viewZ(vUv), cc = coc(zc);
+  vec3 sum = src(vUv);
+  float wsum = 1.0;
+  // a spiral of samples out to the largest blur there can be
+  const int N = 64;
+  for(int i = 1; i < N; i++){
+    float r = sqrt(float(i) / float(N)) * maxCoc;
+    float a = float(i) * 2.39996323;
+    vec2 at = vUv + vec2(cos(a), sin(a)) * r * texel;
+    float zs = viewZ(at), cs = coc(zs);
+    // a sample behind this pixel is seen only as far as this pixel's own blur lets it
+    float reach = zs > zc ? min(abs(cs), abs(cc)) : abs(cs);
+    float w = smoothstep(r - 1.0, r + 0.5, reach);
+    sum += src(at) * w; wsum += w;
+  }
+  outColor = vec4(sum / wsum, 1.0);
+}`;
+
+export class DofPass extends Pass {
+  constructor(){
+    super();
+    this.uniforms = { tDiffuse: { value: null }, tDepth: { value: null }, texel: { value: new THREE.Vector2() },
+      near: { value: 0.5 }, far: { value: 8000 }, focus: { value: 20 }, lensF: { value: 0.035 }, aperture: { value: 0.0125 },
+      filmH: { value: 0.024 }, maxCoc: { value: 16 } };
+    this.material = new THREE.RawShaderMaterial({ name: 'DofShader', uniforms: this.uniforms, vertexShader: VERT, fragmentShader: DOF_FRAG,
+                                                  glslVersion: THREE.GLSL3, depthTest: false, depthWrite: false });
+    this.quad = new FullScreenQuad(this.material);
+    this.depth = null;                     // the scene's depth texture, from the contact shadows' pass
+    this.camera = null;
+    this.fStop = 2.8;
+    this.focus = 20;
+    this.enabled = false;
+  }
+
+  // with the camera as it is now (its near and far follow the zoom); the largest blur is
+  // capped so the gathering stays quick
+  render(renderer, writeBuffer, readBuffer){
+    const u = this.uniforms, cam = this.camera;
+    const f = cam.getFocalLength() / 1000, filmH = cam.getFilmHeight() / 1000;
+    u.tDiffuse.value = readBuffer.texture; u.tDepth.value = this.depth;
+    u.texel.value.set(1 / readBuffer.width, 1 / readBuffer.height);
+    u.near.value = cam.near; u.far.value = cam.far;
+    u.focus.value = Math.max(this.focus, f * 1.01); u.lensF.value = f; u.aperture.value = f / this.fStop; u.filmH.value = filmH;
+    // the furthest blur: something at infinity (or very near), in pixels, within 3% of the height
+    const inf = 0.5 * (f / this.fStop) * f / Math.max(u.focus.value - f, 1e-6) / filmH * readBuffer.height;
+    u.maxCoc.value = Math.min(Math.max(inf * 1.5, 1), 0.03 * readBuffer.height, 40);
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
+    if(this.clear) renderer.clear();
+    this.quad.render(renderer);
+  }
+
+  dispose(){ this.material.dispose(); this.quad.dispose(); }
+}
+
 // ----------------------------------------------------------------- LUTs
 // a .cube file (as the server stores them: 3D, red changing fastest) as a 3D texture
 export function parseCube(text){

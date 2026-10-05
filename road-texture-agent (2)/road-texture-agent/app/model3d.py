@@ -1390,8 +1390,10 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     cen = P32[t2].mean(axis=1)
     reg = frames.region_of(cen[:, 0], cen[:, 2])
     prims = []
-    for vk in sorted({frames.variant_of(int(k)) % len(tiles["sidewalk"]) for k in reg}):
-        sel = np.array([frames.variant_of(int(k)) % len(tiles["sidewalk"]) == vk for k in reg])
+    # the squares' own material when one is chosen (cobblestone fans, say), else the sidewalks'
+    ptiles = tiles.get("block") or tiles["sidewalk"]
+    for vk in sorted({frames.variant_of(int(k)) % len(ptiles) for k in reg}):
+        sel = np.array([frames.variant_of(int(k)) % len(ptiles) == vk for k in reg])
         remap, pos, uvs, col, idx = {}, [], [], [], []
         for t, k in zip(t2[sel], reg[sel]):
             row = []
@@ -1404,7 +1406,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
             idx.append(row)
         pos = np.array(pos)
         f = frames.tone(pos[:, 0], pos[:, 2])
-        tile = tiles["sidewalk"][vk]
+        tile = ptiles[vk]
         tile_material(f"Block_paving_{vk + 1}", Image.open(tile["path"]), images, materials,
                       (tile_m, tile_m), _sidewalk_kind(tile), 0.85, surface, own=LIB.own_maps(tile))
         prims.append({"positions": pos, "normals": np.tile([0, 1, 0], (len(pos), 1)), "uv0": np.array(uvs),

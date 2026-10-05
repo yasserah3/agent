@@ -20,7 +20,8 @@ from scipy import ndimage as ndi
 DIR = Path(__file__).with_name("scans")
 KINDS_FOR_PART = {"street": ("asphalt", "concrete"),
                   "sidewalk": ("paving", "concrete", "asphalt"),
-                  "kerb": ("concrete",)}
+                  "kerb": ("concrete",),
+                  "square": ("paving", "concrete", "asphalt")}
 
 
 def materials():

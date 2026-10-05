@@ -2,7 +2,8 @@ three.js r186 (MIT licence, see LICENSE), bundled so the 3D tab works offline:
 three.module.min.js and three.core.min.js minified from build/three.module.js
 and build/three.core.js (the module's import of ./three.core.js pointed at
 ./three.core.min.js), and under addons/ the files the 3D tab uses from
-examples/jsm, unchanged. ui/index.html maps "three" and "three/addons/" to
+examples/jsm, unchanged (loaders/HDRLoader.js and loaders/EXRLoader.js, with
+libs/fflate.module.js (MIT), read the Sky panel's HDRI files). ui/index.html maps "three" and "three/addons/" to
 these in its import map.
 
 Also bundled, each with its own MIT licence:

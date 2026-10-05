@@ -1,0 +1,68 @@
+{
+  "skies": [
+    {
+      "id": "kloofendal_48d_partly_cloudy_puresky",
+      "name": "Partly cloudy day",
+      "kind": "day",
+      "background": "kloofendal_48d_partly_cloudy_puresky.jpg",
+      "background_k": 1.244215,
+      "light": "kloofendal_48d_partly_cloudy_puresky_light.hdr",
+      "thumb": "kloofendal_48d_partly_cloudy_puresky_thumb.jpg",
+      "title": "Kloofendal 48d Partly Cloudy (Pure Sky)",
+      "authors": [
+        "Greg Zaal",
+        "Jarod Guest"
+      ],
+      "source": "https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "belfast_sunset_puresky",
+      "name": "Sunset with clouds",
+      "kind": "sunset",
+      "background": "belfast_sunset_puresky.jpg",
+      "background_k": 0.46119,
+      "light": "belfast_sunset_puresky_light.hdr",
+      "thumb": "belfast_sunset_puresky_thumb.jpg",
+      "title": "Belfast Sunset (Pure Sky)",
+      "authors": [
+        "Dimitrios Savva",
+        "Greg Zaal",
+        "Jarod Guest"
+      ],
+      "source": "https://polyhaven.com/a/belfast_sunset_puresky",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "kloofendal_overcast_puresky",
+      "name": "Overcast",
+      "kind": "overcast",
+      "background": "kloofendal_overcast_puresky.jpg",
+      "background_k": 0.408132,
+      "light": "kloofendal_overcast_puresky_light.hdr",
+      "thumb": "kloofendal_overcast_puresky_thumb.jpg",
+      "title": "Kloofendal Overcast (Pure Sky)",
+      "authors": [
+        "Greg Zaal"
+      ],
+      "source": "https://polyhaven.com/a/kloofendal_overcast_puresky",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "kloppenheim_07_puresky",
+      "name": "Cloudy night",
+      "kind": "night",
+      "background": "kloppenheim_07_puresky.jpg",
+      "background_k": 1.440508,
+      "light": "kloppenheim_07_puresky_light.hdr",
+      "thumb": "kloppenheim_07_puresky_thumb.jpg",
+      "title": "Kloppenheim 07 (Pure Sky)",
+      "authors": [
+        "Greg Zaal",
+        "Jarod Guest"
+      ],
+      "source": "https://polyhaven.com/a/kloppenheim_07_puresky",
+      "licence": "CC0 1.0"
+    }
+  ]
+}

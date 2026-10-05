@@ -780,8 +780,17 @@ made of, before you press Generate texture:
   kept in this browser for the next time.
   - Streets: three asphalts (fine grey, new and dark, old and worn).
   - Sidewalks: four pavings (grey blocks, square slabs, hexagons, red brick),
-    the concretes or the asphalts. Blocks and islands use the sidewalk's.
+    two cobblestone fans (below), the concretes or the asphalts.
   - Kerbs: two concretes (exposed aggregate, brushed). Bridge decks use it too.
+  - **Squares, blocks and islands**: the paved areas between the roads. By
+    default *Same as sidewalks* (as before: the blocks and islands paved as
+    their sidewalks, the paving running on from them). Or a material of their
+    own, such as **cobblestone fans**: granite setts laid in overlapping arcs,
+    the classic pattern of old squares (Helsinki's Senate Square, Lisbon,
+    Prague). Two real scans, CC0 from Poly Haven by Rob Tuytel: *grey granite*
+    (arcs repeating every 1.2 m, setts about 8 cm) and *dark and worn* (2.5 m).
+    Each square's fans are turned to its main street, as its paving always is;
+    the sidewalks round it keep their own paving.
 - **Streets** get fresh tiles made from the scan, the way the tiles from your
   training are made (app/tiles.py), so a street never shows the scan
   repeating every couple of metres: patches of the scan half a metre across,
@@ -1275,6 +1284,16 @@ The **3D** tab shows the whole place in 3D, to look around:
   - *Wet roads* (0 to 100%, 0 is dry): streets, sidewalks and kerbs darken
     (paint less), turn glossy so the lamps and the sky shine in them, and their
     fine grain fills in. At night the lamps' pools stretch into reflections.
+  - *Puddles* (with Wet roads above 0): standing water in patches a few metres
+    across, smooth as a mirror and a little darker, on the streets, sidewalks
+    and squares (live view; Render photo shows the roads evenly wet).
+  - *Live reflections* (on): wet streets mirror the scene, not only the sky:
+    the buildings, the lamp posts and their lit heads, your objects, the clouds.
+    The scene is drawn a second time, mirrored under the street, at half size,
+    and the street surfaces show it where the sky would shine in them, blurred
+    as much as they are rough and strongest at a glancing view (as real
+    reflections are). Untick it for speed on a slow graphics card. Nothing
+    changes while the roads are dry. Render photo traces its own reflections.
   They are kept in the browser for the next time, and apply to Render photo too.
 - **The sky** at dawn and by day is Blender's own physical sky, the Sky
   Texture of Blender 5 (Multiple Scattering), ported to JavaScript: sunlight
@@ -1283,6 +1302,34 @@ The **3D** tab shows the whole place in 3D, to look around:
   the sunlight and the light of the sky, so the balance of sun and sky is that
   of Blender and Cycles; it matches Blender 5.0.1 to within 1%. It is worked
   out once per time of day, in the background, in a second or two.
+- **Sky: physical or HDRI** (the Sky panel). *Physical sky* is the one above,
+  set by Dawn, Day and Night. Or pick a photographed sky (an HDRI): four come
+  with the program, CC0 from Poly Haven (`ui/skies`): **Partly cloudy day**,
+  **Sunset with clouds**, **Overcast** and **Cloudy night**. What the camera
+  sees is a sharp 4k picture of the sky; the light is the HDR picture itself:
+  - **its sun** is found in it (the brightest spot, less the sky round it):
+    its direction, colour and strength become the sun's light, casting the
+    shadows, and it is taken out of the sky's light so it is not counted
+    twice. A sky without a sharp sun (overcast, a sun behind clouds, night)
+    lights softly from all round; the panel says which.
+  - **the rest of the sky** lights the scene from all round (its blue from
+    above, its warm glow from the horizon at sunset), and the haze takes the
+    colour of its horizon.
+  - **how bright**: HDR pictures do not say how bright their sky really was,
+    so each is brought to the light of the time of day it stands for (a sunny
+    day, an overcast day, dusk), and a night sky is kept dim under the street
+    lamps, which are on at sunset and at night as with the physical sky.
+  - **Rotation** turns the sky round, its sun and shadows with it; **Strength**
+    makes it brighter or darker, in stops. Double-click either to reset.
+  - **Import HDRI…** uses your own: an equirectangular (2:1) panorama, `.hdr`
+    or `.exr` (or a `.jpg` or `.png` photo, without HDR light), kept in the
+    workspace (`workspace/skies`). Set **Light like** (Day, Overcast, Sunset
+    or dawn, Night) so it is exposed right and the lamps are on when they
+    should be; a file name with "night", "sunset" or "overcast" sets it.
+    **Delete** removes one of yours.
+  Render photo and Bake light trace the HDRI's light too (its sun as a light,
+  the sky from all round, the sharp picture in view). A time of day (Dawn, Day,
+  Night) goes back to the physical sky. The sky in use is kept in the browser.
 - **The live view** is drawn with that sky, sunlight with shadows (sharp close
   up, covering everything when zoomed out), the sky's light from all round,
   the haze in the sky's own colour at the horizon, soft contact shadows where
@@ -1363,10 +1410,20 @@ overall tone; at dawn and at night (lamp pools, long shadows) it is large.
   and the lamps in wet roads, highlights) stays live too, and follows the
   camera as it should. The live contact shadows are lightened, and the
   lamps' painted pools hidden, while a bake shows: both are in the bake.
-- **Only the ground seen from above takes it**: walls, kerb faces, objects'
-  sides, and the ground under trees, bridges or the edge of the map keep the
-  live light. Each spot checks that the bake saw that very surface (the same
-  height), so a road under a bridge never takes the bridge's light.
+- **Walls and objects**: *What you see* (the default) also traces the view
+  from where the camera stands, every surface in it: walls, kerb faces, the
+  lamp posts, your buildings and objects, and the ground near by, as sharp as
+  the view. *All round you* traces four views round the camera (a little more
+  than a quarter turn each), so you can turn round in the street and the walls
+  behind you are baked too (about four times longer). *None* bakes the ground
+  only, as before. Each surface checks that the bake saw that very surface
+  (the same distance from where it was made, and facing it), so a wall never
+  takes the light of the one in front of it; what the views did not see
+  (round a corner, the far side of a building) keeps the live light. At night
+  this is where the lamps' light on the house fronts comes from.
+- **The ground from above**: each spot checks that the bake saw that very
+  surface (the same height), so a road under a bridge never takes the
+  bridge's light; walls are left to the views above.
 - **A bake belongs to its light**: the time of day, the sun's strength and the
   lamps' strength and colour. Change one and the live light shows (the note
   says so) until you bake again; the last three bakes are kept, so going back
@@ -1396,6 +1453,22 @@ image keeps it.
   **Vignette**, **Sharpen**, **Film grain** and **Glow** (the glow round bright
   lights, 100% being the time of day's own; it now glows in photos too).
   Double-click a slider to put it back.
+- **Lens**: the camera's focal length on a 35 mm frame: 25 mm (the view as it
+  always was), 18 mm very wide, 35, 50 (as the eye), 85 (portrait) or 135 mm
+  (telephoto, zoomed in). It changes the view itself, and how much depth of
+  field blurs.
+- **Depth of field** (off unless ticked): what is at the focus distance stays
+  sharp, nearer and further blurs, as a camera lens does. **Aperture** is the
+  lens's f-stop (f/1.4 blurs a lot, f/16 keeps more sharp; below f/1 is more
+  than a real lens: towards f/0.005 a whole street looks like a model, the
+  miniature look). **Focus**: on the middle of the view (found when the camera
+  stops, then eased to, as an autofocus does; the distance shows beside it) or
+  at a fixed distance; **Pick focus in the view** then a click sets it to that
+  spot. The live view blurs from the scene's depth; Render photo traces the
+  lens itself (its path tracer's physical camera, the same focal length,
+  aperture and focus), so the photo's blur is the real thing, bokeh included.
+  As with a real camera, a wide lens keeps a street sharp; for visible blur
+  use a longer lens, focus close, or a small f-number.
 - **LUT**: a colour lookup table, the usual way film emulations and colour
   grades are shared. **Import…** takes `.cube` files (3D or 1D, as from
   Resolve, Premiere, Photoshop and most LUT packs) and Hald CLUT pictures
@@ -1422,8 +1495,11 @@ needs installing:
   `ui/sky_blender.js` (MIT, and Apache 2.0 for Cycles' sky lookup);
 - `oidn`: Open Image Denoise's trained weights (Apache 2.0), run by
   `ui/denoise.js`, a port of OIDN 2.4's network (Apache 2.0).
-- `app/scans` (server side): nine scanned materials from Poly Haven, CC0
-  (public domain), listed with their authors in `app/scans/README.md`.
+- `app/scans` (server side): eleven scanned materials from Poly Haven, CC0
+  (public domain), listed with their authors in `app/scans/README.md`;
+- `ui/skies`: four HDRI skies from Poly Haven, CC0, listed with their authors
+  in `ui/skies/README.md`; HDR and EXR files are read by three.js's HDRLoader
+  and EXRLoader (with fflate, MIT).
 
 The Look panel's presets are written for this program (no third-party LUTs
 are bundled); LUTs you import keep their own licences.

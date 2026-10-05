@@ -129,6 +129,46 @@
       "licence": "CC0 1.0"
     },
     {
+      "id": "floor_pattern_02",
+      "name": "Cobblestone fans, grey granite",
+      "kind": "paving",
+      "pattern": "fan",
+      "quarter_turns": false,
+      "size_m": [
+        1.2,
+        1.2
+      ],
+      "colour": "floor_pattern_02_diff.jpg",
+      "normal": "floor_pattern_02_normal.jpg",
+      "roughness": "floor_pattern_02_rough.jpg",
+      "source": "https://polyhaven.com/a/floor_pattern_02",
+      "title": "Floor Pattern 02",
+      "authors": [
+        "Rob Tuytel"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "patterned_cobblestone",
+      "name": "Cobblestone fans, dark and worn",
+      "kind": "paving",
+      "pattern": "fan",
+      "quarter_turns": false,
+      "size_m": [
+        2.5,
+        2.5
+      ],
+      "colour": "patterned_cobblestone_diff.jpg",
+      "normal": "patterned_cobblestone_normal.jpg",
+      "roughness": "patterned_cobblestone_rough.jpg",
+      "source": "https://polyhaven.com/a/patterned_cobblestone",
+      "title": "Patterned Cobblestone",
+      "authors": [
+        "Rob Tuytel"
+      ],
+      "licence": "CC0 1.0"
+    },
+    {
       "id": "concrete_floor_01",
       "name": "Concrete, exposed aggregate",
       "kind": "concrete",

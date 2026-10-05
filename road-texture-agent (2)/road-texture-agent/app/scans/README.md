@@ -35,5 +35,7 @@ licence allows bundling.
 | Square concrete slabs | [Square Concrete Pavers](https://polyhaven.com/a/square_concrete_pavers) | 1.8 m | Amal Kumar |
 | Hexagonal concrete paving | [Hexagonal Concrete Paving](https://polyhaven.com/a/hexagonal_concrete_paving) | 1.6 m | Stephan Seeliger |
 | Red brick pavement | [Brick Pavement](https://polyhaven.com/a/brick_pavement) | 2.0 m | Charlotte Baglioni |
+| Cobblestone fans, grey granite | [Floor Pattern 02](https://polyhaven.com/a/floor_pattern_02) | 1.2 m | Rob Tuytel |
+| Cobblestone fans, dark and worn | [Patterned Cobblestone](https://polyhaven.com/a/patterned_cobblestone) | 2.5 m | Rob Tuytel |
 | Concrete, exposed aggregate | [Concrete Floor 01](https://polyhaven.com/a/concrete_floor_01) | 2.0 m | Rob Tuytel |
 | Concrete, brushed | [Brushed Concrete 03](https://polyhaven.com/a/brushed_concrete_03) | 2.0 m | Amal Kumar |

@@ -57,7 +57,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.05-kerb1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.05-sky1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -704,7 +704,9 @@ def delete_pair(pair_id: str):
 
 
 # the parts a library material can stand in for, and the tiles each replaces
-MATERIAL_PARTS = {"street": ("open", "edge", "junction"), "sidewalk": ("sidewalk",), "kerb": ("kerbstone",)}
+# square: the blocks and islands between the roads (by default paved as the sidewalks)
+MATERIAL_PARTS = {"street": ("open", "edge", "junction"), "sidewalk": ("sidewalk",), "kerb": ("kerbstone",),
+                  "square": ("block",)}
 
 
 def _apply_materials(tileset, choice, match_tone):
@@ -719,14 +721,14 @@ def _apply_materials(tileset, choice, match_tone):
     px = int(tileset["settings"].get("px", 1024))
     for part, tile_parts in MATERIAL_PARTS.items():
         mid = choice.get(part)
-        if not mid or mid == "tiles":
+        if not mid or mid in ("tiles", "same"):
             continue
         e = LIB.entry(mid)
         if not e or e["kind"] not in LIB.KINDS_FOR_PART[part]:
             raise ValueError(f"{mid} is not a {part} material in the library")
         def tone_of(t):
             own = (tileset["tiles"].get(t) or [None])[0]
-            if own is None and part == "kerb":
+            if own is None and part in ("kerb", "square"):
                 own = (tileset["tiles"].get("sidewalk") or [None])[0]
             if not match_tone or own is None:
                 return None
@@ -757,7 +759,7 @@ def _your_tile(part):
     if not row or not row["meta"].get("tiles"):
         return None
     tiles = row["meta"]["tiles"]
-    names = list(MATERIAL_PARTS[part]) + (["sidewalk"] if part == "kerb" else [])
+    names = list(MATERIAL_PARTS[part]) + (["sidewalk"] if part in ("kerb", "square") else [])
     tile = next((tiles[t][0] for t in names if tiles.get(t)), None)
     art = mem.artifact(tile["id"]) if tile else None
     if not art or not Path(art["path"]).exists():
@@ -778,7 +780,7 @@ def list_materials():
         yours[part] = t["tileset"] if t else None
     return {"parts": {p: list(k) for p, k in LIB.KINDS_FOR_PART.items()},
             "yours": yours,
-            "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence")}
+            "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence", "pattern")}
                           for e in LIB.materials()]}
 
 
@@ -865,6 +867,87 @@ def lut_file(lid: str):
 def delete_lut(lid: str):
     if not LOOKS.delete_lut(lid):
         raise HTTPException(404, "no such LUT of yours")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ skies
+# The 3D tab's HDRI skies: the ones that come with the program (ui/skies, CC0 from Poly
+# Haven: a sharp picture of the sky and a small HDR of its light each) and your own
+# (.hdr, .exr, or a .jpg or .png panorama), kept in workspace/skies with a note of what
+# kind of light they are (day, sunset, overcast or night: it decides the street lamps
+# and the exposure, since HDR pictures do not say how bright they really are).
+SKIES_BUILTIN = ROOT / "ui" / "skies"
+SKIES = WORK / "skies"
+SKY_KINDS = ("day", "sunset", "overcast", "night")
+SKY_EXT = {".hdr", ".exr", ".jpg", ".jpeg", ".png"}
+
+
+def _sky_meta(sid):
+    f = SKIES / f"{sid}.json"
+    return json.loads(f.read_text()) if re.fullmatch(r"[0-9a-f]{12}", sid or "") and f.exists() else None
+
+
+@app.get("/api/skies")
+def list_skies():
+    built = json.loads((SKIES_BUILTIN / "skies.json").read_text()).get("skies", []) if (SKIES_BUILTIN / "skies.json").exists() else []
+    out = [{**e, "builtin": True, "background_url": f"skies/{e['background']}", "light_url": f"skies/{e['light']}",
+            "thumb_url": f"skies/{e['thumb']}"} for e in built]
+    if SKIES.exists():
+        for f in sorted(SKIES.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            m = json.loads(f.read_text())
+            out.append({**m, "builtin": False, "file_url": f"/api/skies/{m['id']}/file"})
+    return {"skies": out, "kinds": list(SKY_KINDS)}
+
+
+@app.post("/api/skies/import")
+async def import_sky(file: UploadFile = File(...), kind: str = Form("day")):
+    """Your own sky: an equirectangular (2:1) panorama, HDR (.hdr, .exr) or not (.jpg, .png)."""
+    name = Path(file.filename or "sky.hdr").name
+    ext = Path(name).suffix.lower()
+    if ext not in SKY_EXT:
+        raise HTTPException(400, "use an .hdr or .exr file (or a .jpg or .png panorama)")
+    raw = await file.read()
+    if len(raw) > 400 * 1024 * 1024:
+        raise HTTPException(400, f"{name} is too large (over 400 MB)")
+    SKIES.mkdir(parents=True, exist_ok=True)
+    sid = uuid.uuid4().hex[:12]
+    (SKIES / f"{sid}{ext}").write_bytes(raw)
+    meta = {"id": sid, "name": Path(name).stem.replace("_", " ")[:60], "file": f"{sid}{ext}", "format": ext[1:],
+            "kind": kind if kind in SKY_KINDS else "day", "original": name}
+    (SKIES / f"{sid}.json").write_text(json.dumps(meta, indent=2))
+    mem.record("sky_import", f"imported sky {name}", {"id": sid})
+    return {**meta, "builtin": False, "file_url": f"/api/skies/{sid}/file"}
+
+
+@app.post("/api/skies/{sid}")
+def update_sky(sid: str, payload: dict):
+    """Your sky's name or kind of light."""
+    m = _sky_meta(sid)
+    if not m:
+        raise HTTPException(404, "no such sky of yours")
+    if payload.get("kind") in SKY_KINDS:
+        m["kind"] = payload["kind"]
+    if payload.get("name"):
+        m["name"] = str(payload["name"])[:60]
+    (SKIES / f"{sid}.json").write_text(json.dumps(m, indent=2))
+    return {**m, "builtin": False, "file_url": f"/api/skies/{sid}/file"}
+
+
+@app.get("/api/skies/{sid}/file")
+def sky_file(sid: str):
+    m = _sky_meta(sid)
+    if not m or not (SKIES / m["file"]).exists():
+        raise HTTPException(404, "no such sky")
+    return FileResponse(SKIES / m["file"], headers={"Cache-Control": "max-age=86400"})
+
+
+@app.delete("/api/skies/{sid}")
+def delete_sky(sid: str):
+    m = _sky_meta(sid)
+    if not m:
+        raise HTTPException(404, "no such sky of yours")
+    (SKIES / m["file"]).unlink(missing_ok=True)
+    (SKIES / f"{sid}.json").unlink(missing_ok=True)
     return {"ok": True}
 
 
