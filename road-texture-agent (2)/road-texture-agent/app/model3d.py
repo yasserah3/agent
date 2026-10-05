@@ -815,11 +815,15 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             f = float(map_coordinates(fac, [[y], [x]], order=1, mode="nearest")[0])
             c = 1.0 + (f - 1.0) * 0.5                       # paint wears too, but less than asphalt
             dcol.append((c, c, c, 1.0))
-        P = np.array(dpos, np.float32).astype(np.float64)     # the precision the file stores
+        # this dash's points at the precision the file stores (only its own: all the
+        # dashes so far, again for every dash, grew with the square of their number)
+        Pl = np.array(dpos[base:], np.float32).astype(np.float64).tolist()
         for k in range(len(strip) - 1):
             a, b, c, d = base + 2 * k, base + 2 * k + 1, base + 2 * k + 3, base + 2 * k + 2
             for t in ((a, b, c), (a, c, d)):
-                n_y = np.cross(P[t[1]] - P[t[0]], P[t[2]] - P[t[0]])[1]
+                # the y part of cross(B - A, C - A), as numpy works it out
+                A_, B_, C_ = Pl[t[0] - base], Pl[t[1] - base], Pl[t[2] - base]
+                n_y = (B_[2] - A_[2]) * (C_[0] - A_[0]) - (B_[0] - A_[0]) * (C_[2] - A_[2])
                 if abs(n_y) < 2e-6:
                     continue                                # no area: a repeated point
                 didx.append(t if n_y > 0 else (t[0], t[2], t[1]))
@@ -1324,12 +1328,12 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
         if parts:
             import shapely
             from shapely.ops import unary_union
-            grown = [p.buffer(0.001) for p in parts]
+            # grown a hair, as _sidewalk_union does, so pieces with a hairline between them join
+            grown = list(shapely.buffer(np.array(parts, object), 0.001))
             tree = shapely.STRtree(grown)
             cut = []
             for g in polys:
-                # the sidewalk near this block, merged as _sidewalk_union merges the
-                # whole of it: grown a hair, joined, shrunk back
+                # the sidewalk near this block, joined and shrunk back
                 x0, y0, x1, y1 = g.bounds
                 near = tree.query(shapely.box(x0 - 0.01, y0 - 0.01, x1 + 0.01, y1 + 0.01))
                 r = g.difference(unary_union([grown[i] for i in near]).buffer(-0.001)) if len(near) else g

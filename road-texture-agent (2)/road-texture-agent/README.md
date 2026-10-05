@@ -420,6 +420,24 @@ where they are used (not on the background), each patch's orientations are
 prepared once: the same map takes about 2 minutes (1 minute at Quality 1),
 with exactly the same picture, pixel for pixel.
 
+The **3D scene** had the same kind of problem: for every kerb point, block
+edge, junction group, lamp and dash it asked the whole city's road, kerb line,
+sidewalk or lamps (distances to the whole road outline, shrinking a block that
+holds the whole city as a hole for every sidewalk run, uniting every sidewalk
+piece, comparing each new lamp with every lamp so far, re-reading every dash so
+far for each dash). Now an index of the outline's edges answers distances and
+nearest points, each sidewalk run shrinks only the part of its block round it,
+the kerb apron is worked out tile by tile, each block is cut by the sidewalk
+near it, lamps look only at lamps nearby. Streets, junctions, sidewalks, kerbs
+and markings come out identical; blocks and the fill under the kerbs within
+0.02% (the same shapes, triangulated a little differently). On the test map
+above, the 3D model went from over an hour (it never finished) to minutes.
+
+**Big scenes in the 3D tab**: a 3.7 × 2.5 km city is millions of triangles and
+thousands of street lamps. Mesh detail *Optimised* (Generate tab, 3D model)
+keeps far fewer rows along straight streets; Bake light *Whole place* covers it
+at about 1.8 m a pixel, so bake *Round the view* where you look.
+
 ## Known limits
 
 - Patch seams can show at high zoom on wide roads. Larger overlap or

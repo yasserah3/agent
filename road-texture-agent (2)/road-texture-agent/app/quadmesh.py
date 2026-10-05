@@ -1671,10 +1671,16 @@ def lamp_spots(mesh, mpp, spacing_m=30.0, setback_m=0.45, min_width_m=0.8, min_g
     keep_out = prep(avoid) if avoid is not None and not avoid.is_empty else None
     step, back, gap = spacing_m / mpp, setback_m / mpp, min_gap_m / mpp
     out, grid = [], {}
+    # the lamps placed so far by where they stand, in squares as wide as the
+    # farthest a lamp across the street can be: only the nine squares round a
+    # new lamp are looked at, not every lamp of the city
+    reach = math.hypot(40.0 / mpp, 0.25 * step) + 1.0
+    near_grid = {}
 
     def facing(foot, face):
         # another lamp on the far side of the street, level with this one
-        for x, y, fx, fy in out:
+        cx, cy = int(foot[0] // reach), int(foot[1] // reach)
+        for x, y, fx, fy in (q for a in (-1, 0, 1) for b in (-1, 0, 1) for q in near_grid.get((cx + a, cy + b), [])):
             if fx * face[0] + fy * face[1] > -0.7:
                 continue
             v = foot - np.array([x, y])
@@ -1731,6 +1737,7 @@ def lamp_spots(mesh, mpp, spacing_m=30.0, setback_m=0.45, min_width_m=0.8, min_g
                     continue
                 grid.setdefault(cell, []).append((foot[0], foot[1]))
                 out.append((float(foot[0]), float(foot[1]), float(-n[0]), float(-n[1])))
+                near_grid.setdefault((int(foot[0] // reach), int(foot[1] // reach)), []).append(out[-1])
                 return True
             return None
 
