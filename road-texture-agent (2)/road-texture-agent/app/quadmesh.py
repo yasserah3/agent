@@ -32,6 +32,87 @@ def _lerp(a, b, t):
     return a + (b - a) * t
 
 
+class EdgeIndex:
+    """
+    Distances to a big shape (the road of a whole city, its kerb line), and the
+    nearest points on its edge, found through an index of its edge segments.
+
+    A shape's own distance() looks at every edge of the shape for every point:
+    on a city with hundreds of thousands of edges, asked for every kerb point
+    or block edge, that grew with the square of the map's size. The index looks
+    only at the edges nearby. The values are the same: 0 inside the shape (or on
+    it), otherwise the distance to the nearest edge segment, worked out the same
+    way, segment by segment.
+    """
+    _cache = {}
+
+    def __init__(self, geom):
+        import shapely
+        self.geom = geom
+        shapely.prepare(geom)
+        lines = []
+        for g in shapely.get_parts(geom):
+            if g.geom_type == "Polygon":
+                lines.extend([g.exterior] + list(g.interiors))
+            elif g.geom_type in ("LineString", "LinearRing"):
+                lines.append(g)
+            elif g.geom_type in ("MultiLineString", "GeometryCollection", "MultiPolygon"):
+                lines.extend(EdgeIndex(g).lines)
+        self.lines = lines
+        coords, idx = shapely.get_coordinates(lines, return_index=True) if lines else (np.zeros((0, 2)), np.zeros(0, int))
+        same = idx[1:] == idx[:-1]
+        a, b = coords[:-1][same], coords[1:][same]
+        self.segs = shapely.linestrings(np.stack([a, b], axis=1)) if len(a) else np.array([], object)
+        self.tree = shapely.STRtree(self.segs)
+        self.areal = any(g.geom_type == "Polygon" for g in shapely.get_parts(geom))
+
+    @classmethod
+    def of(cls, geom):
+        """The index of geom, made once and kept while geom lives."""
+        hit = cls._cache.get(id(geom))
+        if hit is not None and hit.geom is geom:
+            return hit
+        if len(cls._cache) > 16:
+            cls._cache.clear()
+        cls._cache[id(geom)] = idx = cls(geom)
+        return idx
+
+    def distance(self, xy):
+        """geom.distance(point) for each point (an n x 2 array)."""
+        import shapely
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        out = np.full(len(xy), np.inf)
+        if not len(xy) or not len(self.segs):
+            return out
+        pts = shapely.points(xy)
+        (i, j), d = self.tree.query_nearest(pts, return_distance=True, all_matches=False)
+        out[i] = d
+        if self.areal:
+            out[shapely.intersects(self.geom, pts)] = 0.0
+        return out
+
+    def nearest_many(self, xy):
+        """nearest() for each point of an n x 2 array, in one go."""
+        import shapely
+        xy = np.asarray(xy, float).reshape(-1, 2)
+        if not len(xy):
+            return xy.copy()
+        pts = shapely.points(xy)
+        i, j = self.tree.query_nearest(pts, all_matches=False)
+        out = xy.copy()
+        lines = shapely.shortest_line(self.segs[j], pts[i])          # from the edge to the point
+        out[i] = shapely.get_coordinates(lines)[0::2]
+        return out
+
+    def nearest(self, x, y):
+        """The point of geom's edge nearest to (x, y), as nearest_points gives it for a point outside."""
+        from shapely.geometry import Point
+        from shapely.ops import nearest_points
+        pt = Point(x, y)
+        k = self.tree.query_nearest(pt)
+        return nearest_points(self.segs[int(k[0])], pt)[0]
+
+
 class Mesh:
     def __init__(self):
         self.v = []          # (x, y) in texture pixels
@@ -187,8 +268,9 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     mesh.optimise = optimise
     streets = 0
 
+    seg_px = J.label_coords(seg_lab)                # every street's pixels, in one pass
     for sid in range(1, int(seg_lab.max()) + 1):
-        coords = np.argwhere(seg_lab == sid)
+        coords = seg_px[sid]
         if len(coords) < 2:
             continue
         path = _ordered_path(coords)
@@ -939,12 +1021,18 @@ def find_clusters(det, mpp, coverage, island_max_m2=2500.0, gap_m=10.0):
     islands = {}
     widths = 2 * det["dt"][det["skeleton"].astype(bool)]
     road_w = float(np.median(widths)) if widths.size else 8.0
+    lab_px = J.label_coords(lab, n) if n else []
     for i, a in enumerate(sizes, start=1):
         if i in edge_labels or a * mpp * mpp > island_max_m2:
             continue
-        ys, xs = np.nonzero(lab == i)
+        ys, xs = lab_px[i][:, 0], lab_px[i][:, 1]
         near = []
+        bx0, bx1, by0, by1 = xs.min(), xs.max(), ys.min(), ys.max()
         for j in js:
+            reach = j["r"] + road_w * 1.5
+            # a junction farther than that from the island's box cannot be near any of its pixels
+            if (max(bx0 - j["cx"], 0, j["cx"] - bx1) ** 2 + max(by0 - j["cy"], 0, j["cy"] - by1) ** 2) > reach * reach:
+                continue
             dmin = np.min(np.hypot(xs - j["cx"], ys - j["cy"]))
             if dmin <= j["r"] + road_w * 1.5:
                 near.append(int(j["id"]))
@@ -1042,13 +1130,23 @@ def cluster_fill_polys(clusters, coverage_out, scale):
         if not q.is_empty:
             polys.extend(q.geoms if hasattr(q, "geoms") else [q])
     pieces = []
+    # the road outline of a whole city is one huge shape: each group's area is cut
+    # from only the outline near it, first trimmed to the area's box (the same
+    # result as cutting it from the whole outline, without going over all of it
+    # for every group)
+    import shapely
+    tree = shapely.STRtree(polys) if polys else None
     for c in clusters:
         area = c.get("fill_region", c["region"])
-        if area is None or area.is_empty:
+        if area is None or area.is_empty or tree is None:
             continue
         region = sscale(area, xfact=scale, yfact=scale, origin=(0, 0))
-        for p in polys:
-            inter = p.intersection(region)
+        for i in sorted(tree.query(region)):
+            p = polys[i]
+            try:
+                inter = shapely.clip_by_rect(p, *region.bounds).intersection(region)
+            except Exception:
+                inter = p.intersection(region)
             if inter.is_empty:
                 continue
             geoms = inter.geoms if hasattr(inter, "geoms") else [inter]
@@ -1100,10 +1198,11 @@ def _cover_bare(mesh, coverage, scale, min_px=12):
         return 0
     sizes = ndi.sum(bare, lab, index=np.arange(1, n + 1))
     added = 0
+    lab_px = J.label_coords(lab, n)
     for i, a in enumerate(sizes, start=1):
         if a < min_px:
             continue
-        ys, xs = np.nonzero(lab == i)
+        ys, xs = lab_px[i][:, 0], lab_px[i][:, 1]
         region = MultiPoint(list(zip(xs.tolist(), ys.tolist()))).convex_hull.buffer(4.0)
         mesh.clusters.append({"members": [], "region": region, "centre": (float(xs.mean()), float(ys.mean())),
                               "islands": 0, "fallback": True, "kind": "fallback"})
@@ -1156,8 +1255,9 @@ def _pieces(det, clusters, shape):
         x0, x1 = max(0, int(cx - r) - 1), min(W, int(cx + r) + 2)
         cut[y0:y1, x0:x1] |= (yy[y0:y1, x0:x1] - cy) ** 2 + (xx[y0:y1, x0:x1] - cx) ** 2 <= r * r
 
+    node_px = J.label_coords(lab_n, nn)
     for i in range(1, nn + 1):
-        ys, xs = np.nonzero(lab_n == i)
+        ys, xs = node_px[i][:, 0], node_px[i][:, 1]
         cx, cy = float(xs.mean()), float(ys.mean())
         r = float(dt[int(round(cy)), int(round(cx))]) + 1.0
         nodes.append((cx, cy, r))
@@ -1172,8 +1272,9 @@ def _pieces(det, clusters, shape):
     for cx, cy, r in nodes:
         knot_px.append((cx, cy, r * 1.3))
     node_arr = np.array([(cx, cy, r) for cx, cy, r in nodes]) if nodes else np.zeros((0, 3))
+    piece_px = J.label_coords(lab, n)
     for i in range(1, n + 1):
-        coords = np.argwhere(lab == i)
+        coords = piece_px[i]
         if len(coords) < 3:
             continue
         path = _ordered_path(coords)
@@ -1344,14 +1445,22 @@ def _adaptive(K, min_step, max_step, max_turn_deg):
     keep = [0]
     run, turn = 0.0, 0.0
     n = len(K)
+    # each point's step and turn, for all points at once (the same arithmetic as
+    # point by point: lengths and dot products of the same pairs of numbers)
+    K = np.asarray(K, float)
+    A = K[1:] - K[:-1]
+    B = np.roll(K, -1, axis=0)[1:] - K[1:]
+    LA = np.sqrt(A[:, 0] * A[:, 0] + A[:, 1] * A[:, 1])
+    LB = np.sqrt(B[:, 0] * B[:, 0] + B[:, 1] * B[:, 1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ANG = np.degrees(np.arccos(np.clip((A[:, 0] * B[:, 0] + A[:, 1] * B[:, 1]) / (LA * LB), -1, 1)))
+    LA, LB, ANG = LA.tolist(), LB.tolist(), ANG.tolist()
     for i in range(1, n):
-        a = K[i] - K[i - 1]
-        b = K[(i + 1) % n] - K[i]
-        la, lb = np.linalg.norm(a), np.linalg.norm(b)
+        la, lb = LA[i - 1], LB[i - 1]
         run += la
         here = 0.0
         if la > 1e-9 and lb > 1e-9:
-            here = np.degrees(np.arccos(np.clip(np.dot(a, b) / (la * lb), -1, 1)))
+            here = ANG[i - 1]
             turn += here
         # a sharp corner is always kept exactly, or the row before and after it
         # would cut across the tip and leave it uncovered
@@ -1431,6 +1540,9 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     big = box(0, 0, W, H).buffer(4 * cfg["max_m"] / mpp, join_style=2)
     blocks = big.difference(surface)
     blocks = list(blocks.geoms) if hasattr(blocks, "geoms") else [blocks]
+    import shapely
+    for b in blocks:
+        shapely.prepare(b)
     cen, cw = [], []
     for st in mesh.streets.values():
         if st.get("inner"):
@@ -1438,6 +1550,8 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
         cen.append(st["pts"]); cw.append(2 * st["hw"])
     cen = np.vstack(cen) if cen else np.zeros((1, 2))
     cw = np.concatenate(cw) if cw else np.array([8.0])
+    from scipy.spatial import cKDTree
+    cen_tree = cKDTree(cen)                            # built once, not once per kerb loop
 
     geoms = surface.geoms if hasattr(surface, "geoms") else [surface]
     loop_id = 3_000_000
@@ -1458,7 +1572,7 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             probe = K + nrm * 0.4
             nrm[contains_xy(surface, probe[:, 0], probe[:, 1])] *= -1       # away from the road
             on_frame = (K[:, 0] < 0.6) | (K[:, 1] < 0.6) | (K[:, 0] > W - 1.6) | (K[:, 1] > H - 1.6)
-            _, idx = _nearest(cen, K)
+            _, idx = cen_tree.query(K)
             target = np.clip(cfg["share"] * cw[idx] * mpp, cfg["min_m"], cfg["max_m"]) / mpp
             wide = (cw[idx] * mpp > cfg["max_road_m"]) & bool(cfg.get("skip_interchanges", False))
             ok = ~on_frame & ~_excluded(mesh, K) & ~wide
@@ -1658,10 +1772,35 @@ def _kerb_apron(mesh, road, scale, mpp, depth_m=1.0):
         f = np.asarray(f, float)
         front.append(Polygon([a, b, b + f * D, a + f * D]).buffer(0))
     walk = [poly(q) for q in mesh.sw_quads] + [poly(t) for t in mesh.sw_tris]
-    miss = unary_union([g for g in front if not g.is_empty]).difference(road)
     walk = [g for g in walk if not g.is_empty]
-    if walk:
-        miss = miss.difference(unary_union(walk))
+    front = [g for g in front if not g.is_empty]
+    # worked out tile by tile, then joined: the same shape as the whole front
+    # strip minus the road and the sidewalk, without uniting and cutting shapes
+    # the size of a city (minutes on a big map)
+    import shapely
+    from shapely.geometry import box
+    found = []
+    if front:
+        ft, wt = shapely.STRtree(front), shapely.STRtree(walk) if walk else None
+        fx0, fy0, fx1, fy1 = shapely.total_bounds(front)
+        T = 256.0
+        for ty in np.arange(math.floor(fy0 / T) * T, fy1, T):
+            for tx in np.arange(math.floor(fx0 / T) * T, fx1, T):
+                tb = box(tx, ty, tx + T, ty + T)
+                fi = ft.query(tb)
+                if not len(fi):
+                    continue
+                m = unary_union([front[i] for i in fi]).intersection(tb)
+                if m.is_empty:
+                    continue
+                m = m.difference(road)
+                if wt is not None and not m.is_empty:
+                    wi = wt.query(m)
+                    if len(wi):
+                        m = m.difference(unary_union([walk[i] for i in wi]))
+                if not m.is_empty:
+                    found.append(m)
+    miss = unary_union(found) if found else Polygon()
     pieces = [g for g in (miss.geoms if hasattr(miss, "geoms") else [miss])
               if g.geom_type == "Polygon" and g.area * mpp * mpp > 1e-4]
     # tucked a hair under the road beside it and under the kerb, so no seam can open
@@ -1677,8 +1816,9 @@ def _project_monotonic(K, ring):
     """
     from shapely.geometry import Point
     from shapely.geometry.polygon import orient, LinearRing
+    import shapely
     L = ring.length
-    s = np.array([ring.project(Point(x, y)) for x, y in K])
+    s = shapely.line_locate_point(ring, shapely.points(np.asarray(K, float)))
     # both loops must run the same way round
     kr = LinearRing(K)
     if kr.is_ccw != LinearRing(ring.coords).is_ccw:
@@ -1688,7 +1828,7 @@ def _project_monotonic(K, ring):
     rel = (s - s0) % L
     rel = np.maximum.accumulate(np.unwrap(rel * 2 * np.pi / L) * L / (2 * np.pi))
     # positions were measured from the first point; add that start back
-    return np.array([ring.interpolate((s0 + v) % L).coords[0] for v in rel])
+    return shapely.get_coordinates(shapely.line_interpolate_point(ring, (s0 + rel) % L))
 
 
 def _rows_from(mesh, K, O, along, owner, H_m, ks_px, closed):
@@ -1785,7 +1925,16 @@ def _open_inner(pts, ns, ws, blocks):
     if block is None:
         return None
     w = float(np.max(ws))
-    inner = block.buffer(-w, join_style=1)
+    # only the part of the block round this run is shrunk: shrinking a block that
+    # is the rest of a whole city (or holds it as a hole) for every run took
+    # minutes. Near the run the edge is the same (shrinking a cut piece is the
+    # cut of the shrunk block, away from the cut's own edges), and the run's
+    # rows reach at most 3 w + 2 from the kerb (else this gives up below)
+    import shapely
+    M = 4 * w + 10
+    x0, y0 = pts.min(axis=0) - M
+    x1, y1 = pts.max(axis=0) + M
+    inner = shapely.clip_by_rect(block, x0, y0, x1, y1).buffer(-w, join_style=1)
     if inner.is_empty:
         return None
     parts = inner.geoms if hasattr(inner, "geoms") else [inner]
@@ -1798,13 +1947,13 @@ def _open_inner(pts, ns, ws, blocks):
         return None
     ring = min(rings, key=lambda r: r.distance(target))
     L = ring.length
-    s = np.array([ring.project(Point(x, y)) for x, y in pts])
+    s = shapely.line_locate_point(ring, shapely.points(np.asarray(pts, float)))
     u = np.unwrap(s * 2 * np.pi / L) * L / (2 * np.pi)
     if u[-1] < u[0]:
         u = -np.maximum.accumulate(-u)          # the inner edge runs the other way round
     else:
         u = np.maximum.accumulate(u)
-    O = np.array([ring.interpolate(v % L).coords[0] for v in u])
+    O = shapely.get_coordinates(shapely.line_interpolate_point(ring, u % L))
     # a pairing that jumps far from the kerb means the shape was not simple here
     if np.any(np.hypot(*(O - pts).T) > 3 * w + 2):
         return None
@@ -1819,16 +1968,12 @@ def _snap_to(K, road, max_px):
     Move kerb points that sit just outside the road exactly onto its edge, so
     the kerb and the road meet with no gap. Points further out are left alone.
     """
-    from shapely import distance as sdist, points as spoints
-    from shapely.ops import nearest_points
-    from shapely.geometry import Point
-    d = sdist(road, spoints(K))
+    edge = EdgeIndex.of(road)
+    d = edge.distance(K)
     out = (d > 1e-6) & (d < max_px)
     if out.any():
         K = K.copy()
-        for i in np.nonzero(out)[0]:
-            q = nearest_points(road, Point(*K[i]))[0]
-            K[i] = (q.x, q.y)
+        K[out] = edge.nearest_many(K[out])
     return K
 
 

@@ -609,9 +609,13 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         return (-u if L["flip"] else u), v
 
     p32 = world.astype(np.float32).astype(np.float64)
+    pl = p32.tolist()
 
     def up(a, b, c):
-        return np.cross(p32[b] - p32[a], p32[c] - p32[a])[1]
+        # the y part of cross(b - a, c - a), in plain arithmetic: the same operations
+        # numpy does, without its overhead on three numbers (called for every triangle)
+        A, B, C = pl[a], pl[b], pl[c]
+        return (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2])
 
     # painted markings: one texture per dash width, each holding exactly one
     # dash cycle along the street, with the road's own grain
@@ -728,8 +732,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         # does not show as a lighter or darker line along it
         ks = getattr(mesh, "kerb_surface", None)
         if ks is not None and not ks.is_empty and role_f.get("kerb", 1.0) != 1.0:
-            import shapely
-            dk = shapely.distance(ks.boundary, shapely.points(fv[:, 0], fv[:, 1])) * mpp_out
+            dk = QM.EdgeIndex(ks.boundary).distance(fv[:, :2]) * mpp_out
             ff = ff * (role_f["kerb"] + (1.0 - role_f["kerb"]) * np.clip(dk / 1.5, 0.0, 1.0))
         tile_material("Road_fill", Image.open(tiles["open"][0]["path"]), images, materials,
                       (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles["open"][0]))
@@ -1011,9 +1014,12 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
     Wh = world.copy()
     Wh[:, 1] = world[:, 1] + np.array(mesh.h)                # raised sidewalk, on top of any bridge lift
     p32 = Wh.astype(np.float32).astype(np.float64)
+    pl = p32.tolist()
 
     def up(a, b, c):
-        return np.cross(p32[b] - p32[a], p32[c] - p32[a])[1]
+        # the y part of cross(b - a, c - a), as numpy works it out (see the road's)
+        A, B, C = pl[a], pl[b], pl[c]
+        return (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2])
 
     def layout(owner):
         r = np.random.default_rng([seed, owner + 300000])
@@ -1314,11 +1320,19 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     # to edge instead of one running underneath the other
     overlap_cut = 0.0
     if with_sidewalks:
-        sw = _sidewalk_union(mesh)
-        if sw is not None and not sw.is_empty:
+        parts = _sidewalk_parts(mesh)
+        if parts:
+            import shapely
+            from shapely.ops import unary_union
+            grown = [p.buffer(0.001) for p in parts]
+            tree = shapely.STRtree(grown)
             cut = []
             for g in polys:
-                r = g.difference(sw)
+                # the sidewalk near this block, merged as _sidewalk_union merges the
+                # whole of it: grown a hair, joined, shrunk back
+                x0, y0, x1, y1 = g.bounds
+                near = tree.query(shapely.box(x0 - 0.01, y0 - 0.01, x1 + 0.01, y1 + 0.01))
+                r = g.difference(unary_union([grown[i] for i in near]).buffer(-0.001)) if len(near) else g
                 for part in (r.geoms if hasattr(r, "geoms") else [r]):
                     if part.geom_type == "Polygon" and part.area * (mpp_out ** 2) > 1.0:
                         cut.append(part)
@@ -1378,18 +1392,20 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
         road_edge = QM._road_surface(mesh)
     if polys:
         # the block's edge is the kerb: a vertical face down to the road, facing it
+        import shapely
         pos, nrm, uvs, idx = [], [], [], []
+        edge = QM.EdgeIndex.of(road_edge)
         for g in polys:
+            shapely.prepare(g)                                  # many inside tests on one block
             for ring in [g.exterior] + list(g.interiors):
                 c = np.array(ring.coords)
                 on_frame = ((c[:, 0] < 0.6 * scale) | (c[:, 1] < 0.6 * scale) |
                             (c[:, 0] > W - 0.6 * scale) | (c[:, 1] > H - 0.6 * scale))
+                d_mid = edge.distance((c[:-1] + c[1:]) / 2) if len(c) > 1 else []
                 for k in range(len(c) - 1):
                     if on_frame[k] and on_frame[k + 1]:
                         continue                                # the image border is not a kerb
-                    from shapely.geometry import Point as _Pt
-                    mid_pt = _Pt((c[k][0] + c[k + 1][0]) / 2, (c[k][1] + c[k + 1][1]) / 2)
-                    if road_edge.distance(mid_pt) > 0.05 / mpp_out:
+                    if d_mid[k] > 0.05 / mpp_out:
                         continue                                # beside a sidewalk: no kerb here
                     a2, b2 = c[k], c[k + 1]
                     A = np.array([a2[0] * mpp_out - W * mpp_out / 2, 0.0, a2[1] * mpp_out - H * mpp_out / 2])
@@ -1478,8 +1494,18 @@ def _grid_mesh(polys, cell):
 
 def _sidewalk_union(mesh):
     """The whole sidewalk, as one shape in texture pixels: paving, kerb stone, paved islands."""
-    from shapely.geometry import Polygon
     from shapely.ops import unary_union
+    parts = _sidewalk_parts(mesh)
+    if not parts:
+        return None
+    # a hair of growth merges quads that share an edge; shrinking back keeps
+    # the outer edge exactly where the sidewalk ends
+    return unary_union([p.buffer(0.001) for p in parts]).buffer(-0.001)
+
+
+def _sidewalk_parts(mesh):
+    """The sidewalk's quads and triangles as polygons, in texture pixels."""
+    from shapely.geometry import Polygon
     V = mesh.v
     parts = []
     for q in mesh.sw_quads:
@@ -1492,11 +1518,7 @@ def _sidewalk_union(mesh):
         pg = Polygon([V[i] for i in tri])
         if pg.is_valid and pg.area > 0:
             parts.append(pg)
-    if not parts:
-        return None
-    # a hair of growth merges quads that share an edge; shrinking back keeps
-    # the outer edge exactly where the sidewalk ends
-    return unary_union([p.buffer(0.001) for p in parts]).buffer(-0.001)
+    return parts
 
 
 
@@ -1518,6 +1540,8 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
     if road is None or road.is_empty:
         road = QM._road_surface(mesh)
     road = make_valid(road)                    # a repaired shape: intersections cannot fail on it
+    import shapely
+    shapely.prepare(road)                      # most footprints do not touch it: a quick test first
     placed, skipped, by_obj = 0, 0, {}
     problems, feet = [], []
     sized = lambda oid: PL.sized(scatter["objects"][oid]["meta"])
@@ -1532,7 +1556,7 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
             k, turn, w, d = sized(oid)
             k, w, d = k * sc, w * sc, d * sc                  # a plant's random scale (1 otherwise)
             fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in PL.footprint(cc, a, w, d)])
-            if road.intersection(fp).area > 0.02 * fp.area:
+            if road.intersects(fp) and road.intersection(fp).area > 0.02 * fp.area:
                 skipped += 1
                 continue
             # image x right, image y down = world +X, +Z; rotation about the up axis
