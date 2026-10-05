@@ -55,12 +55,18 @@ def _oriented(patch, rng):
     return np.ascontiguousarray(out)
 
 
-def synth_layer(shape, patches, rng, overlap=0.25, jitter=1.0, masks=None, seam=3.0):
+def synth_layer(shape, patches, rng, overlap=0.25, jitter=1.0, masks=None, seam=3.0, need=None):
     """
     Build a full canvas of texture from a patch library.
 
     Patches are laid on a jittered grid and feathered where they meet, so the
     joins do not show as hard edges. Each placement gets a random orientation.
+
+    need: where the layer is used (a bool map), or None for everywhere. Patches
+    that cannot reach it (with a margin of a patch, for filling any spot the
+    patches leave empty) are skipped; their random draws are still made, so
+    every pixel that is used comes out exactly as if all were laid. On a big
+    map that is mostly background this skips most of the work.
     """
     H, W = shape
     s = int(patches.shape[1])
@@ -79,13 +85,13 @@ def synth_layer(shape, patches, rng, overlap=0.25, jitter=1.0, masks=None, seam=
     if seam and seam > 1:
         window = window ** seam
 
-    for y in range(-s, H + s, step):
-        for x in range(-s, W + s, step):
-            j = max(1, int(step * jitter / 3))
-            yy = y + int(rng.integers(-j, j + 1))
-            xx = x + int(rng.integers(-j, j + 1))
-            idx = int(rng.integers(0, len(patches)))
-            k, flip = int(rng.integers(0, 4)), bool(rng.integers(0, 2))
+    # each patch in each of its eight orientations, weighted by the window (and by
+    # its road mask) once, not again at every placement
+    oriented = {}
+
+    def weighted(idx, k, flip):
+        key = (idx, k, flip)
+        if key not in oriented:
             p = np.rot90(patches[idx], k)
             pm = np.rot90(masks[idx], k) if masks is not None else None
             if flip:
@@ -94,19 +100,37 @@ def synth_layer(shape, patches, rng, overlap=0.25, jitter=1.0, masks=None, seam=
             if p.ndim == 2:
                 p = np.dstack([p] * 3)
             p = p[:, :, :3].astype(np.float32)
+            # a pixel that was not road in the training photo adds nothing
+            wnd = window * pm[:, :, None] if pm is not None else window
+            oriented[key] = (p * wnd, wnd)
+        return oriented[key]
+
+    reach = None
+    if need is not None:
+        # the used area grown by a patch: a summed-area table answers, for any
+        # placement, whether its square touches it
+        grown = ndi.maximum_filter(np.asarray(need, bool), size=2 * (s + 2) + 1)
+        reach = np.zeros((H + 1, W + 1), np.int64)
+        reach[1:, 1:] = grown.cumsum(0).cumsum(1)
+
+    for y in range(-s, H + s, step):
+        for x in range(-s, W + s, step):
+            j = max(1, int(step * jitter / 3))
+            yy = y + int(rng.integers(-j, j + 1))
+            xx = x + int(rng.integers(-j, j + 1))
+            idx = int(rng.integers(0, len(patches)))
+            k, flip = int(rng.integers(0, 4)), bool(rng.integers(0, 2))
 
             y0, x0 = max(0, yy), max(0, xx)
             y1, x1 = min(H, yy + s), min(W, xx + s)
             if y1 <= y0 or x1 <= x0:
                 continue
+            if reach is not None and reach[y1, x1] - reach[y0, x1] - reach[y1, x0] + reach[y0, x0] == 0:
+                continue
+            pw, wnd = weighted(idx, k, flip)
             py0, px0 = y0 - yy, x0 - xx
-            sub = p[py0:py0 + (y1 - y0), px0:px0 + (x1 - x0)]
-            wnd = window[py0:py0 + (y1 - y0), px0:px0 + (x1 - x0)]
-            if pm is not None:
-                # a pixel that was not road in the training photo adds nothing
-                wnd = wnd * pm[py0:py0 + (y1 - y0), px0:px0 + (x1 - x0), None]
-            acc[y0:y1, x0:x1] += sub * wnd
-            wsum[y0:y1, x0:x1] += wnd
+            acc[y0:y1, x0:x1] += pw[py0:py0 + (y1 - y0), px0:px0 + (x1 - x0)]
+            wsum[y0:y1, x0:x1] += wnd[py0:py0 + (y1 - y0), px0:px0 + (x1 - x0)]
 
     empty = wsum[:, :, 0] == 0
     wsum[wsum == 0] = 1.0
@@ -169,14 +193,15 @@ def _smooth(path, window=7):
     return list(zip(ys, xs))
 
 
-def _stroke(cover, line, half_w):
+def _stroke(cover, line, half_w, strength=1.0):
     """
     Draw one dash as a smooth stroke.
 
     Every pixel near the dash gets the distance to the dash's centreline, and
     its coverage is how much of it falls inside the stroke: 1 well inside, 0
     outside, and a fraction across the one-pixel edge. The same idea as the
-    road edges, so dashes on slanted roads no longer step.
+    road edges, so dashes on slanted roads no longer step. strength: for a line
+    narrower than a pixel, the share of the pixel it covers.
     """
     H, W = cover.shape
     pad = half_w + 2
@@ -200,6 +225,8 @@ def _stroke(cover, line, half_w):
         dist = np.hypot(yy - (p0[0] + t * dy), xx - (p0[1] + t * dx))
         np.minimum(best, dist, out=best)
     cov = np.clip(half_w + 0.5 - best, 0.0, 1.0)
+    if strength < 1.0:
+        cov *= strength
     np.maximum(cover[y0:y1, x0:x1], cov, out=cover[y0:y1, x0:x1])
 
 
@@ -210,6 +237,10 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
 
     The number of cycles per street is rounded to a whole number and the gaps
     stretched slightly to fit, so each street starts and ends on a full dash.
+
+    A line narrower than a pixel (15 cm paint on a map at 1 m a pixel) is drawn
+    one pixel wide but only as strong as the share of the pixel it covers, the
+    way a photo from that height shows it, not widened to a whole pixel.
     """
     road = det["road"]
     H, W = road.shape
@@ -219,12 +250,14 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
     px = max(metres_per_pixel, 1e-6)
     cycle_px = cycle_m / px
     setback_px = setback_m / px
-    half_w = max(0.5, (width_m / px) / 2)
+    width_px = width_m / px
+    half_w, strength = max(0.5, width_px / 2), min(1.0, width_px)
     placed = 0
 
     widths_used = []
+    seg_px = det.get("segment_pixels") or J.label_coords(seg_lab, n)
     for s in range(1, n + 1):
-        coords = np.argwhere(seg_lab == s)
+        coords = seg_px[s]
         if len(coords) < 4:
             continue
         if nomark is not None and nomark[coords[:, 0], coords[:, 1]].mean() > 0.5:
@@ -234,8 +267,9 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
             # keeps the learned proportion on wide and narrow roads alike, and at
             # any output size
             street_w = 2 * float(np.median(det["dt"][coords[:, 0], coords[:, 1]]))
-            half_w = max(0.5, width_ratio * street_w / 2)
-            widths_used.append(half_w * 2)
+            width_px = width_ratio * street_w
+            half_w, strength = max(0.5, width_px / 2), min(1.0, width_px)
+            widths_used.append(width_px)
         path = _ordered_path(coords)
         if len(path) < 4:
             continue
@@ -264,14 +298,21 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
             ends = [np.array([np.interp(v, dist, pts[:, 0]), np.interp(v, dist, pts[:, 1])], np.float32)
                     for v in (a, b)]
             line = np.vstack([ends[0][None], inner, ends[1][None]]) if len(inner) else np.vstack(ends)
-            _stroke(cover, line, half_w)
+            _stroke(cover, line, half_w, strength)
             placed += 1
 
     cover *= road_cov if (road_cov := det.get("coverage")) is not None else road
+    width_shown = float(np.median(widths_used)) if widths_used else width_px
+    warning = None
+    if cycle_px < 6:
+        # a dash and its gap need a few pixels each, or they merge into one line
+        warning = (f"a dash cycle of {cycle_m:g} m is only {cycle_px:.1f} px at {metres_per_pixel:g} m a pixel: "
+                   f"the dashes run together into a solid line (and there are thousands of them, which is slow). "
+                   f"Real lane lines repeat every 9 to 12 m ({9 / px:.0f} to {12 / px:.0f} px here)")
     return cover, {"dashes": placed, "cycle_px": round(cycle_px, 1),
-                   "width_px": round(float(np.median(widths_used)) if widths_used else half_w * 2, 1),
+                   "width_px": round(width_shown, 2),
                    "width_mode": "learned" if width_ratio else "fixed",
-                   "width_ratio": width_ratio}
+                   "width_ratio": width_ratio, "faint": width_shown < 1.0, "warning": warning}
 
 
 def group_map(det, groups):
@@ -286,12 +327,11 @@ def group_map(det, groups):
 
 def junction_id_map(det):
     import numpy as _np
-    H, W = det["road"].shape
-    ids = _np.zeros((H, W), _np.int32)
-    yy, xx = _np.mgrid[0:H, 0:W]
+    road = det["road"]
+    ids = _np.zeros(road.shape, _np.int32)
     for j in det["junctions"]:
-        inside = ((yy - j["cy"]) ** 2 + (xx - j["cx"]) ** 2) <= j["r"] ** 2
-        ids[inside & det["road"]] = j["id"]
+        win, inside = J.disc(road.shape, j["cy"], j["cx"], j["r"])
+        ids[win][inside & road[win]] = j["id"]
     return ids
 
 
@@ -299,12 +339,12 @@ def groups_for(det, metres_per_pixel):
     """The same three groups training used, so generation asks the same questions."""
     road = det["road"]
     H, W = road.shape
-    yy, xx = np.mgrid[0:H, 0:W]
     in_junction = np.zeros((H, W), bool)
     for j in det["junctions"]:
         if j["type"] == "interchange (flagged)":
             continue
-        in_junction |= ((yy - j["cy"]) ** 2 + (xx - j["cx"]) ** 2) <= j["r"] ** 2
+        win, inside = J.disc((H, W), j["cy"], j["cx"], j["r"])
+        in_junction[win] |= inside
     in_junction &= road
 
     widths = 2 * det["dt"][det["skeleton"].astype(bool)]
@@ -461,8 +501,10 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         ratio = (trained_mpp / mpp_out) if trained_mpp else float(scale)
         patches, pmasks = scale_patches(patches, ratio, pmasks)
         size_ratio[name] = round(ratio, 3)
-        layer = synth_layer((H, W), patches, rng, overlap, jitter, pmasks)
+        # the layer only counts where its blend weight is above zero: within the
+        # weight's reach (the Gaussian's 4 sigma) of this part of the road
         w = ndi.gaussian_filter(m.astype(np.float32), feather)
+        layer = synth_layer((H, W), patches, rng, overlap, jitter, pmasks, need=w > 0)
         acc += layer * w[:, :, None]
         wtot += w
         used[name] = {"patches": int(len(patches)), "size_px": int(patches.shape[1])}
@@ -497,7 +539,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         wp, wm = load_patches(wear_npz, with_masks=True)
         wtrained = (libraries.get("scales") or {}).get("open")
         wp, wm = scale_patches(wp, (wtrained / mpp_out) if wtrained else float(scale), wm)
-        wl = synth_layer((H, W), wp, rng, overlap, jitter, wm).mean(axis=2)
+        wl = synth_layer((H, W), wp, rng, overlap, jitter, wm, need=road).mean(axis=2)
         lo, hi = np.percentile(wl[road], [5, 95]) if road.any() else (0, 1)
         wear_map = np.clip((wl - lo) / max(hi - lo, 1e-6), 0, 1)
 

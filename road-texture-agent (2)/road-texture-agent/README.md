@@ -384,6 +384,42 @@ greyed out until an option is chosen. After applying, the choice is cleared so
 the same correction is not applied twice by accident. Every correction is recorded in memory
 with its reason.
 
+## Big maps and markings at coarse scales
+
+**Markings, worked out in pixels.** Every length in metres becomes pixels by
+dividing by the scale (m per px): at 1.1 m per px, 12 m is 11 px and 15 cm is
+0.14 px.
+
+- **Dash cycle** (one dash and its gap): lane lines repeat every 9 to 12 m in
+  most countries (3 m dash + 6 m gap in European towns, 3 m + 9 m in the US and
+  the Gulf). Keep it above about 6 px, or the dashes run together into a solid
+  line. Generate says so when it is too short: a 1 m cycle at 1.1 m per px is
+  under a pixel, every street becomes one long line, and it lays tens of
+  thousands of dashes (slow).
+- **Dash length**: how long each painted dash is (the rest is the gap); empty
+  takes it from your training line image, or 60% of the cycle. Typical: 3 m.
+- **Line width** (fixed): real lane lines are 0.10 to 0.15 m (edge lines 0.15 to
+  0.20 m). A line narrower than a pixel is drawn one pixel wide but only as
+  strong as the share of the pixel it covers (a 15 cm line in a 1.1 m pixel at
+  14%), the way an aerial photo at that height shows it, instead of being
+  widened to a whole pixel (1.1 m, seven times too wide).
+- For crisp markings at a coarse scale, the 3D model's markings as strips are
+  real geometry at their real size, whatever the texture's pixel size.
+
+Recommended at 1.1 m per px: Dash cycle 12, Dash length 3, Line width fixed
+0.15, Quality 1 (at this scale the patch joins Quality smooths are under a
+pixel; Quality 3 doubles the time for no visible change).
+
+**Speed.** Generate used to go over the whole picture once for every junction
+and every street (finding junction arms, cutting junction discs, the junction
+and group maps, each street's dashes). On a city-sized map (thousands of
+junctions, millions of pixels) that was billions of steps: a 3.7 × 2.5 km map
+(3328 × 2304 px, 1064 junctions) took 18 minutes. Each step now works on that
+junction's or street's own pixels, the material and wear patches are laid only
+where they are used (not on the background), each patch's orientations are
+prepared once: the same map takes about 2 minutes (1 minute at Quality 1),
+with exactly the same picture, pixel for pixel.
+
 ## Known limits
 
 - Patch seams can show at high zoom on wide roads. Larger overlap or

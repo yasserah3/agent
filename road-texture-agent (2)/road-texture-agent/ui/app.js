@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.05-bake1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.05-big1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -691,7 +691,7 @@ const UI_VERSION = '2026.10.05-bake1';   // must match VERSION in server.py
       const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ mask: S.gen.mask.id, scale: +$('#scale').value,
           wear: +$('#noiseAmt').value, seed: +$('#seed').value,
-          cycle_m: +$('#cycleM').value, marking_width_m: +$('#markW').value,
+          cycle_m: +$('#cycleM').value, marking_width_m: +$('#markW').value, dash_m: +$('#dashM').value || null,
           quality: +$('#quality').value, align_lines: S.gen.alignLines || false,
           output_scale: +$('#outScale').value, soft_edges: $('#softEdges').checked,
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
@@ -706,7 +706,8 @@ const UI_VERSION = '2026.10.05-bake1';   // must match VERSION in server.py
       Object.entries(res.decisions || {}).forEach(([k,d]) => log(`  ${k}: ${d.label || 'none'}${d.rank ? ` (position ${d.rank})` : ''}${d.exhausted ? ', all rejected' : ''}`));
       log(`  ${s.markings.dashes} dashes placed, cycle ${s.markings.cycle_px} px, lines ${s.markings.width_px} px wide${
         s.markings.width_mode === 'learned' ? ` (${(s.markings.width_ratio*100).toFixed(1)}% of each street's width, learned)`
-          : ' (fixed width)'}.`);
+          : ' (fixed width)'}${s.markings.faint ? ': narrower than a pixel, so drawn faint, as a photo from this height shows them' : ''}.`);
+      if(s.markings.warning) log(`  Markings: ${s.markings.warning}.`, 'bad');
       if($('#lineMode').value === 'learned' && s.markings.width_mode !== 'learned')
         log('  No line width has been learned yet: train on pairs whose photos show painted lines. Using the fixed width.', 'bad');
       (res.inner_streets || []).forEach(r => {

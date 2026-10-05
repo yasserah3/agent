@@ -52,7 +52,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.05-bake1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.05-big1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1283,6 +1283,10 @@ def generate(payload: dict):
     dash = trees["lines"]["children"]["yes"]["children"]["no"].get("params", {})
     dash_px, gap_px = dash.get("dash_px"), dash.get("gap_px")
     dash_share = (dash_px / (dash_px + gap_px)) if dash_px and gap_px else 0.6
+    # a dash length set in metres wins over the measured share of the cycle
+    cycle_m = float(payload.get("cycle_m", 9.0))
+    if payload.get("dash_m") and cycle_m > 0:
+        dash_share = float(np.clip(float(payload["dash_m"]) / cycle_m, 0.05, 0.95))
 
     gid = uuid.uuid4().hex[:12]
     # inner streets drawn between objects become streets in a copy of the mask,

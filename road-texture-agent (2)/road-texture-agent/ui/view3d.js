@@ -1107,14 +1107,15 @@ if( bakeOn > 0.5 ){
     bsum += s.rgb * w; bwsum += w;
   }
   vec2 bedge = min( buv, 1.0 - buv ) * vec2( bn );
-  // facing up (not walls or kerb faces), traced here, and away from the map's edge
+  // facing up (not walls or kerb faces), traced here, and fading out over the last
+  // 6% towards the map's edge, so the baked area blends into the live light
   #ifdef DOUBLE_SIDED
     float bup = vBakeUp * faceDirection;
   #else
     float bup = vBakeUp;
   #endif
   float bw = smoothstep( 0.55, 0.8, bup ) * smoothstep( 0.05, 0.35, bwsum )
-           * smoothstep( 1.0, 8.0, min( bedge.x, bedge.y ) );
+           * smoothstep( 1.0, max( 8.0, 0.06 * float( min( bn.x, bn.y ) ) ), min( bedge.x, bedge.y ) );
   if( bw > 0.0 ){
     vec3 bE = bsum / max( bwsum, 1e-4 );
     reflectedLight.directDiffuse *= 1.0 - bw;

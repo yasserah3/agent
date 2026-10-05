@@ -497,7 +497,8 @@
           <div class="field"><label for="noiseAmt">Wear amount</label><input type="range" id="noiseAmt" min="0" max="100" value="50"></div>
           <div class="field"><label for="matchMat">Match my material colour</label><input type="checkbox" id="matchMat" style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="field"><label for="seed">Variation seed</label><input type="number" id="seed" value="7" step="1" min="1"></div>
-          <div class="field"><label for="cycleM">Dash cycle (m)</label><input type="number" id="cycleM" value="9" step="0.5" min="1"></div>
+          <div class="field"><label for="cycleM">Dash cycle (m)</label><input type="number" id="cycleM" value="9" step="0.5" min="1" title="One dash and the gap after it, in metres. Lane lines repeat every 9 to 12 m in most countries (3 m dash and 6 m gap in European towns, 3 m and 9 m in the US and the Gulf). In pixels: metres ÷ the scale (m per px); keep it above about 6 px or the dashes run into a solid line"></div>
+          <div class="field"><label for="dashM">Dash length (m)</label><input type="number" id="dashM" value="" step="0.5" min="0" placeholder="learned" title="How long each painted dash is, in metres (the rest of the cycle is the gap). Empty: as measured from your training line image, or 60% of the cycle. Typical: 3 m"></div>
           <div class="field"><label for="lineMode">Line width</label>
             <select id="lineMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
               <option value="learned">Learned from training</option>
