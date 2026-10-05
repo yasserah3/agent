@@ -125,6 +125,12 @@ function init(){
   gtao.updateGtaoMaterial({ radius: 1.6, distanceExponent: 1.5, thickness: 1.5, scale: 1.0, samples: 16 });
   gtao.blendIntensity = 0.9;
   bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.2, 0.4, 4.0);
+  // the glow is blurred over the whole picture: one invalid pixel (not a number, or
+  // infinite) would spread through it and blacken everything, so it never gets in
+  const hp = bloom.materialHighPassFilter;
+  hp.fragmentShader = hp.fragmentShader.replace('vec4 texel = texture2D( tDiffuse, vUv );',
+    'vec4 texel = texture2D( tDiffuse, vUv );\n' + SANE_GLSL.replace(/c\b/g, 'texel.rgb'));
+  hp.needsUpdate = true;
   composer.addPass(renderPass); composer.addPass(gtao); composer.addPass(bloom); composer.addPass(look);
   // the pools of lamp light are painted on, not surfaces: left out of the contact shadows
   const hide = gtao._overrideVisibility.bind(gtao);
@@ -629,8 +635,25 @@ async function startPhoto(){
   busy = false;
 }
 
-// the photo's light (linear, as traced) into a picture of its own, the glow added, then the
-// look to the screen
+// a pixel that is not a number or is infinite (a rare slip in the path tracer) becomes
+// black, so it stays one dark dot instead of spreading; values are kept in half-float range
+const SANE_GLSL = 'if(any(isnan(c)) || any(isinf(c)) || !all(lessThan(abs(c), vec3(1.0e30)))) c = vec3(0.0);\n'
+                + 'c = clamp(c, 0.0, 6.0e4);';
+let cleanQuad = null;
+function cleanCopy(r, map){
+  if(!cleanQuad) cleanQuad = new FullScreenQuad(new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3, uniforms: { map: { value: null } }, depthTest: false, depthWrite: false,
+    vertexShader: 'precision highp float; uniform mat4 modelViewMatrix; uniform mat4 projectionMatrix; in vec3 position; in vec2 uv; out vec2 vUv;\n'
+      + 'void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: 'precision highp float; uniform sampler2D map; in vec2 vUv; out vec4 outColor;\n'
+      + 'void main(){ ivec2 n = textureSize(map, 0); vec3 c = texelFetch(map, clamp(ivec2(vUv * vec2(n)), ivec2(0), n - 1), 0).rgb;\n'
+      + SANE_GLSL + '\noutColor = vec4(c, 1.0); }' }));
+  cleanQuad.material.uniforms.map.value = map;
+  cleanQuad.render(r);
+}
+
+// the photo's light (linear, as traced) into a picture of its own (cleaned of invalid
+// pixels), the glow added, then the look to the screen
 function presentPhoto(r, quad){
   const size = r.getDrawingBufferSize(new THREE.Vector2());
   if(!photoHDR || photoHDR.width !== size.x || photoHDR.height !== size.y){
@@ -640,7 +663,7 @@ function presentPhoto(r, quad){
   const auto = r.autoClear;
   r.autoClear = false;
   r.setRenderTarget(photoHDR); r.clear();
-  quad.render(r);
+  cleanCopy(r, quad.material.map);
   if(bloom.strength > 0){ bloom.renderToScreen = false; bloom.render(r, null, photoHDR, 0, false); }
   look.renderToScreen = true;
   look.render(r, null, photoHDR);

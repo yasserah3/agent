@@ -76,7 +76,8 @@ vec3 film(vec3 c){
 // the scene's light at a point: anything not a number (a stray, too bright sample) as black
 vec3 src(vec2 at){
   vec3 c = texture(tDiffuse, at).rgb;
-  return any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : min(c, vec3(6.0e4));
+  if(any(isnan(c)) || any(isinf(c)) || !all(lessThan(abs(c), vec3(1.0e30)))) c = vec3(0.0);
+  return clamp(c, 0.0, 6.0e4);
 }
 float hash(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 
