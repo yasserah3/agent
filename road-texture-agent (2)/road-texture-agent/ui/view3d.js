@@ -55,6 +55,12 @@ const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emis
 const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0 };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
+// the Ground plane panel: the land round the place, moved, turned and sized (metres);
+// colour '' follows the time of day
+const GROUND_DEFAULT = { show: true, x: 0, y: -0.3, z: 0, turn: 0, width: 12000, length: 12000, colour: '' };
+const GROUND = { ...GROUND_DEFAULT };
+try{ Object.assign(GROUND, JSON.parse(localStorage.getItem('rta.view3d.ground') || '{}')); }catch(e){}
+const saveGround = () => { try{ localStorage.setItem('rta.view3d.ground', JSON.stringify(GROUND)); }catch(e){} };
 // Render photo's noise cleared by Open Image Denoise (on unless turned off here before)
 let DENOISE = true;
 try{ DENOISE = localStorage.getItem('rta.view3d.denoise') !== 'off'; }catch(e){}
@@ -95,7 +101,14 @@ function init(){
   controls.enableDamping = true;
   controls.maxPolarAngle = Math.PI * 0.495;                          // never below the ground
   controls.maxDistance = 2500;
-  controls.addEventListener('start', () => { if(photo && photo.on) stopPhoto('The camera moved: back to the live view.'); });
+  controls.addEventListener('start', () => {
+    if(photo && photo.on) stopPhoto('The camera moved: back to the live view.');
+    centrePivot();                                                   // turn round what is in the middle of the view
+  });
+  // the wheel is ours (zooming towards the mouse); dragging stays the controls'
+  controls.enableZoom = false;
+  renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+  renderer.domElement.addEventListener('dblclick', onDoubleClick);
 
   // the night sky's light from all round is worked out from a scene of its own
   envScene = new THREE.Scene();
@@ -111,9 +124,9 @@ function init(){
   hemi = new THREE.HemisphereLight(0xbcd2ff, 0x40382c, 0.0);           // a touch of fill at night only
   scene.add(hemi);
   // the land round the place, fading into the haze at the horizon
-  ground = new THREE.Mesh(new THREE.CircleGeometry(6000, 96).rotateX(-Math.PI / 2),
+  ground = new THREE.Mesh(new THREE.CircleGeometry(1, 128).rotateX(-Math.PI / 2),
     new THREE.MeshStandardMaterial({ color: 0x5c6648, roughness: 1 }));
-  ground.position.y = -0.3;                                           // well under the streets, blocks and islands
+  placeGround();                                                      // by default 30 cm under the streets, blocks and islands
   ground.receiveShadow = true;
   ground.name = 'ground';
   scene.add(ground);
@@ -152,6 +165,17 @@ function init(){
   return true;
 }
 
+// the land where the Ground plane panel puts it: a disc (an ellipse when width and
+// length differ), turned round the up axis
+function placeGround(){
+  if(!ground) return;
+  ground.visible = !!GROUND.show;
+  ground.position.set(+GROUND.x || 0, Number.isFinite(+GROUND.y) ? +GROUND.y : -0.3, +GROUND.z || 0);
+  ground.rotation.y = THREE.MathUtils.degToRad(+GROUND.turn || 0);
+  ground.scale.set(Math.max(1, +GROUND.width || 1) / 2, 1, Math.max(1, +GROUND.length || 1) / 2);
+  ground.material.color.set(GROUND.colour || TIMES[time].ground);
+}
+
 function resize(){
   const w = host.clientWidth, h = host.clientHeight;
   if(!renderer || !w || !h) return;
@@ -171,6 +195,125 @@ function frame(c, r){
   controls.target.copy(c);
   controls.maxDistance = Math.max(400, 3 * r);
   controls.update();
+}
+
+// ----------------------------------------------------------------- navigation
+// The wheel zooms towards the point under the mouse, a share of the way each notch,
+// so it never stalls short of something (the controls' own zoom closes in on one
+// fixed point by ever smaller steps, and that point can be far from where you
+// look). Grabbing the view puts the point it turns round on the ground in the
+// middle of the view: orbiting turns round what you look at, and panning keeps pace
+// with that ground. W A S D or the arrows walk, Q and E go down and up, Shift is
+// faster; a double click brings that spot to the middle
+const STREET_Y = 0;                                  // the streets' level, to aim at
+const ZOOM_STEP = 0.18;                              // how much closer one wheel notch gets
+const EYE_M = 1.6;                                   // the lowest the wheel brings the camera: eye height
+const aim = new THREE.Raycaster(), aimNdc = new THREE.Vector2();
+const keys = new Set();
+let walkedAt = 0;
+
+function onGround(r, y = STREET_Y){
+  if(Math.abs(r.direction.y) < 1e-6) return null;
+  const t = (y - r.origin.y) / r.direction.y;
+  return t > 0 ? r.origin.clone().addScaledVector(r.direction, t) : null;
+}
+
+function rayAt(clientX, clientY){
+  camera.updateMatrixWorld();                                          // as it is now, not as last drawn
+  const b = renderer.domElement.getBoundingClientRect();
+  aimNdc.set(((clientX - b.left) / b.width) * 2 - 1, -((clientY - b.top) / b.height) * 2 + 1);
+  aim.setFromCamera(aimNdc, camera);
+  return aim.ray;
+}
+
+// the pivot moved along the line of sight onto the ground: the view does not move,
+// only the point it turns round (and pans by)
+function centrePivot(){
+  camera.updateMatrixWorld();
+  const dir = camera.getWorldDirection(new THREE.Vector3());
+  const p = onGround(new THREE.Ray(camera.position.clone(), dir));
+  const far = Math.max(60, Math.min(radius * 1.5, 3 * Math.max(camera.position.y - STREET_Y, 20)));
+  const d = THREE.MathUtils.clamp(p ? camera.position.distanceTo(p) : far, 1, far);
+  controls.target.copy(camera.position).addScaledVector(dir, d);
+}
+
+function onWheel(e){
+  e.preventDefault();
+  if(!renderer) return;
+  if(photo && photo.on) stopPhoto('The camera moved: back to the live view.');
+  const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+  const notches = THREE.MathUtils.clamp(-dy / 100, -4, 4);              // wheel up (forward): closer
+  if(!notches) return;
+  const r = rayAt(e.clientX, e.clientY);
+  // towards the ground under the mouse, or a point straight ahead of it (over the sky)
+  const p = onGround(r) || r.origin.clone().addScaledVector(r.direction, camera.position.distanceTo(controls.target));
+  let k = Math.pow(1 - ZOOM_STEP, notches);                         // under 1 closer, over 1 further
+  const h = camera.position.y - STREET_Y;
+  if(k > 1) k = Math.min(k, controls.maxDistance / Math.max(camera.position.distanceTo(controls.target), 1e-6));
+  else if(h * k < EYE_M){
+    // down at eye height: no lower, but on along the street towards the point instead
+    const kh = Math.min(1, EYE_M / Math.max(h, 1e-6));
+    if(kh < 1){ camera.position.sub(p).multiplyScalar(kh).add(p); controls.target.sub(p).multiplyScalar(kh).add(p); }
+    // a stride towards the point (or straight on), at least a metre and a half a notch
+    const ahead = new THREE.Vector3(p.x - camera.position.x, 0, p.z - camera.position.z);
+    if(ahead.lengthSq() < 0.01) ahead.copy(camera.getWorldDirection(new THREE.Vector3())).setY(0);
+    if(ahead.lengthSq() > 1e-8){
+      ahead.setLength(Math.max(ahead.length(), 8) * (1 - k));
+      camera.position.add(ahead); controls.target.add(ahead);
+    }
+    camera.position.y = Math.max(camera.position.y, STREET_Y + EYE_M);
+    controls.update();
+    return;
+  }
+  // scaled round p: the point under the mouse stays under it, the direction of view stays
+  camera.position.sub(p).multiplyScalar(k).add(p);
+  controls.target.sub(p).multiplyScalar(k).add(p);
+  controls.update();
+}
+
+function onDoubleClick(e){
+  const p = onGround(rayAt(e.clientX, e.clientY));
+  if(!p) return;
+  if(photo && photo.on) stopPhoto('The camera moved: back to the live view.');
+  const move = p.clone().sub(controls.target);
+  camera.position.add(move); controls.target.add(move);
+  controls.update();
+}
+
+const WALK_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+addEventListener('keydown', e => {
+  if(!visible || !renderer || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if(t && (t.isContentEditable || /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(t.tagName))) return;
+  const k = e.key.toLowerCase();
+  if(k === 'shift'){ keys.add('shift'); return; }
+  if(WALK_KEYS.includes(k)){ keys.add(k); e.preventDefault(); }
+  if(k === 'b' && BAKE.list.length && !e.repeat){ BAKE.on = !BAKE.on; applyBake(); }   // compare baked and live
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+addEventListener('blur', () => keys.clear());
+
+// a step of walking, at a pace that suits the height: slow in the street, fast from above
+function walk(){
+  const now = performance.now(), dt = Math.min(0.1, (now - (walkedAt || now)) / 1000);
+  walkedAt = now;
+  if(![...keys].some(k => k !== 'shift')) return;
+  if(photo && photo.on) stopPhoto('The camera moved: back to the live view.');
+  const fwd = camera.getWorldDirection(new THREE.Vector3()).setY(0);
+  if(fwd.lengthSq() < 1e-6) fwd.copy(new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion)).setY(0);   // looking straight down
+  fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+  const speed = THREE.MathUtils.clamp((camera.position.y - STREET_Y) * 1.2, 4, 600) * (keys.has('shift') ? 4 : 1);
+  const m = new THREE.Vector3();
+  if(keys.has('w') || keys.has('arrowup')) m.add(fwd);
+  if(keys.has('s') || keys.has('arrowdown')) m.sub(fwd);
+  if(keys.has('d') || keys.has('arrowright')) m.add(right);
+  if(keys.has('a') || keys.has('arrowleft')) m.sub(right);
+  if(m.lengthSq()) m.normalize().multiplyScalar(speed * dt);
+  if(keys.has('e')) m.y += 0.6 * speed * dt;
+  if(keys.has('q')) m.y -= 0.6 * speed * dt;
+  if(camera.position.y + m.y < STREET_Y + 0.6) m.y = STREET_Y + 0.6 - camera.position.y;   // never into the street (Q goes below eye height)
+  camera.position.add(m); controls.target.add(m);
 }
 
 // ----------------------------------------------------------------- times of day
@@ -297,7 +440,7 @@ function setTime(name, render = true){
   time = name;
   const t = TIMES[name], token = ++skyToken;
   document.querySelectorAll('[data-time3d]').forEach(b => b.setAttribute('aria-pressed', b.dataset.time3d === name ? 'true' : 'false'));
-  ground.material.color.set(t.ground);
+  ground.material.color.set(GROUND.colour || t.ground);
   const st = starField();
   if(t.sky) scene.remove(st); else scene.add(st);
   hemi.intensity = t.sky ? 0 : 0.06;
@@ -1162,12 +1305,12 @@ function bakeNote(text, bad){
   box.disabled = !BAKE.list.length; box.checked = BAKE.on;
   if(text === undefined){
     const any = BAKE.list.find(x => x.key === bakeKey());
-    const about = b => `${TIME_NAMES[b.time]}, ${b.area === 'view' ? 'round the view' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel, ${b.samples} samples`;
+    const about = b => `${TIME_NAMES[b.time]}, ${b.area === 'view' ? 'what you saw' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel, ${b.samples} samples`;
     if(BAKE.busy) return;
     if(BAKE.shown) text = `Baked light on (${about(BAKE.shown)}). Move round freely: the streets, sidewalks and islands have the photo's light; walls, kerb faces and the ground under trees keep the live light.`;
     else if(BAKE.on && BAKE.list.length) text = `No bake for this light yet (${TIME_NAMES[time]}${LIGHT.sun !== 1 || LIGHT.lamps !== 1 ? ', with these sun and lamp settings' : ''}): showing the live light. Bake light bakes it; going back to a baked light shows its bake again.`;
     else if(any) text = `Baked (${about(any)}). Tick Baked light to see it in the live view.`;
-    else text = 'Bake light traces the light on the ground as Render photo does and keeps it, so the live view shows the photo\'s light while you move round. Round the view: about 10 cm a pixel; the whole place: coarser.';
+    else text = 'Bake light traces the light on the ground as Render photo does (it does not need a photo first) and keeps it, so the live view shows the photo\'s light while you move round. What you see: the ground in view now, as sharp as its size allows; the whole place: all of it, coarser.';
     bad = false;
   }
   n.textContent = text; n.classList.toggle('bad', !!bad);
@@ -1190,10 +1333,23 @@ function bakeArea(kind){
   const most = Math.min(BAKE_PX, renderer.capabilities.maxTextureSize);
   let mpp = Math.max(0.2, Math.max(x1 - x0, z1 - z0) / most);
   if(kind === 'view'){
-    const t = controls.target, s = most * 0.1 / 2;
-    const a = [Math.max(x0, t.x - s), Math.min(x1, t.x + s), Math.max(z0, t.z - s), Math.min(z1, t.z + s)];
-    if(a[1] - a[0] > 10 && a[3] - a[2] > 10){ [x0, x1, z0, z1] = a; mpp = 0.1; }
-    else kind = 'whole';
+    camera.updateMatrixWorld();
+    // what the camera sees of the ground: where the edges and corners of the view meet
+    // it (a ray over the horizon stops at a distance that grows with the height), within
+    // the place; as sharp as the map's size allows, never finer than 10 cm a pixel
+    const far = Math.max(150, 4 * Math.max(camera.position.y - box.min.y, 5)), seen = [];
+    for(const [u, v] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [0, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]){
+      aim.setFromCamera(new THREE.Vector2(u, v), camera);
+      let p = onGround(aim.ray, box.min.y);
+      if(!p || p.distanceTo(aim.ray.origin) > far) p = aim.ray.origin.clone().addScaledVector(aim.ray.direction, far);
+      seen.push(p);
+    }
+    const a = [Math.max(x0, Math.min(...seen.map(p => p.x))), Math.min(x1, Math.max(...seen.map(p => p.x))),
+               Math.max(z0, Math.min(...seen.map(p => p.z))), Math.min(z1, Math.max(...seen.map(p => p.z)))];
+    if(a[1] - a[0] > 10 && a[3] - a[2] > 10){
+      [x0, x1, z0, z1] = a;
+      mpp = Math.max(0.1, Math.max(x1 - x0, z1 - z0) / most);
+    }else kind = 'whole';
   }
   const w = Math.max(16, Math.ceil((x1 - x0) / mpp)), h = Math.max(16, Math.ceil((z1 - z0) / mpp));
   const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, sx = w * mpp, sz = h * mpp;
@@ -1283,7 +1439,9 @@ async function bakeLight(){
   try{
     // traced as the photo, but matt: what comes back is the light the surfaces take in and
     // give back evenly, not their shine (that stays live)
-    const st = stage({ lampMeshes: false, around: a.centre, lampCount: 4000 });
+    // the lamps as in the photo, poles and heads too: their shadows fall on the ground (from
+    // above they cover a few spots, which keep the live light)
+    const st = stage({ lampMeshes: true, around: a.centre, lampCount: 4000 });
     const matt = new Map();
     try{
       scene.traverseVisible(o => {
@@ -1311,7 +1469,7 @@ async function bakeLight(){
     const ok = await traceBake(pt, samples, () => {
       const n = Math.floor(pt.samples), s = secs();
       bakeNote(pt.isCompiling && !n ? `Compiling the path tracer's shader for this graphics card… ${s} s (the first time in a session it can take a minute or more).`
-        : `Baking the light ${a.kind === 'view' ? 'round the view' : 'of the whole place'} (${a.w} × ${a.h} px): ${n} of ${samples} samples, ${s} s`
+        : `Baking the light ${a.kind === 'view' ? 'of what you see' : 'of the whole place'} (${a.w} × ${a.h} px): ${n} of ${samples} samples, ${s} s`
           + (n >= 2 ? `, about ${Math.max(1, Math.round(s / n * (samples - n)))} s left.` : '.') + ' The view stays live meanwhile.');
     });
     if(!ok) throw new Error('stopped');
@@ -1359,12 +1517,17 @@ async function bakeLight(){
     BAKE.busy = false;
     $('#btnBake').textContent = 'Bake light'; $('#btnPhoto').disabled = !world;
   }
-  if(done){ applyBake(); bakeNote(`Baked in ${secs()} s. ` + $('#bakeNote').textContent); }
+  if(done){
+    applyBake(); bakeNote(`Baked in ${secs()} s. ` + $('#bakeNote').textContent);
+    msg.textContent = 'Baked light on: move round freely. B switches it off and on to compare with the live light.';
+    setTimeout(() => { if(msg.textContent.startsWith('Baked light on')) msg.textContent = ''; }, 8000);
+  }
   else if(BAKE.cancel){ applyBake(); bakeNote('The bake was stopped. ' + $('#bakeNote').textContent); }
 }
 
 function loop(){
   if(!visible){ running = false; return; }
+  walk();
   if(!(photo && photo.on)) controls.update();                        // the photo's camera stays exactly put
   draw();
   requestAnimationFrame(loop);
@@ -1422,6 +1585,33 @@ $('#lampColour').addEventListener('input', () => {
   if(lamps) lampLevel(TIMES[time].lamps);
   applyBake();
 });
+// the Ground plane panel
+const GROUND_FIELDS = { gndX: 'x', gndY: 'y', gndZ: 'z', gndTurn: 'turn', gndW: 'width', gndL: 'length' };
+const showGround = () => {
+  $('#gndShow').checked = !!GROUND.show;
+  for(const [id, k] of Object.entries(GROUND_FIELDS)) $('#' + id).value = GROUND[k];
+  $('#gndAuto').checked = !GROUND.colour;
+  $('#gndColour').disabled = !GROUND.colour;
+  if(GROUND.colour) $('#gndColour').value = GROUND.colour;
+};
+showGround();
+const groundChanged = () => {
+  saveGround();
+  if(!renderer) return;
+  if(photo && photo.on) stopPhoto('The ground changed: back to the live view.');
+  placeGround();
+};
+$('#gndShow').addEventListener('change', () => { GROUND.show = $('#gndShow').checked; groundChanged(); });
+for(const [id, k] of Object.entries(GROUND_FIELDS)) $('#' + id).addEventListener('input', () => {
+  const v = parseFloat($('#' + id).value);
+  if(Number.isFinite(v)) { GROUND[k] = v; groundChanged(); }
+});
+$('#gndAuto').addEventListener('change', () => {
+  GROUND.colour = $('#gndAuto').checked ? '' : $('#gndColour').value;
+  $('#gndColour').disabled = !GROUND.colour; groundChanged();
+});
+$('#gndColour').addEventListener('input', () => { GROUND.colour = $('#gndColour').value; groundChanged(); });
+$('#btnGndReset').addEventListener('click', () => { Object.assign(GROUND, GROUND_DEFAULT); showGround(); groundChanged(); });
 // the Look panel: a change shows at once, in the live view and the photo alike (no new render)
 const lookApi = lookPanel(look, () => { if(bloomFrom) setBloom(...bloomFrom); });
 $('#btnPhoto').addEventListener('click', startPhoto);

@@ -436,7 +436,7 @@ above, the 3D model went from over an hour (it never finished) to minutes.
 **Big scenes in the 3D tab**: a 3.7 × 2.5 km city is millions of triangles and
 thousands of street lamps. Mesh detail *Optimised* (Generate tab, 3D model)
 keeps far fewer rows along straight streets; Bake light *Whole place* covers it
-at about 1.8 m a pixel, so bake *Round the view* where you look.
+at about 1.8 m a pixel, so bake *What you see* close to where you look.
 
 ## Known limits
 
@@ -1143,8 +1143,24 @@ plant as an instance with its own scale and rotation, exactly as on the map.
 
 ## 3D tab
 
-The **3D** tab shows the whole place in 3D, to look around: left drag orbits,
-right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
+The **3D** tab shows the whole place in 3D, to look around:
+
+- **Wheel**: zooms towards the point under the mouse, a share of the way each
+  notch, so it gets there and never stalls. It stops at eye height (1.6 m);
+  more notches then carry you on along the street.
+- **Left drag** orbits round the ground in the middle of the view (the point
+  is set where you look each time you grab the view, not a fixed point in the
+  middle of the place); **right drag** (or Shift + drag) pans, at the pace of
+  that ground.
+- **W A S D** or the **arrows** walk, **Q / E** go down and up, **Shift** is
+  four times faster; the pace suits the height (slow in the street, fast from
+  above). **Double-click** brings that spot to the middle of the view.
+- **B** switches baked light off and on, to compare. **Reset view** goes back.
+- **Ground plane**: the land round the place, its position (X east, Y up, Z
+  south, in metres; the streets are at Y 0, the land 30 cm under them by
+  default), its turn round the up axis, its width and length, its colour (or
+  the time of day's), and whether it shows. Kept in the browser; Render photo
+  and Bake light trace it too.
 
 - **Update view** builds the scene again with the current materials and 3D
   model settings, keeping the camera, the time of day and the look. When the
@@ -1229,16 +1245,29 @@ right drag (or Shift + drag) pans, the wheel zooms, **Reset view** goes back.
 
 ### Baked light
 
-**Bake light** (under Photo render) traces the light as Render photo does
-(the sun's soft shadows, the sky's light, light bounced off walls and blocks,
-every lamp's pool at night), but on the ground from high above, and keeps it
-as a light map. With **Baked light** ticked, the live view takes the light of
-the streets, sidewalks, islands and flat roofs from that map, so you move
-round freely and the ground looks as it does in the photo.
+**Bake light** (under Photo render) is what games do with their lighting:
+the light is traced once, slowly and properly, and stored on the surfaces as
+a light map; afterwards the view only reads it back, so you move round freely
+with the traced light. It traces the light as Render photo does (the sun's
+soft shadows, the sky's light, light bounced off kerbs and blocks, every
+lamp's pool at night, the shadows of the lamp poles), on the ground from high
+above. It does not need a photo first, and it does not keep the photo as a
+picture: a picture is right only from where it was taken, while the light
+stored on the ground is right from anywhere. With **Baked light** ticked, the
+live view takes the light of the streets, sidewalks, islands and blocks from
+that map.
 
-- **Bake**: *Round the view*, a square of about 200 m round where the camera
-  looks, at about 10 cm a pixel (sharp shadows); or *the whole place*, at 20
-  cm a pixel or coarser on a big place (the map is at most 2048 pixels a side).
+How to use it: set the time of day and the lights, look at the part you want
+(or choose the whole place), press **Bake light**, wait for "Baked in … s"
+(a message on the view says it is on), then move round. Press **B** to see
+the difference: the sun's light is the same live and traced, so by day the
+change is in the soft shadows, the light under and between things and the
+overall tone; at dawn and at night (lamp pools, long shadows) it is large.
+
+- **Bake**: *What you see*, the ground in the view now: close up 10 cm a
+  pixel (sharp shadows), coarser the more you see; or *the whole place*, at
+  20 cm a pixel or coarser on a big place (the map is at most 2048 pixels a
+  side). Look round inside what you baked: outside it the live light shows.
 - **Quality**: how many samples are traced before the noise is cleared by
   Open Image Denoise: Draft (32), Good (128), Best (512). The panel counts
   them and the time left; the view stays live meanwhile, and **Stop baking**

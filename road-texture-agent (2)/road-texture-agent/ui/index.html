@@ -712,8 +712,8 @@
         <div class="panel-h">Baked light <small>the photo's light, live</small></div>
         <div class="panel-b">
           <div class="field"><label for="bakeArea">Bake</label>
-            <select id="bakeArea" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Round the view: a square of about 200 m round where the camera looks, at about 10 cm a pixel (sharp shadows). The whole place: all of it, coarser (20 cm a pixel or more on a big place)">
-              <option value="view" selected>Round the view</option><option value="whole">Whole place</option></select></div>
+            <select id="bakeArea" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="What you see: the ground in the view now, as sharp as its size allows (10 cm a pixel close up, coarser from high above). The whole place: all of it, coarser (20 cm a pixel or more on a big place)">
+              <option value="view" selected>What you see</option><option value="whole">Whole place</option></select></div>
           <div class="field"><label for="bakeQuality">Quality</label>
             <select id="bakeQuality" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="How many light paths are traced per spot before the noise is cleared: more is smoother and slower">
               <option value="32">Draft (32)</option><option value="128" selected>Good (128)</option><option value="512">Best (512)</option></select></div>
@@ -752,7 +752,25 @@
         <div class="panel-h">View</div>
         <div class="panel-b">
           <button class="btn secondary" id="btnView3dReset">Reset view</button>
-          <div class="note">Left drag: orbit. Right drag (or Shift + drag): pan. Wheel: zoom.</div>
+          <div class="note">Wheel: zoom towards the mouse. Left drag: orbit round the middle of the view. Right drag (or Shift + drag): pan.
+            W A S D or the arrows: walk; Q / E: down / up; hold Shift: faster. Double-click: bring that spot to the middle.
+            B: baked light on / off.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Ground plane <small>the land round the place</small></div>
+        <div class="panel-b">
+          <div class="field"><label for="gndShow">Show</label><input type="checkbox" id="gndShow" checked style="justify-self:start;accent-color:var(--blue)" title="The land round the place, fading into the haze. Unticked: none (the streets float in the sky)"></div>
+          <div class="field"><label for="gndX">Position X (m)</label><input type="number" id="gndX" value="0" step="10" title="Moves the plane east (+) or west (-) of the middle of the place"></div>
+          <div class="field"><label for="gndY">Position Y (m)</label><input type="number" id="gndY" value="-0.3" step="0.05" title="Its height: the streets are at 0, so below 0 it lies under them (the default, 30 cm under, never shows through the blocks and islands)"></div>
+          <div class="field"><label for="gndZ">Position Z (m)</label><input type="number" id="gndZ" value="0" step="10" title="Moves the plane south (+) or north (-) of the middle of the place"></div>
+          <div class="field"><label for="gndTurn">Turn (°)</label><input type="number" id="gndTurn" value="0" step="5" title="Turns it round the up axis (shows when Width and Length differ)"></div>
+          <div class="field"><label for="gndW">Width (m)</label><input type="number" id="gndW" value="12000" step="100" min="1" title="Across, east to west before turning"></div>
+          <div class="field"><label for="gndL">Length (m)</label><input type="number" id="gndL" value="12000" step="100" min="1" title="Along, north to south before turning"></div>
+          <div class="field"><label for="gndAuto">Colour by time</label><input type="checkbox" id="gndAuto" checked style="justify-self:start;accent-color:var(--blue)" title="Ticked: the land's colour follows the time of day. Unticked: the colour below"></div>
+          <div class="field"><label for="gndColour">Colour</label><input type="color" id="gndColour" value="#5c6648" disabled title="The land's own colour (untick Colour by time)" style="justify-self:start;width:52px;height:26px;padding:0;border:1px solid var(--line);background:none"></div>
+          <button class="btn secondary" id="btnGndReset">Reset ground</button>
+          <div class="note">Kept in this browser. Render photo and Bake light trace it too.</div>
         </div>
       </section>
     </aside>
