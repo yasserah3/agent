@@ -150,6 +150,7 @@
     {
       "id": "brushed_concrete_03",
       "name": "Concrete, brushed",
+      "quarter_turns": false,
       "kind": "concrete",
       "size_m": [
         2.0,

@@ -643,7 +643,24 @@ made of, before you press Generate texture:
   - Sidewalks: four pavings (grey blocks, square slabs, hexagons, red brick),
     the concretes or the asphalts. Blocks and islands use the sidewalk's.
   - Kerbs: two concretes (exposed aggregate, brushed). Bridge decks use it too.
-- A scanned material's colour, bump and roughness are laid over the 4 m
+- **Streets** get fresh tiles made from the scan, the way the tiles from your
+  training are made (app/tiles.py), so a street never shows the scan
+  repeating every couple of metres: patches of the scan half a metre across,
+  placed at random, turned and flipped, blended into 4 m tiles that join
+  themselves on every edge, their blotches evened out. As many variants as
+  your own tiles, different ones for open road, the kerb band and junctions
+  (9 with the default 3 variants), and each street picks one with its own
+  offset, turn and flip, as before. Colour, bump and roughness are placed
+  together patch by patch, so they still line up, and a turned or flipped
+  patch has its slopes turned with it (checked: the bump's slopes agree with
+  the colour's to a median of 1.000). The scan's broad light and dark, shine
+  and undulation are evened out first, so the patches blend unseen; the
+  large-scale variation comes from the Large variation layer, as for your
+  tiles. Brushed concrete's patches only make half turns, so its brush lines
+  keep one direction. Made once per material (about 15 s) and kept in the
+  workspace.
+- **Sidewalks and kerbs** keep the scan itself (paving's joints must stay on
+  their grid): its colour, bump and roughness are laid over the 4 m
   material tile together: repeated a whole number of times each way (a 2 m
   scan twice), stretched by the little it takes to fit, all three the same
   way, so **every stone and joint has its bump exactly on it**. Checked: the
@@ -652,7 +669,8 @@ made of, before you press Generate texture:
 - **Match the tone of your tiles** (off by default): a scanned material takes
   on the mean colour of what it replaces, so it fits your trained look. The
   large-scale variation (stains, wear) still comes from your generated
-  texture either way. Off, each material keeps its own colour.
+  texture either way. Off, each material keeps its own colour. On streets,
+  open road, the kerb band and junctions each take their own tile's tone.
 - **Generate texture** lays the street material into the texture: at its
   real size, each pixel the average of the ground it covers (at a metre or
   so per pixel that is its colour and tone, not its stones), with your

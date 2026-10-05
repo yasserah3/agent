@@ -28,14 +28,21 @@ from app import analysis as A
 PARTS = ("open", "edge", "junction")
 
 
-def _seamless_synth(src, size, patch, rng, count=400, seam=3.0):
+def _seamless_synth(src, size, patch, rng, count=400, seam=3.0, quarter_turns=True, turned=None):
     """
     Build a tile on a torus: a patch that runs off one side continues on the
     opposite side, so the finished tile joins itself on every edge.
+
+    src may have any number of channels (colour, and a material's bump and
+    roughness with it, all placed together). quarter_turns: patches may turn
+    by quarter turns; False keeps them to half turns (a surface with a
+    direction, like brushed concrete). turned(patch, k, flipped): fixes a
+    patch's channels that are directions (a bump map's slopes) after it has
+    been turned k quarter turns and maybe flipped left to right.
     """
     h, w = src.shape[:2]
     patch = int(min(patch, h // 2, w // 2, size // 2))
-    acc = np.zeros((size, size, 3), np.float64)
+    acc = np.zeros((size, size, src.shape[2]), np.float64)
     wsum = np.zeros((size, size, 1), np.float64)
     ramp = np.minimum(np.arange(patch), np.arange(patch)[::-1]).astype(np.float64) + 1.0
     window = np.outer(ramp, ramp)
@@ -53,9 +60,14 @@ def _seamless_synth(src, size, patch, rng, count=400, seam=3.0):
             sy = int(rng.integers(0, h - patch)); sx = int(rng.integers(0, w - patch))
             p = src[sy:sy + patch, sx:sx + patch].astype(np.float64)
             k = int(rng.integers(0, 4))
+            if not quarter_turns:
+                k = 2 * (k % 2)
             p = np.rot90(p, k)
-            if rng.integers(0, 2):
+            flipped = bool(rng.integers(0, 2))
+            if flipped:
                 p = np.fliplr(p)
+            if turned is not None:
+                p = turned(p, k, flipped)
             ys = (yy + np.arange(patch)) % size
             xs = (xx + np.arange(patch)) % size
             acc[np.ix_(ys, xs)] += p * window

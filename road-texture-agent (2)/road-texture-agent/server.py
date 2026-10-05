@@ -52,7 +52,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.05-materials3"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.05-materials4"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -671,16 +671,30 @@ def _apply_materials(tileset, choice, match_tone):
         e = LIB.entry(mid)
         if not e or e["kind"] not in LIB.KINDS_FOR_PART[part]:
             raise ValueError(f"{mid} is not a {part} material in the library")
-        own = next((tileset["tiles"][t][0] for t in tile_parts if tileset["tiles"].get(t)), None)
-        if own is None and part == "kerb":
-            own = (tileset["tiles"].get("sidewalk") or [None])[0]
-        tone = None
-        if match_tone and own is not None:
-            tone = np.asarray(Image.open(own["path"]).convert("RGB")).reshape(-1, 3).mean(axis=0).tolist()
-        rec = LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone)
-        for t in tile_parts:
-            tileset["tiles"][t] = [rec]
-        used[part] = e["name"] + (" (toned to your tiles)" if tone is not None else "")
+        def tone_of(t):
+            own = (tileset["tiles"].get(t) or [None])[0]
+            if own is None and part == "kerb":
+                own = (tileset["tiles"].get("sidewalk") or [None])[0]
+            if not match_tone or own is None:
+                return None
+            return np.asarray(Image.open(own["path"]).convert("RGB")).reshape(-1, 3).mean(axis=0).tolist()
+        if part == "street":
+            # streets: fresh tiles made from the scan's patches, as many variants as your
+            # own tiles and different ones for open road, the kerb band and junctions, so
+            # no street shows the scan repeating; with match tone, each takes its part's tone
+            n = max(1, int(tileset["settings"].get("variants", 3)))
+            for i, t in enumerate(tile_parts):
+                tone = tone_of(t)
+                tileset["tiles"][t] = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone, variant=i * n + v + 1)
+                                       for v in range(n)]
+            used[part] = e["name"] + f" ({n * len(tile_parts)} random tiles" + (", toned to yours)" if tone is not None else ")")
+        else:
+            # paving and kerbs: the scan itself, so its joints stay on their grid
+            tone = tone_of(tile_parts[0])
+            rec = LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone)
+            for t in tile_parts:
+                tileset["tiles"][t] = [rec]
+            used[part] = e["name"] + (" (toned to your tiles)" if tone is not None else "")
     return used
 
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage as ndi
 
 DIR = Path(__file__).with_name("scans")
 KINDS_FOR_PART = {"street": ("asphalt", "concrete"),
@@ -91,40 +92,122 @@ def _load(e):
     return colour, normal, rough
 
 
-def tile_for(mid, tile_m, px, cache_dir, tone=None):
+def turn_normals(p, k, flipped):
+    """
+    A patch of colour (3), bump (3: x right, y up, out) and roughness (1)
+    channels that was turned k quarter turns anticlockwise (np.rot90) and then
+    maybe flipped left to right: its slopes turned and flipped with it, so
+    every stone is still lit from the right side.
+    """
+    p = p.copy()
+    x, y = p[..., 3].copy(), p[..., 4].copy()
+    for _ in range(k % 4):
+        x, y = -y, x
+    if flipped:
+        x = -x
+    p[..., 3], p[..., 4] = x, y
+    return p
+
+
+def _calm(tile, size):
+    """
+    app/tiles.py's _calm (large blotches and extreme spots evened out), its
+    wide blur done by FFT: exact for a tile that wraps around, and quick.
+    """
+    from scipy.ndimage import fourier_gaussian
+    t = tile.astype(np.float64)
+    sigma = size / 12
+    broad = np.stack([np.fft.ifft2(fourier_gaussian(np.fft.fft2(t[..., c]), sigma)).real for c in range(t.shape[2])], -1)
+    mean = t.reshape(-1, t.shape[2]).mean(axis=0)
+    t = t - broad + mean
+    lum = t.mean(axis=2)
+    mu, sd = lum.mean(), lum.std() + 1e-6
+    z = (lum - mu) / sd
+    soft = np.tanh(z / 2.5) * 2.5
+    return t + ((soft - z) * sd)[:, :, None]
+
+
+def _synth(e, tile_m, px, variant):
+    """
+    A fresh 4 m tile of a scanned material, made like the tiles from your
+    training (app/tiles.py): patches of the scan, half a metre across, placed
+    at random, turned and flipped, blended into a tile that joins itself on
+    every edge, then its large blotches and extreme spots evened out. Colour,
+    bump and roughness are placed together, patch by patch, so they still line
+    up; a turned patch has its slopes turned with it. Each variant is another
+    arrangement, so the scan no longer repeats every couple of metres.
+    """
+    from app import tiles as TL
+    colour, normal, rough = _load(e)
+    # to the tile's scale (metres per pixel)
+    mpp = tile_m / px
+    w, h = max(64, int(round(float(e["size_m"][0]) / mpp))), max(64, int(round(float(e["size_m"][1]) / mpp)))
+    c = np.asarray(Image.fromarray(colour).resize((w, h), Image.LANCZOS if w > colour.shape[1] else Image.BOX), np.float64)
+    n = _resize(normal, w, h).astype(np.float64)
+    r = _resize(rough, w, h).astype(np.float64)
+    # the scan's broad light and dark (wear, stains), shine and undulation evened out
+    # first, over about half a patch: neighbouring patches then match in tone and
+    # blend unseen, instead of showing as a quilt. The detail inside (stones, pores,
+    # cracks) is kept; large-scale variation comes from the model's weathering layer
+    patch = int(px) // 8
+    flat = lambda a: a - ndi.gaussian_filter(a, patch / 2, mode="wrap") + a.mean()
+    c = np.stack([flat(c[..., i]) for i in range(3)], -1)
+    r = flat(r)
+    nz = np.maximum(n[..., 2], 0.05)
+    sx, sy = flat(n[..., 0] / nz), flat(n[..., 1] / nz)
+    n = np.stack([sx, sy, np.ones_like(sx)], -1)
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    src = np.concatenate([c, n, r[..., None]], axis=-1)
+    rng = np.random.default_rng([variant, 9001])
+    out = TL._seamless_synth(src, int(px), patch, rng, quarter_turns=e.get("quarter_turns", True),
+                             turned=turn_normals)
+    c = _calm(out[..., :3], int(px))
+    n = out[..., 3:6]
+    n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-6)
+    return c, n, np.clip(out[..., 6], 0.0, 1.0)
+
+
+def tile_for(mid, tile_m, px, cache_dir, tone=None, variant=None):
     """
     A material tile made from a library material: its colour, normal and
     roughness pictures covering tile_m x tile_m at px x px, made together so
     they line up. tone: the mean colour (0-255 RGB) its colour should take on,
-    or None for its own. Returns a tile record as the tileset's (path), with
-    normal_path, rough_path and the material's name; the pictures are kept in
-    cache_dir.
+    or None for its own. variant: None lays the scan itself, repeated (paving,
+    whose joints must stay on their grid); a number makes a fresh tile from
+    the scan's patches, that arrangement (streets: no visible repeat).
+    Returns a tile record as the tileset's (path), with normal_path,
+    rough_path and the material's name; the pictures are kept in cache_dir.
     """
     e = entry(mid)
     if not e:
         raise ValueError(f"no material {mid} in the library")
     files = [DIR / e[k] for k in ("colour", "normal", "roughness")]
     key = hashlib.sha1(json.dumps([mid, float(tile_m), int(px), [round(float(t), 1) for t in tone] if tone is not None else None,
-                                   [f.stat().st_mtime for f in files]]).encode()).hexdigest()[:16]
+                                   [f.stat().st_mtime for f in files], variant, e.get("quarter_turns", True), 2]).encode()).hexdigest()[:16]
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     paths = {k: cache_dir / f"lib_{mid}_{key}_{k}.png" for k in ("colour", "normal", "rough")}
-    rec = {"id": f"lib_{mid}", "library": mid, "name": e["name"], "method": "library", "covers_m": [tile_m, tile_m],
+    rec = {"id": f"lib_{mid}" + (f"_{variant}" if variant is not None else ""), "library": mid, "name": e["name"],
+           "method": "library" if variant is None else "library synth", "variant": variant, "covers_m": [tile_m, tile_m],
            "path": str(paths["colour"]), "normal_path": str(paths["normal"]), "rough_path": str(paths["rough"])}
     if all(p.exists() for p in paths.values()):
         return rec
-    colour, normal, rough = _load(e)
-    reps = (max(1, int(round(tile_m / e["size_m"][0]))), max(1, int(round(tile_m / e["size_m"][1]))))
-    c, n, r = layout(colour, normal, rough, reps, int(px), int(px))
-    # reps x the scan's real size fit into tile_m: squeezed (or stretched) by that much
-    n = squeeze_normals(n, (reps[0] * e["size_m"][0] / tile_m, reps[1] * e["size_m"][1] / tile_m))
+    if variant is not None:
+        c, n, r = _synth(e, tile_m, px, variant)
+    else:
+        colour, normal, rough = _load(e)
+        reps = (max(1, int(round(tile_m / e["size_m"][0]))), max(1, int(round(tile_m / e["size_m"][1]))))
+        c, n, r = layout(colour, normal, rough, reps, int(px), int(px))
+        # reps x the scan's real size fit into tile_m: squeezed (or stretched) by that much
+        n = squeeze_normals(n, (reps[0] * e["size_m"][0] / tile_m, reps[1] * e["size_m"][1] / tile_m))
     c = c.astype(np.float32)
     if tone is not None:
         gain = np.clip(np.asarray(tone, np.float32) / np.maximum(c.reshape(-1, 3).mean(axis=0), 1.0), 0.25, 4.0)
         c = c * gain
-    Image.fromarray(np.clip(c + 0.5, 0, 255).astype(np.uint8)).save(paths["colour"])
-    Image.fromarray(np.clip((n * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["normal"])
-    Image.fromarray(np.clip(r * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["rough"])
+    # cache files: quick to write, lossless
+    Image.fromarray(np.clip(c + 0.5, 0, 255).astype(np.uint8)).save(paths["colour"], compress_level=1)
+    Image.fromarray(np.clip((n * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["normal"], compress_level=1)
+    Image.fromarray(np.clip(r * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["rough"], compress_level=1)
     return rec
 
 
