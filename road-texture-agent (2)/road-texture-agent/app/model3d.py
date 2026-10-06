@@ -30,6 +30,7 @@ from app import quadmesh as QM
 from app import progress as prog
 from app import placements as PL
 from app import islands as ISL
+from app import decals as DC
 from scipy import ndimage as ndi
 
 MAX_TEXTURE = 8192          # the largest texture Unreal accepts without extra settings
@@ -542,7 +543,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           output_scale, out_path, straightness=0.7, spacing_m=2.0,
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
-                          optimise=False, blocks=None, scatter=None, inner=None, surface="scan", islands=None):
+                          optimise=False, blocks=None, scatter=None, inner=None, surface="scan", islands=None,
+                          decals=None):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
@@ -554,6 +556,9 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     built from the mask without them, and they are laid as they are.
     islands: the island material slots (server.py's _islands_for): the islands
     picked for a slot are laid with its material, block and small paved island.
+    decals: the decals laid on the streets (app/decals.py), {"placements",
+    "images", "mode"}: "separate" makes them an object of their own (Decals),
+    "painted" part of the road object, just above its surface.
     """
     from scipy.ndimage import map_coordinates
     gray = np.array(Image.open(mask_path).convert("L"))
@@ -847,6 +852,20 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
             "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
 
+    decal_info = None
+    if decals and decals.get("placements"):
+        on_road = decals.get("mode") == "painted"
+        dprims = DC.mesh_prims(decals["placements"], decals["images"], materials, images, W, H, mpp_out, output_scale,
+                               DC.LIFT_PAINTED if on_road else DC.LIFT_SEPARATE,
+                               lambda data, mime: _image_index(images, data, mime), decals.get("names"))
+        if dprims:
+            if on_road:
+                meshes[0]["primitives"].extend(dprims)            # part of the road object
+            else:
+                meshes.append({"name": "Decals", "primitives": dprims})
+            decal_info = {"count": len(decals["placements"]), "mode": "painted" if on_road else "separate",
+                          "pictures": len(dprims)}
+
     prog.stage("writing", "writing the 3D file")
     size = write_glb_scene(out_path, meshes, materials, images)
 
@@ -872,6 +891,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                                            "warnings", "streets")}
                         for pl in plans] if plans else None,
             "deck": deck_info,
+            "decals": decal_info,
             "lamps": lamps,
             "layouts": {int(k): v for k, v in layouts.items()}, "_mesh": mesh, "_world": world,
             "_fac": fac}

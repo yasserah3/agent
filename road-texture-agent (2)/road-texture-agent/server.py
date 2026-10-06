@@ -52,13 +52,15 @@ from app import quadmesh as QMB
 from app import bridges as BRG
 from app import streets as ST
 from app import islands as ISL
+from app import formats as FMT
+from app import decals as DC
 from app.generation import prepare_mask as _prep
 from app import routing as R
 from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.06-isl1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.06-dcl1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1272,6 +1274,11 @@ def _placement_list(raw):
                      if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))}
             if turns:
                 q["turns"] = {k: v for k, v in turns.items() if v}
+            # Draw spaced: single objects made empty spots, by id ("row-column"); the
+            # rest of the grid stays where it is
+            empty = sorted({str(k) for k in (p.get("empty") or []) if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))})
+            if empty:
+                q["empty"] = empty[:100000]
             # foliage: a placement of plants, each with its own random scale, turn (degrees)
             # and offset (metres) between a min and a max, and whether plants may overlap
             if p.get("foliage"):
@@ -1733,9 +1740,11 @@ def _build_key(payload):
     import hashlib
     base = art["meta"].get("base_mask") or art["meta"].get("mask")
     sc = ARTIFACTS / f"scatter_{base}.json"                  # objects and inner streets
+    dc = ARTIFACTS / f"gen_{gid}_decals.json"                 # the decals' places
     tiles = mem.latest_artifact("tileset") if payload.get("mesh", "tiled") == "tiled" else None
     return json.dumps([gid, {k: v for k, v in payload.items() if k != "progress"},
                        hashlib.sha1(sc.read_bytes()).hexdigest() if sc.exists() else None,
+                       hashlib.sha1(dc.read_bytes()).hexdigest() if dc.exists() else None,
                        tiles["id"] if tiles else None], sort_keys=True, default=str)
 
 
@@ -1824,6 +1833,142 @@ def islands_texture(payload: dict):
                           "full": f"/api/download/{gid}_full?name={stem}_roads_and_islands.png"}}
 
 
+# ------------------------------------------------------------------ decals
+# Pictures laid on the streets (app/decals.py), kept in workspace/decals: each
+# a PNG with its name and size in index.json, and the decal layers (which
+# picture, where it goes) in layers.json, for every map.
+DECALS = WORK / "decals"
+DECAL_EXT = {".png", ".webp", ".jpg", ".jpeg"}
+
+
+def _decal_index():
+    f = DECALS / "index.json"
+    return json.loads(f.read_text()) if f.exists() else []
+
+
+def _decal_layers():
+    f = DECALS / "layers.json"
+    return json.loads(f.read_text()) if f.exists() else []
+
+
+@app.get("/api/decals")
+def list_decals():
+    return {"decals": [{**d, "url": f"/api/decals/{d['id']}/image"} for d in _decal_index()], "layers": _decal_layers()}
+
+
+@app.post("/api/decals/import")
+async def import_decal(file: UploadFile = File(...)):
+    """A decal picture (PNG with a transparent background, or WebP or JPEG): kept as a PNG."""
+    name = Path(file.filename or "decal.png").name
+    if Path(name).suffix.lower() not in DECAL_EXT:
+        raise HTTPException(400, "use a PNG (with a transparent background), WebP or JPEG picture")
+    raw = await file.read()
+    try:
+        im = Image.open(__import__("io").BytesIO(raw)).convert("RGBA")
+    except Exception:
+        raise HTTPException(400, f"could not read {name}")
+    if max(im.size) > 4096:
+        im.thumbnail((4096, 4096), Image.LANCZOS)
+    DECALS.mkdir(parents=True, exist_ok=True)
+    did = uuid.uuid4().hex[:12]
+    im.save(DECALS / f"{did}.png", optimize=True)
+    entry = {"id": did, "name": Path(name).stem.replace("_", " ")[:60], "width": im.width, "height": im.height,
+             "see_through": bool(np.asarray(im)[..., 3].min() < 250)}
+    (DECALS / "index.json").write_text(json.dumps(_decal_index() + [entry], indent=1))
+    mem.record("decal_import", f"imported decal {name}", {"id": did})
+    return {**entry, "url": f"/api/decals/{did}/image"}
+
+
+@app.get("/api/decals/{did}/image")
+def decal_image(did: str):
+    if not re.fullmatch(r"[0-9a-f]{12}", did) or not (DECALS / f"{did}.png").exists():
+        raise HTTPException(404, "no such decal")
+    return FileResponse(DECALS / f"{did}.png", media_type="image/png")
+
+
+@app.delete("/api/decals/{did}")
+def delete_decal(did: str):
+    idx = _decal_index()
+    if not any(d["id"] == did for d in idx):
+        raise HTTPException(404, "no such decal")
+    (DECALS / "index.json").write_text(json.dumps([d for d in idx if d["id"] != did], indent=1))
+    (DECALS / f"{did}.png").unlink(missing_ok=True)
+    (DECALS / "layers.json").write_text(json.dumps([l for l in _decal_layers() if l.get("decal") != did]))
+    return {"ok": True}
+
+
+@app.post("/api/decals/layers")
+def save_decal_layers(payload: dict):
+    DECALS.mkdir(parents=True, exist_ok=True)
+    layers = DC.layer_list(payload.get("layers"), {d["id"] for d in _decal_index()})
+    (DECALS / "layers.json").write_text(json.dumps(layers))
+    return {"ok": True, "layers": len(layers)}
+
+
+@app.post("/api/decals/apply")
+def apply_decals(payload: dict):
+    """
+    Lay a generated texture's decals: where each layer's decals go (from the
+    generation's mask), the decals as a picture of their own (the Decals layer),
+    and, painted into the road texture or not (mode "painted" or "separate").
+    The texture as generated is kept, so laying them again starts from it.
+    """
+    gid = payload.get("generation")
+    art, result = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_result")
+    if not art or not result:
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    rec = mem.image(art["meta"]["mask"])
+    idx = _decal_index()
+    layers = DC.layer_list(payload.get("layers"), {d["id"] for d in idx})
+    mode = "painted" if payload.get("mode") == "painted" else "separate"
+    base = ARTIFACTS / f"gen_{gid}_result_base.png"
+    if not base.exists():
+        import shutil
+        shutil.copyfile(result["path"], base)                 # the texture as generated, without decals
+    mpp, s = float(art["meta"]["scale"]), int(art["meta"].get("output_scale", 1))
+    gray = np.array(Image.open(rec["path"]).convert("L"))
+    sizes = {d["id"]: (d["width"], d["height"]) for d in idx}
+    bridges = None
+    base_mask = mem.artifact(f"bridges_{art['meta'].get('base_mask') or rec['id']}")
+    if base_mask and Path(base_mask["path"]).exists():
+        bridges = _bridge_list(json.loads(Path(base_mask["path"]).read_text()))
+    placements = DC.place(gray, mpp, layers, sizes, int(payload.get("seed", 7)), bridges)
+    pics = DC.load_pictures(idx, DECALS)
+    base_rgb = np.asarray(Image.open(base).convert("RGB"))
+    _, coverage = _prep(gray, s) if s else (None, None)
+    if coverage.shape != base_rgb.shape[:2]:
+        coverage = None
+    rgba = DC.paint(base_rgb.shape[:2], placements, pics, mpp / s, s, coverage)
+    layer_png = ARTIFACTS / f"gen_{gid}_decals.png"
+    Image.fromarray(np.clip(np.concatenate([rgba[..., :3] / np.maximum(rgba[..., 3:], 1e-6), rgba[..., 3:]], -1) * 255 + 0.5,
+                            0, 255).astype(np.uint8), "RGBA").save(layer_png, compress_level=4)
+    out = DC.composite(base_rgb, rgba) if mode == "painted" and placements else base_rgb
+    tmp = Path(result["path"]).with_name(f"gen_{gid}_result.{uuid.uuid4().hex[:6]}.part.png")
+    Image.fromarray(out).save(tmp)
+    os.replace(tmp, result["path"])
+    DC.save(placements, ARTIFACTS / f"gen_{gid}_decals.json")
+    mem.add_artifact(f"{gid}_decalimg", "generated_decals", layer_png, {"generation": gid})
+    mem.add_artifact(f"{gid}_decals", "decal_places", ARTIFACTS / f"gen_{gid}_decals.json",
+                     {"generation": gid, "count": len(placements), "mode": mode})
+    names = {d["id"]: d["name"] for d in idx}
+    v = uuid.uuid4().hex[:6]
+    return {"ok": True, "count": len(placements), "mode": mode, "layers": DC.summary(placements, layers, names),
+            "urls": {"decals": f"/api/artifact/{gid}_decalimg?v={v}", "result": f"/api/artifact/{gid}_result?v={v}"}}
+
+
+def _decals_for(gid, payload):
+    """A generation's decals for the 3D model: their places and pictures, and how they lie ("separate" or "painted")."""
+    art = mem.artifact(f"{gid}_decals")
+    if not art or not Path(art["path"]).exists():
+        return None
+    placements = json.loads(Path(art["path"]).read_text()).get("placements") or []
+    if not placements:
+        return None
+    return {"placements": placements, "images": DC.load_pictures(_decal_index(), DECALS),
+            "names": {d["id"]: d["name"] for d in _decal_index()},
+            "mode": "painted" if payload.get("decals") == "painted" else "separate"}
+
+
 @app.post("/api/export3d")
 @tracked("Building the 3D model", EXPORT_PLAN)
 def export3d(payload: dict):
@@ -1903,9 +2048,11 @@ def _export3d(payload):
             used_materials = _apply_materials(tileset, payload.get("materials") or {},
                                               bool(payload.get("match_tone", True)))
             islands = _islands_for(gid, tileset, payload)
+            decals = _decals_for(gid, payload)
+            base_tex = ARTIFACTS / f"gen_{gid}_result_base.png"     # without painted decals (the variation layer)
             markings = mem.artifact(f"{gid}_markings")
             info = M3.export_road_tiled_glb(
-                rec["path"], result["path"], markings["path"] if markings else None, tileset,
+                rec["path"], str(base_tex) if base_tex.exists() else result["path"], markings["path"] if markings else None, tileset,
                 float(art["meta"]["scale"]), int(art["meta"].get("output_scale", 1)), out,
                 straightness=float(payload.get("straightness", 70)) / 100.0,
                 spacing_m=float(payload.get("spacing_m", 2.0)),
@@ -1928,7 +2075,8 @@ def _export3d(payload):
                 bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
                             "deck_m": float(payload.get("bridge_deck_m", 1.0))},
-                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")), islands=islands)
+                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")), islands=islands,
+                decals=decals)
             prog.stage("check", "checking the tile repeat")
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
@@ -1964,6 +2112,42 @@ def _export3d(payload):
                {"generation": gid, **info})
     stem = Path(rec["name"]).stem
     return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info, "streets_warning": stale}
+
+
+@app.post("/api/export3d/convert")
+def export3d_convert(payload: dict):
+    """
+    The 3D model built by /api/export3d in the format asked (GLB, FBX or OBJ;
+    FBX and OBJ as a zip with their textures), with the streets, sidewalks and
+    kerbs as one object (combine_ground) and the placed objects as one object
+    (combine_objects) if asked (app/formats.py).
+    """
+    gid = payload.get("generation")
+    fmt = str(payload.get("format", "glb")).lower()
+    if fmt not in ("glb", "fbx", "obj"):
+        raise HTTPException(400, "format must be GLB, FBX or OBJ")
+    glb = mem.artifact(f"{gid}_glb")
+    if not glb or not Path(glb["path"]).exists():
+        raise HTTPException(400, "build the 3D model first")
+    art = mem.artifact(f"{gid}_map")
+    rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"]) if art else None
+    stem = Path(rec["name"]).stem + "_roads" if rec else "roads"
+    cg, co = bool(payload.get("combine_ground")), bool(payload.get("combine_objects"))
+    if fmt == "glb" and not cg and not co:
+        return {"ok": True, "url": f"/api/download/{gid}_glb?name={stem}.glb", "format": "glb", "objects": None}
+    tag = f"{fmt}_{int(cg)}{int(co)}"
+    out = ARTIFACTS / f"gen_{gid}_{tag}.{'glb' if fmt == 'glb' else 'zip'}"
+    part = out.with_name(out.stem + f".{uuid.uuid4().hex[:8]}.part{out.suffix}")
+    try:
+        info = FMT.convert(glb["path"], part, fmt, stem, cg, co)
+        os.replace(part, out)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    mem.add_artifact(f"{gid}_{tag}", f"model_{fmt}", out, {"generation": gid, **info})
+    name = f"{stem}.glb" if fmt == "glb" else f"{stem}_{fmt}.zip"
+    return {"ok": True, "url": f"/api/download/{gid}_{tag}?name={name}", "format": fmt, "file_bytes": out.stat().st_size,
+            "objects": info["count"], "names": info["objects"], "copies": info["copies"]}
 
 
 @app.get("/api/download/{artifact_id}")

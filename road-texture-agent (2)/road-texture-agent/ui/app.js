@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.06-dcl1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -124,6 +124,7 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
       renderMemory();
       try{ S.corrections = (await api('/api/corrections')).corrections; }catch(_){}
       loadMaterials();
+      loadDecals();
     }catch(e){
       $('.engine').innerHTML = '<i style="background:var(--red)"></i>Server not running';
       log('No server. Start it with: python server.py', 'bad');
@@ -809,8 +810,11 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
           line_width_mode: $('#lineMode').value,
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked }) });
       S.gen.result = res;
-      S.gen.top = null;
+      S.gen.top = null; S.gen.decals = null;
       await loadIslands(res);
+      $('#lp-decals').innerHTML = '<div class="ph">—</div>';
+      if(DEC.layers.length) await applyDecals();
+      renderDecals();
       const s = res.summary;
       log(`Output ${s.size[0]} × ${s.size[1]} (${s.output_scale}× the mask${s.soft_edges ? ', smooth edges' : ''}), grain ${Math.round(s.grain*50)}${s.matched_tone != null ? `, colour matched to tone ${s.matched_tone}` : ''}.`);
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
@@ -908,13 +912,39 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
                        square: $('#matSquare').value },
           match_tone: $('#matTone').checked,
           island_slots: ISLS.slots,
+          decals: $('#decalMode').value, decal_version: S.gen.decalVersion || 0,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
   window.exportSettings = exportSettings;
   window.lastGeneration = () => S.gen.result ? S.gen.result.id : null;
 
-  $('#btn3d').addEventListener('click', async () => {
+  // Download 3D model: a window in the middle of the screen for the format (GLB, FBX,
+  // OBJ) and what is combined; the choices are kept in this browser
+  const EXPORT = (() => { try{ return { format: 'glb', ground: false, objects: false, ...JSON.parse(localStorage.getItem('rta.export') || '{}') }; }
+                          catch(_){ return { format: 'glb', ground: false, objects: false }; } })();
+  const exportNote = () => { $('#exNote').textContent = EXPORT.format === 'glb'
+    ? 'GLB: one file with its textures inside. Opens in Blender, Unreal, Unity and three.js.'
+    : `${EXPORT.format.toUpperCase()}: a zip with the model and a textures folder it refers to; unzip it before opening. Metres, Y up.`; };
+  function openExport(){
+    if(!S.gen.result) return;
+    $('#exFormat').value = EXPORT.format; $('#exGround').checked = EXPORT.ground; $('#exObjects').checked = EXPORT.objects;
+    exportNote(); $('#exportPop').hidden = false; $('#exFormat').focus();
+  }
+  const closeExport = () => { $('#exportPop').hidden = true; };
+  ['#exFormat', '#exGround', '#exObjects'].forEach(id => $(id).addEventListener('change', () => {
+    EXPORT.format = $('#exFormat').value; EXPORT.ground = $('#exGround').checked; EXPORT.objects = $('#exObjects').checked;
+    try{ localStorage.setItem('rta.export', JSON.stringify(EXPORT)); }catch(_){}
+    exportNote();
+  }));
+  $('#exClose').addEventListener('click', closeExport);
+  $('#exCancel').addEventListener('click', closeExport);
+  $('#exportPop').addEventListener('pointerdown', e => { if(e.target === $('#exportPop')) closeExport(); });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && !$('#exportPop').hidden) closeExport(); });
+  $('#btn3d').addEventListener('click', openExport);
+  $('#exGo').addEventListener('click', () => { closeExport(); download3d({ ...EXPORT }); });
+
+  async function download3d(choice){
     if(!S.gen.result) return;
     $('#btn3d').disabled = true; status('Building 3D model…');
     log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
@@ -967,13 +997,27 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
         log(`Road model ready: ${res.triangles.toLocaleString()} triangles, ${res.size_m[0]} × ${res.size_m[1]} m, `
           + `${(res.file_bytes/1048576).toFixed(1)} MB.`, 'ok');
       }
-      log('  Units are metres, Y up. Opens directly in Blender (File > Import > glTF) and Unreal (drag into the Content Browser).');
+      let url = res.url;
+      if(choice.format !== 'glb' || choice.ground || choice.objects){
+        status(`Writing ${choice.format.toUpperCase()}…`);
+        const cv = await api('/api/export3d/convert', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ generation: S.gen.result.id, format: choice.format, combine_ground: choice.ground, combine_objects: choice.objects }) });
+        url = cv.url;
+        log(`  ${choice.format.toUpperCase()}: ${cv.objects} object(s)`
+          + (choice.ground ? ', the streets, sidewalks and kerbs as one ("Streets")' : '')
+          + (choice.objects ? ', every placed object as one ("Objects")' : cv.copies ? `, ${cv.copies.toLocaleString()} object copies each on their own` : '')
+          + (cv.file_bytes ? `, ${(cv.file_bytes / 1048576).toFixed(1)} MB` : '')
+          + (choice.format === 'glb' ? '.' : ': a zip with the model and its textures folder; unzip it, then import the model.'), 'ok');
+      }
+      log(choice.format === 'fbx' ? '  Units are metres, Y up. Blender: File > Import > FBX. Unreal: drag the .fbx into the Content Browser (its textures come along).'
+        : choice.format === 'obj' ? '  Units are metres, Y up. Blender: File > Import > Wavefront (.obj). Unreal: drag the .obj into the Content Browser.'
+        : '  Units are metres, Y up. Opens directly in Blender (File > Import > glTF) and Unreal (drag into the Content Browser).');
       const link = document.createElement('a');
-      link.href = API + res.url; link.download = '';
+      link.href = API + url; link.download = '';
       document.body.appendChild(link); link.click(); link.remove();
     }catch(e){ log('3D export failed: ' + e.message, 'bad'); }
     status('Ready.'); $('#btn3d').disabled = false; renderMemory();
-  });
+  }
 
   async function showLayer(name){
     const res = S.gen.result;
@@ -981,12 +1025,15 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     if(name === 'top' && !(S.gen.top && S.gen.top.gid === res.id)) return;
     const it = S.gen.islandTex;
     if((name === 'islands' || name === 'full') && !it) return;
+    if(name === 'decals' && !S.gen.decals) return;
     S.gen.layer = name;
-    const img = name === 'top' ? S.gen.top.canvas : await loadImage(API + (it && (name === 'islands' || name === 'full') ? it.urls[name] : res.urls[name]));
+    const img = name === 'top' ? S.gen.top.canvas
+      : await loadImage(API + (name === 'decals' ? S.gen.decals.urls.decals : it && (name === 'islands' || name === 'full') ? it.urls[name] : res.urls[name]));
     genVp.show(img, name === 'top' ? `Top view of the 3D model, ${img.width} × ${img.height}`
       : name === 'islands' ? `Islands texture, ${img.width} × ${img.height} (the roads transparent)`
-      : name === 'full' ? `Roads + islands, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`,
-      name === 'islands' || name === 'full');
+      : name === 'full' ? `Roads + islands, ${img.width} × ${img.height}`
+      : name === 'decals' ? `Decals, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`,
+      ['islands', 'full', 'decals'].includes(name));
     drawBridges();
     $$('.layer').forEach(b => b.setAttribute('aria-pressed', b.dataset.layer === name));
   }
@@ -1000,7 +1047,7 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
   }
 
   $$('.layer').forEach(b => b.addEventListener('click', () => {
-    const map = { material:'material', noise:'wear', markings:'markings', top:'top', islands:'islands', full:'full' };
+    const map = { material:'material', noise:'wear', markings:'markings', top:'top', islands:'islands', full:'full', decals:'decals' };
     if(!S.gen.result) return;
     const name = map[b.dataset.layer];
     showLayer(S.gen.layer === name ? 'result' : name);
@@ -1541,6 +1588,126 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
   });
   renderSlots();
 
+  /* ------------------------------------------------ decals */
+  // Pictures laid on the streets (app/decals.py). Each imported decal is a layer with
+  // where it goes: randomly along the streets, or at the junctions' edges (a share
+  // of them, all of them, or two opposite ones per junction). Kept on the server for
+  // every map; Place decals (and Generate texture) lays them on the generated texture
+  const DEC = { decals: [], layers: [], timer: null };
+  const decalById = id => DEC.decals.find(d => d.id === id);
+  async function loadDecals(){
+    try{ const r = await api('/api/decals'); DEC.decals = r.decals || []; DEC.layers = r.layers || []; }catch(_){}
+    renderDecals();
+  }
+  function decalsChanged(){
+    clearTimeout(DEC.timer);
+    const layers = JSON.parse(JSON.stringify(DEC.layers));
+    DEC.timer = setTimeout(() => api('/api/decals/layers', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ layers }) }).catch(e => log('Decal layers not saved: ' + e.message, 'bad')), 300);
+    renderDecals();
+    $('#decalNote').textContent = S.gen.result ? 'Changed: press Place decals to lay them again.' : 'Generate texture lays them.';
+  }
+  function renderDecals(){
+    const box = $('#decalList'); box.innerHTML = '';
+    DEC.layers.forEach((L, i) => {
+      const d = decalById(L.decal); if(!d) return;
+      const junc = !!(L.junctions || L.all_edges || L.even_edges);
+      const card = document.createElement('div'); card.className = 'dc-layer';
+      card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
+          <button type="button" class="dc-x" title="Remove this decal layer">×</button></div>
+        <label class="dc-chk" title="Lay this decal: along the streets (never in a junction), or with one of the three below at the junctions' edges"><input type="checkbox" data-k="random"> Place randomly</label>
+        <div class="dc-sub">
+          <label class="dc-chk" title="At the edges of the junctions (where a street enters one): a random share of them"><input type="checkbox" data-k="junctions"> Place at junctions</label>
+          <label class="dc-chk" title="At every edge of every junction"><input type="checkbox" data-k="all_edges"> At all edges</label>
+          <label class="dc-chk" title="At two opposite edges of every junction: the two streets most in line"><input type="checkbox" data-k="even_edges"> Even edges</label>
+        </div>
+        <div class="dc-nums">
+          <label title="Across the road; its length along the road follows the picture's proportions">Width (m)<input type="number" step="0.1" min="0.1" data-n="width_m"></label>
+          <label data-only="streets" title="On average one decal every this many metres of street">Every (m)<input type="number" step="5" min="2" data-n="every_m"></label>
+          <label data-only="chance" title="The share of junction edges that get one">Share of edges (%)<input type="number" step="5" min="0" max="100" data-n="chance"></label>
+          <label data-only="junction" title="0: just outside the junction. More: further back along the street (an arrow 10 m before the junction)">Back from the edge (m)<input type="number" step="0.5" min="0" data-n="back_m"></label>
+        </div>
+        <label class="dc-chk" data-only="junction" title="Scaled to the road's width at that edge (a crossing from kerb to kerb)"><input type="checkbox" data-k="fit"> Fit the road's width</label>
+        <label class="dc-chk" data-only="streets" title="Turned any way (a manhole cover, a stain); off, it lies along the street, facing either way"><input type="checkbox" data-k="spin"> Turn randomly</label>`;
+      $('.dc-thumb', card).src = API + d.url;
+      $('b', card).textContent = d.name;
+      const len = L.width_m * d.height / d.width;
+      $('small', card).textContent = `${(L.fit && junc) ? 'road width' : L.width_m + ' m'} × ${(L.fit && junc) ? 'in proportion' : len.toFixed(1) + ' m'}`
+        + (L.random ? (junc ? (L.all_edges ? ', every junction edge' : L.even_edges ? ', two opposite edges per junction' : `, ${L.chance}% of junction edges`)
+                            : `, about one per ${L.every_m} m of street`) : ', off');
+      $$('[data-k]', card).forEach(c => {
+        const k = c.dataset.k; c.checked = !!L[k];
+        if(['junctions', 'all_edges', 'even_edges'].includes(k)) c.disabled = !L.random;
+        c.addEventListener('change', () => {
+          L[k] = c.checked;
+          // the three junction choices: one at a time
+          if(c.checked && ['junctions', 'all_edges', 'even_edges'].includes(k))
+            ['junctions', 'all_edges', 'even_edges'].forEach(o => { if(o !== k) L[o] = false; });
+          decalsChanged();
+        });
+      });
+      $$('[data-n]', card).forEach(n => {
+        n.value = L[n.dataset.n];
+        n.addEventListener('change', () => { const v = parseFloat(n.value); if(isFinite(v)) L[n.dataset.n] = v; decalsChanged(); });
+      });
+      $$('[data-only]', card).forEach(e => {
+        const o = e.dataset.only;
+        e.hidden = !L.random || (o === 'streets' ? junc : o === 'junction' ? !junc : !L.junctions);
+      });
+      $('.dc-x', card).addEventListener('click', async () => {
+        DEC.layers.splice(i, 1);
+        log(`Decal layer ${d.name} removed.`);
+        if(!DEC.layers.some(x => x.decal === d.id)){
+          try{ await api('/api/decals/' + d.id, { method:'DELETE' }); DEC.decals = DEC.decals.filter(x => x.id !== d.id); }catch(_){}
+        }
+        decalsChanged();
+      });
+      box.appendChild(card);
+    });
+    $('#decalCount').textContent = DEC.layers.length ? String(DEC.layers.length) : '';
+    $('#btnPlaceDecals').disabled = !S.gen.result || !(DEC.layers.length || S.gen.decals);
+  }
+  $('#btnImportDecal').addEventListener('click', () => { $('#decalFile').value = ''; $('#decalFile').click(); });
+  $('#decalFile').addEventListener('change', async () => {
+    const f = $('#decalFile').files[0]; if(!f) return;
+    const fd = new FormData(); fd.append('file', f);
+    try{
+      const d = await api('/api/decals/import', { method:'POST', body: fd });
+      DEC.decals.push(d);
+      const wide = d.width >= 1.5 * d.height;
+      DEC.layers.push({ decal: d.id, random: true, junctions: false, all_edges: false, even_edges: false,
+                        width_m: wide ? 3 : 1, every_m: 40, chance: 50, back_m: 0, fit: wide, spin: false });
+      log(`Decal ${d.name} imported (${d.width} × ${d.height} px${d.see_through ? '' : ', no transparent background: it will show as a rectangle'}): `
+        + 'set where it goes, then Place decals.', d.see_through ? 'ok' : 'bad');
+      decalsChanged();
+    }catch(e){ log('Decal not imported: ' + e.message, 'bad'); }
+  });
+  // lay the decals on the generated texture: their places, the Decals layer, and the
+  // road texture with them painted in or not (Decals, under 3D model)
+  async function applyDecals(){
+    if(!S.gen.result || !(DEC.layers.length || S.gen.decals)) return;
+    const gid = S.gen.result.id, mode = $('#decalMode').value;
+    status('Laying the decals…');
+    try{
+      const res = await api('/api/decals/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value }) });
+      if(!S.gen.result || S.gen.result.id !== gid) return;
+      S.gen.decals = res; S.gen.decalVersion = Date.now();
+      S.gen.result.urls.result = res.urls.result;
+      log(`Decals: ${res.count.toLocaleString()} laid, ${mode === 'painted' ? 'painted into the road texture and part of the road in the 3D model'
+                                                            : 'on a layer of their own and an object of their own in the 3D model'}`
+        + (res.layers.length ? ': ' + res.layers.map(l => `${l.count} ${l.name}` + (l.edges ? ` at junction edges` : l.streets ? ' along streets' : '')).join(', ') : '') + '.', 'ok');
+      $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
+      try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
+      if(['result', 'decals'].includes(S.gen.layer)) await showLayer(S.gen.layer);
+      window.dispatchEvent(new Event('materials'));            // the 3D tab's scene is out of date
+      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) buildTopView(gid);
+    }catch(e){ log('Decals not laid: ' + e.message, 'bad'); }
+    status('Ready.'); renderDecals();
+  }
+  $('#btnPlaceDecals').addEventListener('click', applyDecals);
+  $('#decalMode').addEventListener('change', () => { if(S.gen.decals) applyDecals(); });
+
   /* ------------------------------------------------ objects: layers and placements */
   // An object is a layer. A placement is a rectangle of copies of one object:
   // nx copies along the object's width (X), ny along its depth (Y), with a gap
@@ -2068,7 +2235,7 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
       const u = [Math.cos(a), Math.sin(a)], v = [-u[1], u[0]], hw = w / m / 2, hd = d / m / 2;
       const pts = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([sx, sy]) => [cx + u[0]*sx*hw + v[0]*sy*hd, cy + u[1]*sx*hw + v[1]*sy*hd]);
       const onRoad = pts.concat([[cx, cy]]).some(q => roadAt(q[0], q[1]));
-      return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null, id };
+      return { cx, cy, a, u, v, pts, onRoad, w: w / m, d: d / m, slot: slot || null, id, empty: isEmpty(p, id) };
     };
     // the band the rows cover beside a curve, from o0 to o1 across it (towards the
     // copies' backs): blue between copies is the gap. With line2 (the back row's
@@ -2150,6 +2317,13 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     return { ...box(a, Math.max(...r.lengths) / m, r.Ly / m, front0(r.layout)), w: w/m, d: d/m, copies, layout: r.layout };
   }
   const turnOf = (p, id) => ((p.turns || {})[id] || 0) * Math.PI / 180;
+  // Draw spaced: single objects made empty spots, by id; the rest of the grid stays put
+  const isEmpty = (p, id) => !!(p.empty && p.empty.includes(id));
+  function setEmpty(p, id, on){
+    const s = new Set(p.empty || []);
+    if(on) s.add(id); else s.delete(id);
+    if(s.size) p.empty = [...s].sort(); else delete p.empty;
+  }
 
   // the cells of a placement's spaces, as polygons in mask pixels
   function spaceCells(p, g0){
@@ -2256,6 +2430,18 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
       g0.copies.forEach(c => {
         // a package's copies in their slot's colour, so the mix shows
         const col = c.slot ? c.slot.colour : p.foliage ? '76,163,107' : '216,96,76';
+        if(c.empty || ed === 'spaces'){
+          // an empty spot (Draw spaced): its outline dashed; in that mode every copy is clickable
+          const poly = el('polygon', { points: c.pts.map(P).join(' '),
+            fill: c.empty ? 'rgba(255,255,255,.06)' : `rgba(${col},.6)`, stroke: c.empty ? 'rgba(255,255,255,.85)' : `rgb(${col})`,
+            'stroke-width': hr * 0.25, 'stroke-dasharray': c.empty ? `${hr*0.8},${hr*0.6}` : 'none',
+            'pointer-events': ed === 'spaces' ? 'all' : 'none', class: ed === 'spaces' ? 'pt' : '' }, g);
+          if(ed === 'spaces'){
+            poly.addEventListener('pointerdown', e => spaceAt(e, i, c.id, !c.empty, true));
+            poly.addEventListener('pointerenter', e => { if(S.gen.edit.paint != null && (e.buttons & 1)) spaceAt(e, i, c.id, S.gen.edit.paint, false); });
+          }
+          return;
+        }
         const picked = ed === 'objects' && S.gen.edit.sel.has(c.id);
         const poly = el('polygon', { points: c.pts.map(P).join(' '), fill: c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`,
           stroke: picked ? '#FFD23F' : c.onRoad ? '#999' : `rgb(${col})`, 'stroke-width': picked ? hr*0.7 : hr*0.25,
@@ -2273,10 +2459,11 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
         g0.curveLines.forEach(cl => el('polyline', { points: cl.samples.map(P).join(' '), fill:'none', stroke:'#fff', 'stroke-width': hr*0.3,
           'stroke-dasharray': `${hr*1.2},${hr*0.8}`, 'pointer-events':'none' }, g));
       }
-      if((g0.curve || g0.pkg) && ed !== 'objects' && !p.foliage){
+      if((g0.curve || g0.pkg) && ed !== 'objects' && ed !== 'spaces' && !p.foliage){
         // a small arrow on each copy's front: Blender's +Y, turned with the curve and the object
         // (not on plants, whose random turns would make them point every way)
         g0.copies.forEach(c => {
+          if(c.empty) return;
           const th = c.a + (c.slot ? c.slot.turn : turn) * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
           const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * c.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * c.d/2;
           const fx = c.cx + fd[0]*reach, fy = c.cy + fd[1]*reach, s = Math.min(hr*1.4/f, Math.min(c.w, c.d) / 3);
@@ -2289,6 +2476,7 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
         // +Y (Blender's green arrow), turned with it; and its id, row-column from
         // the top left, at 30% of the object's smaller side, towards its back
         g0.copies.forEach(c => {
+          if(c.empty) return;
           const th = c.a + (c.slot ? c.slot.turn : turn) * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
           const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * c.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * c.d/2;
           const side = Math.min(c.w, c.d), head = Math.min(reach * 0.35, side * 0.22);
@@ -2374,9 +2562,29 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     return Math.min(sw, (width - Math.min(road, width)) / 2);
   }
   addEventListener('pointerup', () => {
-    if(S.gen.edit && S.gen.edit.paint){ S.gen.edit.paint = null; saveScatter(); }
+    if(S.gen.edit && S.gen.edit.kind === 'streets' && S.gen.edit.paint){ S.gen.edit.paint = null; saveScatter(); }
   });
   // Single objects: click to pick one, shift-click to add or remove more
+  // Draw spaced: a press empties an object (or brings an empty spot's object back);
+  // dragging on does the same to every copy passed over; saved when the button is let go
+  function spaceAt(e, i, id, on, first){
+    e.stopPropagation(); if(first) e.preventDefault();
+    const p = S.gen.placements[i]; if(!p) return;
+    if(first){ S.gen.edit.paint = on; S.gen.edit.changed = 0; }
+    if(isEmpty(p, id) === on) return;
+    setEmpty(p, id, on); S.gen.edit.changed++;
+    drawBridges();
+  }
+  addEventListener('pointerup', () => {
+    const ed = S.gen.edit;
+    if(!ed || ed.kind !== 'spaces' || ed.paint == null) return;
+    const p = S.gen.placements[ed.i], n = ed.changed, on = ed.paint;
+    ed.paint = null;
+    if(!n || !p) return;
+    log(`${n} object${n > 1 ? 's' : ''} ${on ? (n > 1 ? 'made empty spots' : 'made an empty spot') : 'brought back'}; ${(p.empty || []).length} empty spot(s) in this placement.`);
+    saveScatter(); renderPlacementBox();
+  });
+
   function pickObject(e, id){
     e.stopPropagation(); e.preventDefault();
     // an angle still being typed belongs to the objects picked so far: apply it first
@@ -2486,6 +2694,12 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     $('#streetBox').hidden = ed !== 'streets';
     $('#btnEditObjs').textContent = ed === 'objects' ? 'Done turning objects' : 'Turn single objects';
     $('#objEditBox').hidden = ed !== 'objects';
+    $('#btnSpaceObjs').textContent = ed === 'spaces' ? 'Done drawing spaces' : 'Draw spaced';
+    $('#btnSpaceObjs').classList.toggle('attention', ed === 'spaces');
+    $('#spaceBox').hidden = ed !== 'spaces';
+    const nEmpty = (p.empty || []).length;
+    $('#btnSpaceReset').disabled = !nEmpty;
+    $('#spaceInfo').textContent = nEmpty ? `${nEmpty} empty spot${nEmpty > 1 ? 's' : ''}: ${p.empty.slice(0, 12).join(', ')}${nEmpty > 12 ? '…' : ''}.` : '';
     const st = streetsOf(p);
     if(document.activeElement !== $('#stSidewalk')) $('#stSidewalk').value = st.sidewalk_m;
     if(document.activeElement !== $('#stRoad')) $('#stRoad').value = st.road_m;
@@ -2533,7 +2747,7 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     }
     $('#stInfo').textContent = st.cells.length
       ? `${st.cells.length} space${st.cells.length > 1 ? 's' : ''} drawn as streets, ${st.markings ? 'with' : 'without'} markings.${stNote} Press Generate to build them.` : '';
-    const onRoad = g0 ? g0.copies.filter(c => c.onRoad).length : 0;
+    const onRoad = g0 ? g0.copies.filter(c => c.onRoad && !c.empty).length : 0;
     const curve = isCurve(p);
     $('#plTitle').textContent = `${p.foliage ? 'Foliage placement' : 'Placement'} ${S.gen.plSel + 1}: `
       + (p.package ? (pk ? `package ${pk.name}` : 'missing package') : (o ? o.name : 'missing object')) + (curve ? ', curved' : '');
@@ -2562,11 +2776,12 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
     const lineNote = !curve || !g0 ? '' : nLines > 1
       ? `, lines ${Math.min(...g0.lengths_m).toFixed(1)}–${Math.max(...g0.lengths_m).toFixed(1)} m, ${p.path.length} points each`
       : `, line ${g0.length_m.toFixed(1)} m, ${p.path.length} points`;
-    const road = onRoad ? `, ${onRoad} on the road (left out)` : '';
+    const nEmptied = g0 ? g0.copies.filter(c => c.empty).length : 0;
+    const road = (onRoad ? `, ${onRoad} on the road (left out)` : '') + (nEmptied ? `, ${nEmptied} empty spot${nEmptied > 1 ? 's' : ''} (Draw spaced)` : '');
     if(p.package){
       // how many of each object the mix holds
       const n = {};
-      (g0 ? g0.copies : []).forEach(c => { n[c.slot.o.name] = (n[c.slot.o.name] || 0) + 1; });
+      (g0 ? g0.copies : []).forEach(c => { if(!c.empty) n[c.slot.o.name] = (n[c.slot.o.name] || 0) + 1; });
       $('#plInfo').textContent = !g0 ? 'This package has no objects yet: import some into its slots.'
         : `${g0.copies.length} copies in ${p.ny} row${p.ny > 1 ? 's' : ''}: ` + Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', ')
           + road + (curve ? lineNote : `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m`) + spNote;
@@ -2602,6 +2817,17 @@ const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
   $('#stMarkings').addEventListener('change', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p) return;
     p.streets = { ...streetsOf(p), markings: $('#stMarkings').checked }; saveScatter();
+  });
+  $('#btnSpaceObjs').addEventListener('click', () => {
+    const i = S.gen.plSel, p = S.gen.placements[i]; if(!p) return;
+    if(S.gen.edit && S.gen.edit.kind === 'spaces') S.gen.edit = null;
+    else { S.gen.edit = { kind: 'spaces', i, paint: null }; log('Draw spaced: click an object to make it an empty spot, click a spot to bring its object back; press and drag across several.'); }
+    drawBridges(); renderPlacementBox();
+  });
+  $('#btnSpaceReset').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !(p.empty || []).length) return;
+    log(`${p.empty.length} empty spot(s) given their objects back.`);
+    delete p.empty; saveScatter(); renderPlacementBox();
   });
   $('#btnEditObjs').addEventListener('click', () => {
     const i = S.gen.plSel, p = S.gen.placements[i]; if(!p) return;

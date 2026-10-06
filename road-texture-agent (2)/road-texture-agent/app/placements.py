@@ -10,6 +10,8 @@ Each copy has an
 id, "row-column" from the top left, and can be given its own extra rotation in
 the placement's "turns": {id: degrees, clockwise on the map}. A turned copy
 takes its turned outline in its row, so the spaces around it stay as set.
+The ids in the placement's "empty" (Draw spaced) are left out: their spots stay
+empty and every other copy stays where it is.
 """
 
 import math
@@ -81,8 +83,11 @@ def copies_of(p, objects, packages, mpp_mask):
                                          bool(p.get("mirror")), align, jitter)
         spots = [(p["object"], np.array([x, y]), ang) for x, y, ang in spots]
     turns = p.get("turns") or {}
+    empty = set(p.get("empty") or [])               # Draw spaced: left out, their spots empty
     out = []
     for (oid, cc, a), cid in zip(spots, layout["ids"]):
+        if cid in empty:
+            continue
         s = 1.0
         if jitter:
             # its random offset across its own row's frame, then its random turn

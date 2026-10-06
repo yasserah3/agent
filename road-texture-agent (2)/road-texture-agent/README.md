@@ -93,8 +93,30 @@ The Memory tab shows every trained pair and the three ordered lists.
 
 ## 3D model (stage 1: flat road)
 
-After generating, **Download 3D model (GLB)** builds a road model from that
-result:
+After generating, **Download 3D model** builds a road model from that
+result. A window in the middle of the screen asks first:
+
+- **Format**: **GLB** (glTF binary, one file with its textures inside, as
+  before), **FBX** (binary FBX 7.4, as Blender and the FBX SDK write it) or
+  **OBJ** (with its .mtl). FBX and OBJ come as a zip: the model and a
+  `textures` folder it refers to; unzip it, then import the model. All three
+  hold the same model: metres, Y up, every material with its colour, normal
+  (bump) and roughness pictures, the variation layer as vertex colours, decals
+  with their transparency. Checked by importing each into Blender 5.0: the
+  same objects, bounds and materials (base colour, roughness and normal map
+  connected) from all three.
+- **Combine streets and kerbs**: on, the streets, sidewalks and kerbs (and
+  bridge decks) are one object, "Streets", each part keeping its materials;
+  the blocks and islands and the markings stay objects of their own. Off,
+  each is separate (Road, Sidewalk, Kerb...).
+- **Combine objects**: on, every placed object (all copies of all objects) is
+  one object, "Objects". Off, each copy is its own object: in GLB and FBX the
+  copies share one mesh (instances, small files; Blender makes them linked
+  duplicates); OBJ has no instances, so each copy is written out.
+
+The choices are kept in this browser. The model itself is built once and
+shared (the Top view and the 3D tab use it); the format is written from it
+(app/formats.py).
 
 - The outline is traced from the same smooth distance field the texture uses,
   so the mesh edge sits exactly on the painted road edge. On test data the mesh
@@ -556,6 +578,8 @@ app/streets.py       inner streets drawn between objects, built into the street 
 app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
 app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
 app/islands.py       the islands between the roads: their numbers and outlines, slots, the islands texture
+app/decals.py        decals: where each layer's go (streets, junction edges), painted into the texture, 3D quads
+app/formats.py       the 3D model as FBX (binary 7.4) and OBJ, and parts combined, read from the GLB
 app/looks.py         the Look panel's LUTs (.cube, Hald CLUT) and saved looks; app/looks holds bundled ones
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
@@ -967,6 +991,55 @@ their own, island by island:
     `<mask>_roads_and_islands.png`). The Top view is rebuilt with the island
     materials.
 
+## Decals
+
+Pictures laid on the streets: arrows, crossings, manhole covers, stains,
+patches. In the Generate tab, **Decals**, **Import decal (PNG)** adds one as a
+layer (a PNG with a transparent background; WebP and JPEG work too). The top
+of the picture is its front, its width goes across the road and its length
+along it, in proportion. Each layer has where it goes:
+
+- **Place randomly** lays it along the streets, never inside a junction:
+  about one every **Every (m)** metres of street, at a random point across the
+  road, lying along it facing either way (**Turn randomly**: any way, for
+  manhole covers and stains). Never where the road is narrower than it, never
+  two of the same layer on top of each other.
+- With one of these three (one at a time), it goes to the junctions instead:
+  - **Place at junctions**: at the edges of the junctions (where a street
+    enters one), a random **Share of edges (%)** of them.
+  - **At all edges**: at every edge of every junction.
+  - **Even edges**: at two opposite edges of every junction: the two streets
+    most in line (the through road of a T, either road of a crossroads).
+
+  At an edge it lies across the street just outside the junction, its top
+  towards the junction (an arrow before a junction points into it), turned
+  with that street's own centre line. **Back from the edge (m)** moves it
+  further along the street (an arrow 10 m before the junction). **Fit the
+  road's width** scales it to the road's width there (a crossing from kerb to
+  kerb). A short street between two junctions gets one, not one from each end.
+- **Width (m)**: its size across the road (when not fitted).
+
+The layers are kept on the server for every map. **Generate texture** lays
+them, and **Place decals** lays them again after a change (quickly: the
+texture as generated is kept, so they never pile up). The places come from the
+generation's mask (its junctions and street centre lines), the same for the
+texture and the 3D model; decals over a bridge's raised road are left out.
+
+Under 3D model, **Decals** (beside Markings) sets how they lie:
+
+- **Separate objects on the road**: in the 3D model they are an object of
+  their own, "Decals" (flat quads 1.5 cm above the road, see-through
+  materials), and in 2D a layer of their own (**Decals** in Layers), the road
+  texture staying clean.
+- **Painted into the road texture**: painted into the generated road texture
+  (only on the road), and in the 3D model part of the road object (just above
+  its surface: tiles repeat, so they cannot be painted into them). With
+  Combine streets and kerbs they are in "Streets".
+
+On the 900 × 700 test crop at 4× (3600 × 2800): 526 decals (156 arrows on even
+edges 6 m back, 236 fitted crossings on all edges, 134 manhole covers along
+streets) in 9 s.
+
 ## Workspace location
 
 The server prints which `workspace` it uses at startup and in the console, and
@@ -1229,6 +1302,19 @@ package, a wider turned object can mean one object fewer on the line. Inner
 street cells follow the new layout, so after turning objects in a placement
 with inner streets, press Generate again.
 
+### Draw spaced: objects made empty spots
+
+Under Single objects, **Draw spaced** turns objects of the grid into spaces:
+click an object and it becomes an **empty spot** (its outline dashed on the
+map); click a spot again to bring its object back; press and drag across
+several to empty (or bring back) them all at once. Every other object stays
+exactly where it is: the grid, its rows and gaps do not change. **Bring every
+object back** fills them all again. The empty spots are kept with the
+placement by id (row-column) and apply everywhere: the 3D model, the Top view
+and the 3D tab leave those objects out, and an inner street joining a street
+beyond the placement is no longer blocked by them. The placement's note counts
+them.
+
 ### Objects alignment
 
 By default every row faces the same way. For rows that face each other across
@@ -1463,9 +1549,13 @@ overall tone; at dawn and at night (lamp pools, long shadows) it is large.
   20 cm a pixel or coarser on a big place (the map is at most 2048 pixels a
   side). Look round inside what you baked: outside it the live light shows.
 - **Quality**: how many samples are traced before the noise is cleared by
-  Open Image Denoise: Draft (32), Good (128), Best (512). The panel counts
-  them and the time left; the view stays live meanwhile, and **Stop baking**
-  stops it. On a good graphics card a Good bake takes about a minute.
+  Open Image Denoise: Draft (32), Good (128), Best (512), Very high (1024),
+  Ultra (2048). The panel counts them and the time left; the view stays live
+  meanwhile, and **Stop baking** stops it. On a good graphics card a Good bake
+  takes about a minute; each step up takes about twice (Ultra 16 times) as long.
+- **Resolution**: the light map's longest side, **2048 px** (sharper shadow
+  edges and lamp pools, as before) or **1024 px** (about a quarter of the time
+  and memory, softer). The bake's note says which it has.
 - **What it keeps**: the light reaching each spot, not the surface's colour
   (the traced picture divided by the colour of what it saw). So Wet roads, and
   the materials' colours, still change live over a bake. The shine (the sky

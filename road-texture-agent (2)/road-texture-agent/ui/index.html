@@ -130,6 +130,29 @@
   .matPop .mp-card small{ font-size:11px; color:var(--muted); }
   .matPop .mp-foot{ margin-top:8px; }
   .btn-row.three{ grid-template-columns:1fr 1fr 1fr; }
+  .dc-layer{ border:1px solid var(--line); border-radius:6px; padding:6px 8px 8px; margin-top:6px; background:rgba(255,255,255,.015); }
+  .dc-head{ display:grid; grid-template-columns:44px 1fr auto; gap:8px; align-items:center; }
+  .dc-thumb{ width:44px; height:44px; border-radius:4px; object-fit:contain; border:1px solid var(--line);
+             background:repeating-conic-gradient(#3a3d42 0% 25%, #2a2c30 0% 50%) 50% / 12px 12px; }
+  .dc-head b{ font-weight:500; font-size:12.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .dc-head small{ color:var(--muted); font-size:11px; }
+  .dc-x{ background:none; border:none; color:var(--muted); font-size:17px; cursor:pointer; }
+  .dc-x:hover{ color:var(--red); }
+  .dc-chk{ display:flex; align-items:center; gap:6px; font-size:12px; margin-top:5px; cursor:pointer; }
+  .dc-chk input{ accent-color:var(--blue); margin:0; }
+  .dc-sub{ margin-left:20px; }
+  .dc-nums{ display:grid; grid-template-columns:1fr 1fr; gap:4px 8px; margin-top:6px; }
+  .dc-nums label{ display:flex; flex-direction:column; font-size:11px; color:var(--muted); gap:2px; }
+  .dc-nums input{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:3px 6px; color:var(--ink); width:100%; }
+  .dc-nums label[hidden]{ display:none; }
+  .modal{ position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:16px; }
+  .modal[hidden]{ display:none; }
+  .modal-card{ width:440px; max-width:100%; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               box-shadow:0 18px 48px rgba(0,0,0,.5); padding:14px 16px 16px; }
+  .modal-card .mp-h{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:15px; }
+  .modal-card .mp-x{ background:none; border:none; color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
+  .modal-card .field{ margin-top:6px; }
+  .modal-card .note{ margin:2px 0 8px; }
   .isl-box{ border:1px solid var(--line); border-radius:6px; padding:8px; margin:4px 0 8px; background:rgba(255,255,255,.015); }
   .isl-box .isl-h{ display:flex; justify-content:space-between; align-items:baseline; font-size:12.5px; font-weight:600; }
   .isl-box .isl-h span{ font-weight:400; color:var(--muted); font-size:11.5px; }
@@ -462,6 +485,12 @@
               <button class="btn secondary" id="btnTurnReset">Reset picked objects</button>
             </div>
             <div class="note" id="objEditInfo"></div>
+            <button class="btn secondary" id="btnSpaceObjs" title="Click objects to make them empty spots (and click a spot to bring its object back): the rest of the grid stays where it is">Draw spaced</button>
+            <div id="spaceBox" hidden>
+              <div class="note">Click an object to make it an empty spot (dashed outline); click a spot again to bring its object back. The other objects do not move. Press and drag across several to empty them all.</div>
+              <button class="btn secondary" id="btnSpaceReset">Bring every object back</button>
+            </div>
+            <div class="note" id="spaceInfo"></div>
             <div style="font-size:12px;font-weight:600;margin-top:10px">Objects alignment</div>
             <div class="btn-row">
               <button class="btn secondary toggle" id="btnAlignRows" aria-pressed="false" title="On or off: every second row faces the other way. Row 1 stays as placed, row 2 is turned round, row 3 as row 1, and so on">Alternate rows</button>
@@ -500,6 +529,18 @@
             <button class="btn secondary" id="btnCreateFolPkg">Create package</button>
           </div>
           <div id="folPlHost"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">Decals <small id="decalCount"></small></div>
+        <div class="panel-b">
+          <button class="btn secondary" id="btnImportDecal">Import decal (PNG)</button>
+          <div class="note" style="margin-top:6px">A picture laid on the streets: an arrow, a crossing, a manhole cover, a stain. A PNG with a transparent background; the top of the picture is its front, its width goes across the road. Each decal is a layer with where it goes. How they lie in the 3D model: 3D model, Decals.</div>
+          <div id="decalList" style="margin-top:4px"></div>
+          <button class="btn" id="btnPlaceDecals" disabled title="Lay the decals on the generated texture (Generate texture lays them too)">Place decals</button>
+          <div class="note" id="decalNote"></div>
+          <input type="file" id="decalFile" accept="image/png,image/webp,image/jpeg" hidden>
         </div>
       </section>
 
@@ -574,6 +615,11 @@
               <option value="strips">Separate strips on the road</option>
               <option value="painted">Painted into the road texture</option>
             </select></div>
+          <div class="field"><label for="decalMode">Decals</label>
+            <select id="decalMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Separate: the decals are an object of their own in the 3D model, and a layer of their own beside the road texture. Painted: they are painted into the road texture, and part of the road object in the 3D model">
+              <option value="separate">Separate objects on the road</option>
+              <option value="painted">Painted into the road texture</option>
+            </select></div>
           <div class="field"><label for="swOn">Sidewalks</label><input type="checkbox" id="swOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="field"><label for="swHeight">Sidewalk height (cm)</label><input type="number" id="swHeight" value="10" step="1" min="0" max="40"></div>
           <div class="field"><label for="swShare">Width, % of road</label><input type="number" id="swShare" value="30" step="5" min="5" max="100"></div>
@@ -604,7 +650,7 @@
             </select></div>
           <div class="note" style="margin:-2px 0 6px">Scanned: measured bump and roughness of real asphalt and concrete where bundled (paving always follows its own joints); the rest from each tile's grain</div>
           <div class="field"><label for="swSkip">Skip interchanges and roads over 20 m</label><input type="checkbox" id="swSkip" style="justify-self:start;accent-color:var(--blue)"></div>
-          <button class="btn secondary" id="btn3d" disabled>Download 3D model (GLB)</button>
+          <button class="btn secondary" id="btn3d" disabled title="Build the 3D model and download it: choose GLB, FBX or OBJ, and what is combined">Download 3D model</button>
           <div class="note" id="genNote">Load a street mask.</div>
         </div>
       </section>
@@ -659,6 +705,7 @@
             <button class="layer" aria-pressed="true" data-layer="noise"><div class="preview" id="lp-noise"><div class="ph">—</div></div><span>Noise</span></button>
             <button class="layer" aria-pressed="true" data-layer="markings"><div class="preview" id="lp-markings"><div class="ph">Needs engine</div></div><span>Markings</span></button>
             <button class="layer" aria-pressed="false" data-layer="top" title="The 3D model from straight above: streets, sidewalks, kerbs, blocks and objects with their materials"><div class="preview" id="lp-top"><div class="ph">—</div></div><span>Top view</span></button>
+            <button class="layer" aria-pressed="false" data-layer="decals" title="The decals on their own (Place decals): painted into the road texture or not, as Decals is set under 3D model"><div class="preview" id="lp-decals"><div class="ph">—</div></div><span>Decals</span></button>
             <button class="layer" aria-pressed="false" data-layer="islands" title="The islands texture: only the islands, each with its material, the roads transparent (Generate islands texture)"><div class="preview" id="lp-islands"><div class="ph">—</div></div><span>Islands</span></button>
             <button class="layer" aria-pressed="false" data-layer="full" title="The road texture with the islands texture laid under it"><div class="preview" id="lp-full"><div class="ph">—</div></div><span>Roads + islands</span></button>
           </div>
@@ -782,7 +829,10 @@
               <option value="view" selected>What you see</option><option value="around">All round you (4 views)</option><option value="none">None (the ground only)</option></select></div>
           <div class="field"><label for="bakeQuality">Quality</label>
             <select id="bakeQuality" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="How many light paths are traced per spot before the noise is cleared: more is smoother and slower">
-              <option value="32">Draft (32)</option><option value="128" selected>Good (128)</option><option value="512">Best (512)</option></select></div>
+              <option value="32">Draft (32)</option><option value="128" selected>Good (128)</option><option value="512">Best (512)</option><option value="1024">Very high (1024)</option><option value="2048">Ultra (2048)</option></select></div>
+          <div class="field"><label for="bakeRes">Resolution</label>
+            <select id="bakeRes" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="The light map's longest side, in pixels: 2048 is sharper (shadow edges, lamp pools), 1024 bakes in about a quarter of the time and uses a quarter of the memory">
+              <option value="1024">1024 px (faster, softer)</option><option value="2048" selected>2048 px (sharper)</option></select></div>
           <button class="btn" id="btnBake" disabled title="Trace the light on the streets, sidewalks and islands (and walls and objects, as chosen) as Render photo does, and keep it for the live view">Bake light</button>
           <div class="field"><label for="bakeOn">Baked light</label><input type="checkbox" id="bakeOn" disabled style="justify-self:start;accent-color:var(--blue)" title="Ticked: the live view shows the baked light on the ground (soft shadows, bounced light, lamp pools) while you move round. Unticked: the live light"></div>
           <div class="note" id="bakeNote"></div>
@@ -878,6 +928,26 @@
 
 <input type="file" id="picker" accept="image/png,image/jpeg,image/webp" hidden>
 
+<div id="exportPop" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+  <div class="modal-card">
+    <div class="mp-h"><b id="exportTitle">Download 3D model</b><button type="button" class="mp-x" id="exClose" title="Close (Esc)">×</button></div>
+    <div class="field"><label for="exFormat">Format</label>
+      <select id="exFormat" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+        <option value="glb">GLB (glTF binary, one file)</option>
+        <option value="fbx">FBX (with its textures, zipped)</option>
+        <option value="obj">OBJ (with .mtl and textures, zipped)</option>
+      </select></div>
+    <div class="field"><label for="exGround">Combine streets and kerbs</label><input type="checkbox" id="exGround" style="justify-self:start;accent-color:var(--blue)"></div>
+    <div class="note">On: the streets, sidewalks and kerbs are one object (each keeps its materials). The blocks and islands and the markings stay objects of their own. Off: each is separate.</div>
+    <div class="field"><label for="exObjects">Combine objects</label><input type="checkbox" id="exObjects" style="justify-self:start;accent-color:var(--blue)"></div>
+    <div class="note">On: every placed object is one object. Off: each copy is its own object (in GLB and FBX the copies share one mesh; OBJ writes each out).</div>
+    <div class="note" id="exNote"></div>
+    <div class="btn-row">
+      <button type="button" class="btn secondary" id="exCancel">Cancel</button>
+      <button type="button" class="btn" id="exGo">Download</button>
+    </div>
+  </div>
+</div>
 <div id="matPop" class="matPop" hidden role="dialog" aria-label="Choose a material">
   <div class="mp-h"><b id="matPopTitle">Street surface</b><button type="button" class="mp-x" title="Close (Esc)">×</button></div>
   <div class="mp-grid" id="matPopGrid"></div>

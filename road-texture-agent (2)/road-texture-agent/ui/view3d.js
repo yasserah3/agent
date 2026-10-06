@@ -1590,6 +1590,8 @@ async function denoisePhoto(n){
 // bake belongs to its light (time of day, sun, lamps): change those and the live light
 // shows until the next bake, and the last three bakes are kept for going back
 const BAKE_PX = 2048;                                // the light map's longest side, at most
+// the light map's longest side as chosen (Resolution: 1024 or 2048), never over BAKE_PX
+const bakePx = () => Math.min(BAKE_PX, Math.max(256, +($('#bakeRes') || {}).value || BAKE_PX));
 const BAKE_KEEP = 3;
 const BAKE = { busy: false, cancel: false, on: false, list: [], shown: null };
 const AUX_BASE = { value: 0 };
@@ -1859,6 +1861,7 @@ function bakeNote(text, bad){
   if(text === undefined){
     const any = BAKE.list.find(x => x.key === bakeKey());
     const about = b => `${lightName(b.time, b.sky)}, ${b.area === 'view' ? 'what you saw' : 'the whole place'} at ${Math.round(b.mpp * 100)} cm a pixel`
+      + ` (${Math.max(b.map.width, b.map.height)} px)`
       + (b.walls ? `, walls and objects ${b.walls.mode === 'around' ? 'all round' : 'in view'}` : '') + `, ${b.samples} samples`;
     if(BAKE.busy) return;
     if(BAKE.shown) text = `Baked light on (${about(BAKE.shown)}). Move round freely: the streets, sidewalks and islands have the photo's light`
@@ -1886,7 +1889,7 @@ function dropBakes(){
 function bakeArea(kind){
   const box = new THREE.Box3().setFromObject(world);
   let x0 = box.min.x - 2, x1 = box.max.x + 2, z0 = box.min.z - 2, z1 = box.max.z + 2;
-  const most = Math.min(BAKE_PX, renderer.capabilities.maxTextureSize);
+  const most = Math.min(bakePx(), renderer.capabilities.maxTextureSize);
   let mpp = Math.max(0.2, Math.max(x1 - x0, z1 - z0) / most);
   if(kind === 'view'){
     camera.updateMatrixWorld();
@@ -1928,7 +1931,7 @@ function bakeArea(kind){
 function wallViews(mode){
   if(mode !== 'view' && mode !== 'around') return { mode: 'none', list: [] };
   camera.updateMatrixWorld();
-  const most = Math.min(BAKE_PX, renderer.capabilities.maxTextureSize), pos = camera.position.clone();
+  const most = Math.min(bakePx(), renderer.capabilities.maxTextureSize), pos = camera.position.clone();
   const make = (cam, w, h, rect) => {
     cam.updateProjectionMatrix(); cam.updateMatrixWorld();
     const matrix = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 1, 0, 0, 0, 0, 1)
@@ -2419,7 +2422,7 @@ host.addEventListener('click', e => {
 $('#btnPhoto').addEventListener('click', startPhoto);
 $('#btnBake').addEventListener('click', bakeLight);
 $('#bakeOn').addEventListener('change', () => { BAKE.on = $('#bakeOn').checked; if(renderer) applyBake(); });
-for(const id of ['bakeArea', 'bakeQuality', 'bakeWalls']){
+for(const id of ['bakeArea', 'bakeQuality', 'bakeWalls', 'bakeRes']){
   const el = $('#' + id);
   try{ const v = localStorage.getItem('rta.view3d.' + id); if(v && [...el.options].some(o => o.value === v)) el.value = v; }catch(e){}
   el.addEventListener('change', () => { try{ localStorage.setItem('rta.view3d.' + id, el.value); }catch(e){} });
