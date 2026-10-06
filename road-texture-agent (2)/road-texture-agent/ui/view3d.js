@@ -997,7 +997,8 @@ function prepare(root){
 
 // Wet roads: water darkens the surfaces (paint less, it soaks up little), makes them
 // glossy so the lamps and the sky shine in them, and fills the fine grain. Applied to
-// the materials themselves, so the photo render has it too
+// the materials themselves, so the photo render has it too; the photo also traces the
+// water over them and the puddles (wetStreet: see wetForPhoto)
 function applyWet(root = world){
   if(!root) return;
   const w = LIGHT.wet;
@@ -1006,6 +1007,7 @@ function applyWet(root = world){
     for(const m of [].concat(o.material)){
       const d = m.userData.dry;
       if(!d) continue;
+      m.wetStreet = true;                                               // read by the path tracer only
       m.color.copy(d.colour).multiplyScalar(1 - (d.paint ? 0.15 : 0.35) * w);
       m.roughness = d.roughness * (1 - 0.82 * w);
       if(d.normalScale) m.normalScale.copy(d.normalScale).multiplyScalar(1 - 0.6 * w);
@@ -1186,6 +1188,7 @@ async function startPhoto(){
     const t0 = performance.now();
     photo.cam = await photoCamera();
     photo.lens = DOF.on ? { radius: camera.getFocalLength() / DOF.fstop / 2000, focus: focusDistance(true) } : null;
+    wetForPhoto(true);
     photo.pt.setScene(scene, photo.cam);
     photo.on = true; photo.started = performance.now();
     note(`Rendering the photo (set up in ${((performance.now() - t0) / 1000).toFixed(1)} s). It gets sharper while the camera stays put; Save image keeps it.`);
@@ -1233,9 +1236,20 @@ function presentPhoto(r, quad){
   r.autoClear = auto;
 }
 
+// the photo's water: the wet streets' film and puddles as the live view has them (the same
+// amounts, the same places); none for the bake, which records the light falling on them
+function wetForPhoto(on){
+  if(!photo) return;
+  const u = photo.pt._pathTracer.material.uniforms.wetStreets;
+  if(!u) return;
+  const wet = on ? LIGHT.wet : 0;
+  u.value.set(wet, wet > 0 ? LIGHT.puddles * Math.min(1, wet * 1.5) : 0, STREET_Y, 0);
+}
+
 function stopPhoto(why){
   if(!photo || !photo.on) return;
   photo.on = false;
+  wetForPhoto(false);
   dropClean();
   unstage(photo.saved);
   photo.saved = null; photo.extra = null;
@@ -1443,6 +1457,9 @@ function auxMaterial(m, kind){
   }
   const a = m.clone();
   a.fog = false; a.toneMapped = false; a.transparent = false; a.blending = THREE.NoBlending;
+  // a see-through picture (a decal): drawn where it is there, the road showing through the
+  // rest, as the tracer sees it; drawn whole, its clear parts' black would darken the photo
+  if(m.transparent && (m.map || m.alphaMap) && !m.alphaTest) a.alphaTest = 0.5;
   a.onBeforeCompile = sh => {
     const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
     let out = kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`;
@@ -1724,7 +1741,7 @@ function bakePatch(m){
 // the street surfaces show it where the sky would shine in them, blurred as much as they
 // are rough, with Fresnel (strong at a glancing view, faint looking down) as any shine.
 // Puddles: standing water in patches, smooth as a mirror and a little darker. The photo
-// render traces its own reflections (wet roads evenly, without the puddles)
+// render traces its own reflections, of the same water and puddles (wetForPhoto)
 const REFL_U = { reflMap: { value: null }, reflMatrix: { value: new THREE.Matrix4() }, reflOn: { value: 0 },
                  reflPlane: { value: 0 }, reflLod: { value: 6 }, puddles: { value: 0 } };
 const REFL_PARS = `
@@ -2230,7 +2247,10 @@ $('#wetRoads').addEventListener('input', () => {
   if(photo && photo.on) stopPhoto();
   applyWet();
 });
-$('#puddles').addEventListener('input', () => { LIGHT.puddles = +$('#puddles').value / 100; showLight(); saveLight(); });
+$('#puddles').addEventListener('input', () => {
+  LIGHT.puddles = +$('#puddles').value / 100; showLight(); saveLight();
+  if(photo && photo.on) stopPhoto();
+});
 $('#liveMirror').addEventListener('change', () => { LIGHT.mirror = $('#liveMirror').checked; saveLight(); });
 $('#lampColour').addEventListener('input', () => {
   LIGHT.colour = $('#lampColour').value; saveLight();

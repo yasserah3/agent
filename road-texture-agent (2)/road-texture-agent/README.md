@@ -1452,7 +1452,9 @@ The **3D** tab shows the whole place in 3D, to look around:
     fine grain fills in. At night the lamps' pools stretch into reflections.
   - *Puddles* (with Wet roads above 0): standing water in patches a few metres
     across, smooth as a mirror and a little darker, on the streets, sidewalks
-    and squares (live view; Render photo shows the roads evenly wet).
+    and squares. Render photo has them in the same places, traced: the water
+    over the wet surfaces is a clear coat (glossier the wetter they are), the
+    puddles a mirror-smooth coat that fills the grain.
   - *Live reflections* (on): wet streets mirror the scene, not only the sky:
     the buildings, the lamp posts and their lit heads, your objects, the clouds.
     The scene is drawn a second time, mirrored under the street, at half size,
@@ -1513,7 +1515,8 @@ The **3D** tab shows the whole place in 3D, to look around:
     graphics card in the browser: the same neural network and trained weights,
     giving the same picture as OIDN itself (to within 0.1%). It works from
     the photo and the colour and direction of the surfaces in view, so edges
-    and textures stay sharp. It runs after 4 samples, and again each time the
+    and textures stay sharp. A decal's see-through parts show the road under
+    them in that colour too (as in the photo), never the picture's black. It runs after 4 samples, and again each time the
     samples have grown four times over (16, 64, 256…); the panel says which
     one it shows. Save image denoises the latest samples first.
   - **If the photo comes out empty** (some graphics cards' drivers handle the

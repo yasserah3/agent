@@ -60,7 +60,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.06-dcl2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.06-dcl3"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():

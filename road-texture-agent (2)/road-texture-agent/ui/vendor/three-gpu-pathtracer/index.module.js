@@ -7,6 +7,9 @@
 // The tree's nodes are kept in the lights' texture, after the lights: the shader then uses 16
 // textures, as the original, which is all DirectX 11 allows (17 failed to link there).
 // LIGHT_TREE (define, 1 by default) 0 compiles it out. The MIS weight of two zero pdfs is 0, not 0/0.
+// Wet streets (wetStreets uniform; materials with wetStreet true): a film of water over the
+// street surfaces as a clear coat, and puddles, smooth as a mirror, in the same places as
+// the live view's (the same pattern of the world position).
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -3433,7 +3436,7 @@ class MaterialsTexture extends DataTexture {
 			// sample 14
 			floatArray[ index ++ ] = Number( getField( m, 'matte', false ) ); // matte
 			floatArray[ index ++ ] = Number( getField( m, 'castShadow', true ) ); // shadow
-			floatArray[ index ++ ] = Number( m.vertexColors ) | ( Number( m.flatShading ) << 1 ); // vertexColors & flatShading
+			floatArray[ index ++ ] = Number( m.vertexColors ) | ( Number( m.flatShading ) << 1 ) | ( Number( getField( m, 'wetStreet', false ) ) << 3 ); // vertexColors & flatShading & wet street
 			floatArray[ index ++ ] = Number( m.transparent ); // transparent
 
 			// map transform 15
@@ -4559,6 +4562,7 @@ const material_struct = /* glsl */ `
 		bool flatShading;
 		bool transparent;
 		bool fogVolume;
+		bool wetStreet;
 
 		mat3 mapTransform;
 		mat3 metalnessMapTransform;
@@ -4675,6 +4679,7 @@ const material_struct = /* glsl */ `
 		m.vertexColors = bool( int( s14.b ) & 1 );
 		m.flatShading = bool( int( s14.b ) & 2 );
 		m.fogVolume = bool( int( s14.b ) & 4 );
+		m.wetStreet = bool( int( s14.b ) & 8 );
 		m.transparent = bool( s14.a );
 
 		uint firstTextureTransformIdx = i + 15u;
@@ -7225,6 +7230,11 @@ const get_surface_record_function = /* glsl */`
 
 	#define SKIP_SURFACE 0
 	#define HIT_SURFACE 1
+	float wetHash( vec2 p ) { return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 ); }
+	float wetNoise( vec2 p ) {
+		vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
+		return mix( mix( wetHash( i ), wetHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( wetHash( i + vec2( 0.0, 1.0 ) ), wetHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+	}
 	int getSurfaceRecord(
 		Material material, SurfaceHit surfaceHit, sampler2DArray attributesArray,
 		float accumulatedRoughness,
@@ -7428,6 +7438,28 @@ const get_surface_record_function = /* glsl */`
 		}
 
 		clearcoatNormal *= surfaceHit.side;
+
+		// wet streets: water over the surface (a clear coat), and puddles where a broad pattern
+		// is above the level the amount sets: there the water is deep enough to fill the grain,
+		// smooth as a mirror, and the surface under it darker. Only on level surfaces near the
+		// streets' level, as in the live view
+		if ( material.wetStreet && wetStreets.x > 0.0 ) {
+
+			vec2 pq = surfHitPoint.xz;
+			float pn = 0.55 * wetNoise( pq / 6.5 ) + 0.3 * wetNoise( pq / 2.1 + 17.0 ) + 0.15 * wetNoise( pq / 0.7 + 3.0 );
+			float lev = 1.0 - 0.62 * wetStreets.y;
+			float level = smoothstep( 0.85, 0.97, abs( surfaceHit.faceNormal.y ) )
+				* ( 1.0 - smoothstep( 0.25, 0.6, abs( surfHitPoint.y - wetStreets.z ) ) );
+			float pud = wetStreets.y > 0.0 ? smoothstep( lev, lev + 0.05, pn ) * level : 0.0;
+			float film = wetStreets.x * mix( 0.6, 1.0, level );
+			albedo.rgb *= 1.0 - 0.3 * pud;
+			normal = normalize( mix( normal, baseNormal * surfaceHit.side, pud ) );
+			roughness = mix( roughness, 0.05, pud );
+			clearcoat = max( clearcoat, min( 1.0, film + pud ) );
+			clearcoatRoughness = mix( mix( 0.3, 0.12, wetStreets.x ), 0.02, pud );
+			clearcoatNormal = normalize( mix( normal, baseNormal * surfaceHit.side, max( pud, 0.5 ) ) );
+
+		}
 
 		// sheenColor
 		vec3 sheenColor = material.sheenColor;
@@ -7721,6 +7753,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				} ).texture },
 				environmentIntensity: { value: 1.0 },
 				environmentRotation: { value: new Matrix4() },
+				wetStreets: { value: new Vector4() },  // wet (0-1), puddles (0-1), the streets' level (y)
 				envMapInfo: { value: new EquirectHdrInfoUniform() },
 
 				// background uniforms
@@ -7818,6 +7851,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform EquirectHdrInfo envMapInfo;
 				uniform mat4 environmentRotation;
 				uniform float environmentIntensity;
+				uniform vec4 wetStreets;
 
 				// lighting
 				uniform sampler2DArray iesProfiles;
@@ -7868,6 +7902,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				mat3 invEnvRotation3x3;
 				float lightsDenom;
 				float envSelectPdf; // light tree: the chance the sky was picked at the last surface
+				vec3 surfHitPoint; // where the ray met the surface being read (wet streets)
 
 				// sampling
 				${ shape_sampling_functions }
@@ -8081,6 +8116,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 						}
 
 						SurfaceRecord surf;
+						surfHitPoint = ray.origin + ray.direction * surfaceHit.dist;
 						if (
 							getSurfaceRecord(
 								material, surfaceHit, attributesArray, state.accumulatedRoughness,
