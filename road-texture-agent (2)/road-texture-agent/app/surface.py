@@ -34,6 +34,7 @@ KINDS = {
     "asphalt": {"relief_m": 0.0008, "rough": 0.86, "spread": 0.08, "paint": True},
     "paving": {"relief_m": 0.0004, "rough": 0.78, "spread": 0.06, "paint": False},
     "concrete": {"relief_m": 0.0003, "rough": 0.80, "spread": 0.05, "paint": False},
+    "ground": {"relief_m": 0.0015, "rough": 0.92, "spread": 0.05, "paint": False},   # sand, gravel, dry earth
 }
 PAINT_ROUGH = 0.55          # road paint: smoother than asphalt
 PAINT_THICK_M = 0.0004      # its thickness, a slight step at its edges

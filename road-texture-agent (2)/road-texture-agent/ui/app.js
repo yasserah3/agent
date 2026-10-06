@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.06-isl1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -139,7 +139,11 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
   const MAT = { lib: null, parts: { street: '#matStreet', sidewalk: '#matSidewalk', kerb: '#matKerb', square: '#matSquare' },
                 titles: { street: 'Street surface', sidewalk: 'Sidewalk surface', kerb: 'Kerb surface', square: 'Squares, blocks and islands' },
                 open: null };
-  const KIND_NAME = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete' };
+  const KIND_NAME = { asphalt: 'Asphalt', paving: 'Paving', concrete: 'Concrete', ground: 'Desert and ground' };
+  // the island material slots (Blocks and islands): each a material and the islands picked
+  // for it, remembered by a point inside each (mask pixels), kept with the mask on the server.
+  // data: the numbered islands of the last texture; pick: the slot being picked for, or -1
+  const ISLS = { slots: [], data: null, pick: -1, show: false, changed: () => {} };
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
     if(kept){
@@ -161,8 +165,16 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
     const m = MAT.lib && MAT.lib.materials.find(x => x.id === v);
     return m ? { id: m.id, name: m.name, ball: API + `/api/materials/${m.id}/ball`, m } : { id: 'tiles', name: 'Your tiles', ball: yourBall(part) };
   }
+  function slotMaterial(i){
+    const v = (ISLS.slots[i] || {}).material;
+    const m = MAT.lib && MAT.lib.materials.find(x => x.id === v);
+    if(m) return { id: m.id, name: m.name, ball: API + `/api/materials/${m.id}/ball`, m };
+    const sq = materialOf('square');
+    return { id: 'same', name: 'As the other islands', ball: sq.ball, same: sq };
+  }
+  window.slotMaterial = slotMaterial;
   function showChips(){
-    for(const chip of $$('.matChip')){
+    for(const chip of $$('.matChips .matChip')){
       const cur = materialOf(chip.dataset.part);
       $('b', chip).textContent = cur.name;
       const img = $('img', chip);
@@ -179,14 +191,17 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
       if(!['tiles', 'same'].includes($(id).value) && !MAT.lib.materials.some(m => m.id === $(id).value && (MAT.lib.parts[part] || []).includes(m.kind)))
         $(id).value = part === 'square' ? 'same' : 'tiles';
     showChips();
+    ISLS.changed(true);
   }
   function closeMatPop(){ $('#matPop').hidden = true; MAT.open = null; }
   function openMatPop(chip){
-    const part = chip.dataset.part;
-    if(MAT.open === part){ closeMatPop(); return; }
-    MAT.open = part;
-    const pop = $('#matPop'), grid = $('#matPopGrid'), cur = $(MAT.parts[part]).value;
-    $('#matPopTitle').textContent = MAT.titles[part];
+    const part = chip.dataset.part, slot = chip.dataset.slot != null ? +chip.dataset.slot : null;
+    const key = slot != null ? 'island:' + slot : part;
+    if(MAT.open === key){ closeMatPop(); return; }
+    MAT.open = key;
+    const pop = $('#matPop'), grid = $('#matPopGrid');
+    const cur = slot != null ? (ISLS.slots[slot] || {}).material : $(MAT.parts[part]).value;
+    $('#matPopTitle').textContent = slot != null ? `Island material, slot ${slot + 1}` : MAT.titles[part];
     grid.innerHTML = '';
     const card = (value, name, sub, ball, title) => {
       const b = document.createElement('button');
@@ -195,6 +210,11 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
       if(ball) $('img', b).src = ball;
       $('span', b).textContent = name; $('small', b).textContent = sub;
       b.addEventListener('click', () => {
+        if(slot != null){
+          if(ISLS.slots[slot]) ISLS.slots[slot].material = value;
+          closeMatPop(); log(`Island material slot ${slot + 1}: ${name}.`); ISLS.changed();
+          return;
+        }
         $(MAT.parts[part]).value = value; keepMaterials(); showChips(); closeMatPop();
         log(`${MAT.titles[part]}: ${name}.`);
         window.dispatchEvent(new Event('materials'));
@@ -203,12 +223,15 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
     };
     const group = text => { const g = document.createElement('div'); g.className = 'mp-group'; g.textContent = text; grid.appendChild(g); };
     group('Yours');
-    if(part === 'square'){
+    if(slot != null){
+      const sq = materialOf('square');
+      card('same', 'As the other islands', sq.name, sq.ball, 'This slot\'s islands laid as the islands in no slot (the Squares, blocks and islands material)');
+    }else if(part === 'square'){
       const sw = materialOf('sidewalk');
       card('same', 'Same as sidewalks', sw.name, sw.ball, 'The blocks and islands paved as the sidewalks, their paving running on from them');
     }else card('tiles', 'Your tiles', 'from your training', yourBall(part),
          yourBall(part) ? 'Your material tiles, built from your training' : 'No material tiles yet: train, or build them in the Memory tab');
-    for(const kind of (MAT.lib ? MAT.lib.parts[part] || [] : [])){
+    for(const kind of (MAT.lib ? MAT.lib.parts[slot != null ? 'island' : part] || [] : [])){
       const list = MAT.lib.materials.filter(m => m.kind === kind);
       if(!list.length) continue;
       group(`Scanned ${(KIND_NAME[kind] || kind).toLowerCase()}`);
@@ -228,6 +251,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
     pop.style.left = left + 'px'; pop.style.top = top + 'px';
   }
   $$('.matChip').forEach(chip => chip.addEventListener('click', e => { e.stopPropagation(); openMatPop(chip); }));
+  window.openMatPop = openMatPop;
   $('#matPop .mp-x').addEventListener('click', closeMatPop);
   addEventListener('keydown', e => { if(e.key === 'Escape' && MAT.open) closeMatPop(); });
   addEventListener('pointerdown', e => { if(MAT.open && !e.target.closest('#matPop') && !e.target.closest('.matChip')) closeMatPop(); });
@@ -745,6 +769,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
         if(S.gen.bridges.length){ log(`${S.gen.bridges.length} saved bridge(s) restored for this mask.`); previewBridges(); }
         const sc = await api('/api/scatter?mask=' + rec.id);
         S.gen.placements = sc.placements || []; S.gen.plSel = -1; maskPixels = null;
+        await loadSlots(rec.id);
         if(S.gen.placements.length) log(`${S.gen.placements.length} saved object placement(s) restored for this mask.`);
         renderObjList();
         drawBridges();
@@ -785,6 +810,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked }) });
       S.gen.result = res;
       S.gen.top = null;
+      await loadIslands(res);
       const s = res.summary;
       log(`Output ${s.size[0]} × ${s.size[1]} (${s.output_scale}× the mask${s.soft_edges ? ', smooth edges' : ''}), grain ${Math.round(s.grain*50)}${s.matched_tone != null ? `, colour matched to tone ${s.matched_tone}` : ''}.`);
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
@@ -830,21 +856,37 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
   // the Top view: the 3D model of this texture (with the 3D model settings and the
   // materials), drawn from straight above, so the streets, sidewalks and kerbs show
   // with their materials. Shown once ready if the result is still on screen.
+  // one at a time: asked again while one is being built (new island materials, say),
+  // it is built once more when that one is done
   async function buildTopView(gid){
+    if(S.gen.topBusy){ S.gen.topAgain = gid; return; }
+    S.gen.topBusy = true;
+    try{ await buildTopViewNow(gid); }
+    finally{
+      S.gen.topBusy = false;
+      const again = S.gen.topAgain; S.gen.topAgain = null;
+      if(again && S.gen.result && S.gen.result.id === again) buildTopView(again);
+    }
+  }
+  async function buildTopViewNow(gid){
     $('#lp-top').innerHTML = '<div class="ph">building…</div>';
     log('Top view: building the 3D model to show the streets, sidewalks and kerbs with their materials…');
+    const built = JSON.stringify(exportSettings());
     try{
       const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Building the top view',
         body: JSON.stringify({ ...exportSettings(), generation: gid, mesh: 'tiled' }) });
       if(!window.renderTopView) throw new Error('the top view drawing is not loaded');
       const canvas = await window.renderTopView(API + res.url, res.size_m);
       if(!S.gen.result || S.gen.result.id !== gid) return;               // a newer texture since
-      S.gen.top = { canvas, gid };
+      S.gen.top = { canvas, gid, key: built };
       drawInto($('#lp-top'), canvas);
       const m = res.materials_used || {};
+      const isl = res.blocks && res.blocks.island_slots ? Object.values(res.blocks.island_slots).map(v => v.name) : [];
       log(`Top view ready (${canvas.width} × ${canvas.height}, ${(res.size_m[0] / canvas.width * 100).toFixed(0)} cm per pixel): `
-        + `streets ${m.street || 'your tiles'}, sidewalks ${m.sidewalk || 'your tiles'}, kerbs ${m.kerb || 'your tiles'}. Zoom in to see the materials.`, 'ok');
-      if(S.gen.layer === 'result') showLayer('top');
+        + `streets ${m.street || 'your tiles'}, sidewalks ${m.sidewalk || 'your tiles'}, kerbs ${m.kerb || 'your tiles'}`
+        + (isl.length ? `, islands ${isl.join(', ')}` : '') + '. Zoom in to see the materials.', 'ok');
+      if(res.islands_warning) log('  Islands: ' + res.islands_warning + '.', 'bad');
+      if(S.gen.layer === 'result' || S.gen.layer === 'top') showLayer('top');
     }catch(e){
       $('#lp-top').innerHTML = '<div class="ph">—</div>';
       log('Top view not available: ' + e.message, 'bad');
@@ -865,6 +907,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
           materials: { street: $('#matStreet').value, sidewalk: $('#matSidewalk').value, kerb: $('#matKerb').value,
                        square: $('#matSquare').value },
           match_tone: $('#matTone').checked,
+          island_slots: ISLS.slots,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
@@ -936,9 +979,15 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
     const res = S.gen.result;
     if(!res) return;
     if(name === 'top' && !(S.gen.top && S.gen.top.gid === res.id)) return;
+    const it = S.gen.islandTex;
+    if((name === 'islands' || name === 'full') && !it) return;
     S.gen.layer = name;
-    const img = name === 'top' ? S.gen.top.canvas : await loadImage(API + res.urls[name]);
-    genVp.show(img, name === 'top' ? `Top view of the 3D model, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`);
+    const img = name === 'top' ? S.gen.top.canvas : await loadImage(API + (it && (name === 'islands' || name === 'full') ? it.urls[name] : res.urls[name]));
+    genVp.show(img, name === 'top' ? `Top view of the 3D model, ${img.width} × ${img.height}`
+      : name === 'islands' ? `Islands texture, ${img.width} × ${img.height} (the roads transparent)`
+      : name === 'full' ? `Roads + islands, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`,
+      name === 'islands' || name === 'full');
+    drawBridges();
     $$('.layer').forEach(b => b.setAttribute('aria-pressed', b.dataset.layer === name));
   }
 
@@ -951,7 +1000,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
   }
 
   $$('.layer').forEach(b => b.addEventListener('click', () => {
-    const map = { material:'material', noise:'wear', markings:'markings', top:'top' };
+    const map = { material:'material', noise:'wear', markings:'markings', top:'top', islands:'islands', full:'full' };
     if(!S.gen.result) return;
     const name = map[b.dataset.layer];
     showLayer(S.gen.layer === name ? 'result' : name);
@@ -1137,6 +1186,7 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
     layer.setAttribute('width', genVp.canvas.width); layer.setAttribute('height', genVp.canvas.height);
     layer.innerHTML = '';
     if(!S.gen.mask) return;
+    drawIslands(f);
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
     // ramps and deck along the road, from the last preview
     S.gen.bridgePreview.forEach(p => {
@@ -1273,6 +1323,223 @@ const UI_VERSION = '2026.10.05-sky1';   // must match VERSION in server.py
   const _show = genVp.show;
   genVp.show = (...args) => { _show(...args); drawBridges(); };
 
+
+  /* ------------------------------------------------ islands */
+  // The areas between the roads, numbered by Generate texture (app/islands.py), drawn on
+  // the map with their numbers. Material slots under Blocks and islands: each a material
+  // (a ball, as the other parts) and the islands picked for it; Pick, then click islands.
+  const ISLAND_COLOURS = ['230,159,0', '86,180,233', '0,158,115', '240,228,66', '204,121,167', '213,94,0', '0,114,178', '170,170,170'];
+  const slotColour = i => ISLAND_COLOURS[i % ISLAND_COLOURS.length];
+  let slotsTimer = null, slotsMask = null;
+  // the island a point (mask pixels) lies in: its outline, even-odd over its rings
+  function islandAt(x, y){
+    const d = ISLS.data; if(!d) return 0;
+    for(const isl of d.islands){
+      const b = isl.bbox;
+      if(x < b[0] || y < b[1] || x > b[2] || y > b[3]) continue;
+      let inside = false;
+      for(const r of isl.rings) for(let i = 0, j = r.length - 1; i < r.length; j = i++){
+        const [xi, yi] = r[i], [xj, yj] = r[j];
+        if((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      }
+      if(inside) return isl.id;
+    }
+    return 0;
+  }
+  // each slot's islands (numbers), and each island's slot (a later slot wins, as the server)
+  function slotIslands(){
+    const of = new Map(), lists = ISLS.slots.map(() => []);
+    if(!ISLS.data) return { of, lists };
+    ISLS.slots.forEach((s, i) => (s.picks || []).forEach(p => { const k = islandAt(p[0], p[1]); if(k) of.set(k, i); }));
+    of.forEach((i, k) => lists[i].push(k));
+    lists.forEach(l => l.sort((a, b) => a - b));
+    return { of, lists };
+  }
+  // "1, 4, 7-9": compact, and back
+  function idText(ids){
+    const out = [];
+    for(let i = 0; i < ids.length; i++){
+      let j = i; while(j + 1 < ids.length && ids[j + 1] === ids[j] + 1) j++;
+      out.push(j > i + 1 ? `${ids[i]}-${ids[j]}` : j === i + 1 ? `${ids[i]}, ${ids[j]}` : `${ids[i]}`); i = j;
+    }
+    return out.join(', ');
+  }
+  function parseIds(text){
+    const n = ISLS.data ? ISLS.data.count : 0, out = new Set();
+    for(const part of String(text).split(/[,;\s]+/)){
+      const m = part.match(/^(\d+)(?:-(\d+))?$/); if(!m) continue;
+      const a = +m[1], b = m[2] ? +m[2] : a;
+      for(let k = Math.min(a, b); k <= Math.max(a, b) && k <= n; k++) if(k >= 1) out.add(k);
+    }
+    return [...out];
+  }
+  const islandById = id => ISLS.data && ISLS.data.islands[id - 1] && ISLS.data.islands[id - 1].id === id
+    ? ISLS.data.islands[id - 1] : (ISLS.data ? ISLS.data.islands.find(i => i.id === id) : null);
+  // give islands to a slot (or to none, slot -1): out of every other slot first
+  function assign(ids, slot){
+    const drop = new Set(ids);
+    ISLS.slots.forEach(s => { s.picks = (s.picks || []).filter(p => !drop.has(islandAt(p[0], p[1]))); });
+    if(slot >= 0 && ISLS.slots[slot]) ids.forEach(k => { const isl = islandById(k); if(isl) ISLS.slots[slot].picks.push(isl.pt.slice()); });
+  }
+  function renderSlots(){
+    const box = $('#islandSlots'); box.innerHTML = '';
+    const { lists } = slotIslands();
+    ISLS.slots.forEach((s, i) => {
+      const row = document.createElement('div'); row.className = 'isl-slot';
+      const cur = slotMaterial(i), n = lists[i].length;
+      row.innerHTML = `<span class="isl-sw" style="background:rgb(${slotColour(i)})"></span>
+        <button type="button" class="matChip" data-part="island" data-slot="${i}"><img alt=""><span class="mc-t"><small></small><b></b></span></button>
+        <button type="button" class="isl-pick" aria-pressed="${ISLS.pick === i}">Pick</button>
+        <button type="button" class="isl-x" title="Remove this slot (its islands go back to the Squares material)">×</button>
+        <input class="isl-ids" spellcheck="false" placeholder="${ISLS.data ? 'no islands: Pick, or type numbers' : 'Generate texture to number the islands'}">`;
+      const chip = $('.matChip', row);
+      $('small', chip).textContent = `Slot ${i + 1} · ${n} island${n === 1 ? '' : 's'}`;
+      $('b', chip).textContent = cur.name;
+      if(cur.ball) $('img', chip).src = cur.ball;
+      chip.title = cur.m ? `${cur.m.title} by ${(cur.m.authors || []).join(', ')}, Poly Haven, ${cur.m.licence}; ${cur.m.size_m[0]} m across. Click to change`
+                         : 'Laid as the islands in no slot. Click to choose a material, such as sand';
+      chip.addEventListener('click', e => { e.stopPropagation(); window.openMatPop(chip); });
+      const pickBtn = $('.isl-pick', row);
+      pickBtn.disabled = !ISLS.data;
+      pickBtn.title = ISLS.data ? 'Click islands on the map to give them this material; click one again to take it out' : 'Generate texture first: it numbers the islands';
+      pickBtn.addEventListener('click', () => setPick(ISLS.pick === i ? -1 : i));
+      $('.isl-x', row).addEventListener('click', () => {
+        ISLS.slots.splice(i, 1);
+        if(ISLS.pick === i) ISLS.pick = -1; else if(ISLS.pick > i) ISLS.pick--;
+        log(`Island material slot ${i + 1} removed.`); ISLS.changed();
+      });
+      const ids = $('.isl-ids', row);
+      ids.value = idText(lists[i]); ids.disabled = !ISLS.data;
+      ids.title = 'The islands in this slot, by number: type them (such as 3, 7, 12-15) and press Enter';
+      ids.addEventListener('change', () => {
+        const want = parseIds(ids.value), gone = lists[i].filter(k => !want.includes(k));
+        assign(gone, -1); assign(want, i);
+        log(`Slot ${i + 1}: ${want.length} island(s).`); ISLS.changed();
+      });
+      box.appendChild(row);
+    });
+    const d = ISLS.data;
+    $('#islandCount').textContent = d ? `${d.count} island${d.count === 1 ? '' : 's'}` : 'no islands yet';
+    $('#btnShowIslands').disabled = !d;
+    $('#btnShowIslands').setAttribute('aria-pressed', ISLS.show);
+    $('#btnIslandsTex').disabled = !d || !S.gen.result;
+    if(d){
+      const free = d.count - [...slotIslands().of.keys()].length;
+      $('#islandNote').textContent = ISLS.pick >= 0
+        ? `Picking for slot ${ISLS.pick + 1}: click islands on the map to add them, click again to take them out. Pick or Esc to finish.`
+        : `${free} island(s) in no slot: they use the Squares, blocks and islands material (${materialOf('square').name}). `
+          + 'Generate islands texture makes a texture of only the islands; the 3D model and Top view use the slots too.';
+    }
+  }
+  function setPick(i){
+    ISLS.pick = i;
+    if(i >= 0) log(`Pick islands for slot ${i + 1} (${slotMaterial(i).name}): click an island to add it, click it again to take it out.`);
+    renderSlots(); drawBridges();
+  }
+  ISLS.changed = quiet => {
+    renderSlots(); drawBridges();
+    if(quiet === true) return;
+    window.dispatchEvent(new Event('materials'));
+    if(!S.gen.mask) return;
+    clearTimeout(slotsTimer);
+    const mask = S.gen.mask.id, slots = JSON.parse(JSON.stringify(ISLS.slots));
+    slotsTimer = setTimeout(() => api('/api/islands', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ mask, slots }) }).catch(e => log('Island slots not saved: ' + e.message, 'bad')), 300);
+  };
+  window.addEventListener('materials', () => renderSlots());
+  // the slots of a mask, kept on the server with its picture
+  async function loadSlots(maskId){
+    slotsMask = maskId; ISLS.slots = []; ISLS.data = null; ISLS.pick = -1;
+    try{
+      const r = await api('/api/islands?mask=' + maskId);
+      if(slotsMask !== maskId) return;
+      ISLS.slots = (r.slots || []).map(s => ({ material: s.material, picks: s.picks || [] }));
+      if(ISLS.slots.length) log(`${ISLS.slots.length} island material slot(s) restored for this mask. Generate texture to number its islands.`);
+    }catch(_){}
+    renderSlots();
+  }
+  // the numbered islands of a texture just generated
+  async function loadIslands(res){
+    ISLS.data = null; ISLS.pick = -1; S.gen.islandTex = null;
+    ['#lp-islands', '#lp-full'].forEach(id => { $(id).innerHTML = '<div class="ph">—</div>'; });
+    $('#islandSaves').hidden = true;
+    if(res.islands && res.islands.url){
+      try{
+        ISLS.data = await api(res.islands.url);
+        const { lists } = slotIslands();
+        log(`Islands: ${ISLS.data.count} found between the roads, numbered 1 to ${ISLS.data.count} in reading order`
+          + (ISLS.slots.length ? `; slots: ${lists.map((l, i) => `${i + 1}: ${l.length}`).join(', ')}` : '')
+          + '. Show islands to see them, or add a slot under Blocks and islands and Pick.', 'ok');
+      }catch(e){ log('Islands not loaded: ' + e.message, 'bad'); }
+    }
+    renderSlots(); drawBridges();
+  }
+  function drawIslands(f){
+    const d = ISLS.data;
+    if(!d || !(ISLS.show || ISLS.pick >= 0)) return;
+    const { of } = slotIslands();
+    const g = el('g', {}, layer), hr = Math.max(4, genVp.canvas.width / 260);
+    const labels = el('g', {}, layer);
+    const scaleF = shown();
+    d.islands.forEach(isl => {
+      const s = of.has(isl.id) ? of.get(isl.id) : -1;
+      const dpath = isl.rings.map(r => 'M' + r.map(q => `${(q[0]*scaleF).toFixed(1)},${(q[1]*scaleF).toFixed(1)}`).join('L') + 'Z').join('');
+      const mine = ISLS.pick >= 0 && s === ISLS.pick;
+      const p = el('path', { d: dpath, 'fill-rule': 'evenodd',
+        fill: s >= 0 ? `rgba(${slotColour(s)},${mine ? .62 : .42})` : (ISLS.pick >= 0 ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.03)'),
+        stroke: s >= 0 ? `rgb(${slotColour(s)})` : 'rgba(255,190,60,.9)', 'stroke-width': Math.max(1, hr * (mine ? 0.45 : 0.25)),
+        class: 'isl' + (ISLS.pick >= 0 ? ' pickable' : '') }, g);
+      if(ISLS.pick >= 0) p.addEventListener('click', e => {
+        if(genVp.wasDrag && genVp.wasDrag()) return;
+        e.stopPropagation();
+        const slot = ISLS.pick, had = s === slot;
+        assign([isl.id], had ? -1 : slot);
+        log(had ? `Island ${isl.id} taken out of slot ${slot + 1}.` : `Island ${isl.id} (${Math.round(isl.area_m2).toLocaleString()} m²) into slot ${slot + 1}: ${slotMaterial(slot).name}.`);
+        ISLS.changed();
+      });
+      // its number where it is widest, sized to fit
+      const r = isl.r_m / mppMask() * scaleF;
+      const fs = Math.max(hr * 1.1, Math.min(hr * 3.2, r * 0.9));
+      if(r > hr * 0.5){
+        const tx = el('text', { x: isl.pt[0] * scaleF, y: isl.pt[1] * scaleF, 'font-size': fs, 'stroke-width': fs * 0.18, class: 'isl-id' }, labels);
+        tx.textContent = isl.id;
+      }
+    });
+  }
+  $('#btnAddSlot').addEventListener('click', () => {
+    const first = MAT.lib && MAT.lib.materials.find(m => m.kind === 'ground');
+    ISLS.slots.push({ material: first ? first.id : 'same', picks: [] });
+    const i = ISLS.slots.length - 1;
+    log(`Island material slot ${i + 1} added (${slotMaterial(i).name}): click its ball to choose the material, then Pick its islands.`);
+    if(ISLS.data) ISLS.pick = i;
+    ISLS.changed();
+  });
+  $('#btnShowIslands').addEventListener('click', () => { ISLS.show = !ISLS.show; renderSlots(); drawBridges(); });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && ISLS.pick >= 0 && !MAT.open) setPick(-1); });
+  $('#btnIslandsTex').addEventListener('click', async () => {
+    if(!S.gen.result || !ISLS.data) return;
+    const btn = $('#btnIslandsTex'); btn.disabled = true; status('Generating the islands texture…');
+    log('Generating the islands texture: only the islands, each with its slot\'s material, at real size…');
+    const gid = S.gen.result.id;
+    try{
+      const res = await api('/api/islands/texture', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the islands texture',
+        body: JSON.stringify({ generation: gid, island_slots: ISLS.slots, materials: { square: $('#matSquare').value },
+                               match_tone: $('#matTone').checked, seed: +$('#seed').value }) });
+      if(!S.gen.result || S.gen.result.id !== gid) return;
+      S.gen.islandTex = res;
+      log(`Islands texture ready (${res.size[0]} × ${res.size[1]}, the road texture's size): `
+        + res.by_slot.map(b => `${b.islands} island(s) ${b.name}${b.slot >= 0 ? ` (slot ${b.slot + 1})` : ''}`).join(', ') + '.', 'ok');
+      log('  The roads are transparent in it, so it lies under the road texture with no gap; Roads + islands shows the two together.');
+      $('#saveIslands').href = API + res.downloads.islands; $('#saveFull').href = API + res.downloads.full;
+      $('#islandSaves').hidden = false;
+      try{ drawInto($('#lp-islands'), await loadImage(API + res.urls.islands)); drawInto($('#lp-full'), await loadImage(API + res.urls.full)); }catch(_){}
+      await showLayer('full');
+      // the top view shows the 3D model's islands too: brought up to date
+      if(!S.gen.top || S.gen.top.gid !== gid || S.gen.top.key !== JSON.stringify(exportSettings())) buildTopView(gid);
+    }catch(e){ log('Islands texture failed: ' + e.message, 'bad'); }
+    status('Ready.'); btn.disabled = false; renderSlots();
+  });
+  renderSlots();
 
   /* ------------------------------------------------ objects: layers and placements */
   // An object is a layer. A placement is a rectangle of copies of one object:

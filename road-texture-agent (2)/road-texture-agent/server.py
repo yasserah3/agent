@@ -51,13 +51,14 @@ from app import objects as OB
 from app import quadmesh as QMB
 from app import bridges as BRG
 from app import streets as ST
+from app import islands as ISL
 from app.generation import prepare_mask as _prep
 from app import routing as R
 from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.05-sky1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.06-isl1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -203,7 +204,8 @@ def noise(payload: dict):
 # (seconds on the 3.7 x 2.5 km test map, 3328 x 2304 px, 1.1 m per px)
 GEN_PLAN = [("preparing", 0.5), ("mask", 5.0), ("junctions", 5.0), ("areas", 1.0), ("material_open", 3.0),
             ("material_edge", 3.0), ("material_junction", 4.0), ("wear", 2.5), ("markings", 1.0),
-            ("finishing", 8.0), ("saving", 0.5)]
+            ("finishing", 8.0), ("saving", 0.5), ("islands", 5.0)]
+ISLANDS_PLAN = [("materials", 3.0), ("mask", 5.0), ("islands", 2.0), ("texture", 20.0), ("saving", 3.0)]
 EXPORT_PLAN = [("preparing", 0.5), ("materials", 6.0), ("junctions", 5.0), ("groups", 3.0), ("streets", 2.0),
                ("patches", 4.0), ("sidewalks", 24.0), ("apron", 24.0), ("road", 19.0), ("sidewalk_meshes", 15.0),
                ("objects", 0.5), ("blocks", 58.0), ("lamps", 1.0), ("writing", 1.5), ("check", 3.0)]
@@ -743,6 +745,14 @@ def _apply_materials(tileset, choice, match_tone):
                 tileset["tiles"][t] = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone, variant=i * n + v + 1)
                                        for v in range(n)]
             used[part] = e["name"] + f" ({n * len(tile_parts)} random tiles" + (", toned to yours)" if tone is not None else ")")
+        elif e["kind"] == "ground":
+            # desert and ground: fresh tiles made from the scan's patches (no joints to
+            # keep on a grid), several, in its own colour (it replaces nothing of yours)
+            n = max(1, int(tileset["settings"].get("variants", 3)))
+            for t in tile_parts:
+                tileset["tiles"][t] = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", None, variant=v + 1)
+                                       for v in range(n)]
+            used[part] = e["name"]
         else:
             # paving and kerbs: the scan itself, so its joints stay on their grid
             tone = tone_of(tile_parts[0])
@@ -751,6 +761,65 @@ def _apply_materials(tileset, choice, match_tone):
                 tileset["tiles"][t] = [rec]
             used[part] = e["name"] + (" (toned to your tiles)" if tone is not None else "")
     return used
+
+
+def _island_tiles(tileset, slots, match_tone):
+    """
+    The tiles of each island material slot: {slot: {"tiles", "name", "kind"}}.
+    A slot on "same" is left out: its islands are laid as all the others (the
+    Squares choice, or the sidewalks'). Desert and ground: fresh tiles made from
+    the scan's patches, several, in its own colour; paving and concrete: the
+    scan itself, toned as the squares are with match tone.
+    """
+    out = {}
+    tile_m = float(tileset["settings"]["tile_m"])
+    px = int(tileset["settings"].get("px", 1024))
+    n = max(1, int(tileset["settings"].get("variants", 3)))
+    for s, slot in enumerate(slots):
+        mid = slot.get("material")
+        if not mid or mid in ("same", "tiles"):
+            continue
+        e = LIB.entry(mid)
+        if not e or e["kind"] not in LIB.KINDS_FOR_PART["island"]:
+            raise ValueError(f"{mid} is not an island material in the library")
+        if e["kind"] == "ground":
+            recs = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", None, variant=v + 1) for v in range(n)]
+        else:
+            own = (tileset["tiles"].get("sidewalk") or [None])[0]
+            tone = (np.asarray(Image.open(own["path"]).convert("RGB")).reshape(-1, 3).mean(axis=0).tolist()
+                    if match_tone and own is not None else None)
+            recs = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone)]
+        out[s] = {"tiles": recs, "name": e["name"], "kind": e["kind"]}
+    return out
+
+
+def _tileset_with_paths():
+    """Your latest tileset with each tile's file, or None when there are no tiles yet."""
+    row = mem.latest_artifact("tileset")
+    if not row or not row["meta"].get("tiles"):
+        return None
+    tileset = json.loads(json.dumps(row["meta"]))
+    for part, lst in tileset["tiles"].items():
+        for tile in lst:
+            tile["path"] = mem.artifact(tile["id"])["path"]
+    return tileset
+
+
+def _islands_for(gid, tileset, payload):
+    """
+    The island materials of a generation for the 3D model and the islands
+    texture: its numbered islands, which slot each picked island is in, and
+    each slot's tiles. None when the generation has no numbered islands (made
+    before they were numbered).
+    """
+    lab_art = mem.artifact(f"{gid}_islandmap")
+    if not lab_art or not Path(lab_art["path"]).exists():
+        return None
+    lab = ISL.load_labels(lab_art["path"])
+    slots = ISL.slot_list(payload.get("island_slots"))
+    looks = _island_tiles(tileset, slots, bool(payload.get("match_tone", True)))
+    slot_of = {k: s for k, s in ISL.resolve(slots, lab).items() if s in looks}
+    return {"labels": lab, "slot_of": slot_of, "looks": looks, "seed": int(payload.get("seed", 7))}
 
 
 def _your_tile(part):
@@ -1464,10 +1533,20 @@ def generate(payload: dict):
         mem.add_artifact(aid, f"generated_{kind}", path, {"mask": rec["id"]})
         urls[kind] = f"/api/artifact/{aid}"
 
+    # the islands (the areas between the roads) with their numbers, for the island materials
+    prog.stage("islands", "numbering the islands")
+    lab, islands = ISL.find(np.array(Image.open(rec["path"]).convert("L")), float(payload.get("scale", 0.25)))
+    ISL.save(lab, islands, float(payload.get("scale", 0.25)), ARTIFACTS / f"gen_{gid}_islands.json",
+             ARTIFACTS / f"gen_{gid}_islands.npz")
+    mem.add_artifact(f"{gid}_islands", "generated_islands", ARTIFACTS / f"gen_{gid}_islands.json",
+                     {"mask": rec["id"], "count": len(islands)})
+    mem.add_artifact(f"{gid}_islandmap", "island_labels", ARTIFACTS / f"gen_{gid}_islands.npz", {"mask": rec["id"]})
+
     for part in ("open", "edge", "junction"):
         mem.tick_cooldowns(part)
     mem.add_artifact(f"{gid}_map", "generation_map", map_path,
                      {"mask": rec["id"], "base_mask": base["id"], "streets_sig": streets["sig"],
+                      "soft_edges": bool(payload.get("soft_edges", True)),
                       "nomark": streets["nomark_path"], "scale": float(payload.get("scale", 0.25)),
                       "output_scale": int(res.get("output_scale", 1)),
                       "dashes": {"cycle_m": float(payload.get("cycle_m", 9.0)),
@@ -1483,7 +1562,8 @@ def generate(payload: dict):
 
     return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions,
             "routes": routes, "inner_streets": streets["report"],
-            "dash_share": round(dash_share, 3)}
+            "dash_share": round(dash_share, 3),
+            "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"}}
 
 
 def _street_material(payload):
@@ -1659,6 +1739,91 @@ def _build_key(payload):
                        tiles["id"] if tiles else None], sort_keys=True, default=str)
 
 
+# ------------------------------------------------------------------ islands
+# The areas between the roads, numbered when the texture is generated
+# (app/islands.py). Island material slots are kept with their mask's picture
+# (by its contents, so loading the same mask again brings them back); each
+# remembers its islands by a point inside each.
+def _slots_key(rec):
+    return f"islandslots_{(rec.get('sha256') or rec['id'])[:20]}"
+
+
+@app.get("/api/islands")
+def load_island_slots(mask: str):
+    rec = mem.image(mask)
+    art = mem.artifact(_slots_key(rec)) if rec else None
+    return {"slots": json.loads(Path(art["path"]).read_text()) if art and Path(art["path"]).exists() else []}
+
+
+@app.post("/api/islands")
+def save_island_slots(payload: dict):
+    rec = mem.image(payload.get("mask"))
+    if not rec:
+        raise HTTPException(400, "unknown mask")
+    slots = ISL.slot_list(payload.get("slots"))
+    key = _slots_key(rec)
+    path = ARTIFACTS / f"{key}.json"
+    path.write_text(json.dumps(slots))
+    mem.add_artifact(key, "island_slots", path, {"mask": rec["id"], "slots": len(slots)})
+    return {"ok": True, "slots": len(slots)}
+
+
+@app.post("/api/islands/texture")
+@tracked("Generating the islands texture", ISLANDS_PLAN)
+def islands_texture(payload: dict):
+    """
+    The islands texture of a generated texture: only the islands, each laid
+    with its slot's material (or the Squares choice, or the sidewalks'), at real
+    size, the roads transparent. Also the road texture with the islands under it.
+    """
+    gid = payload.get("generation")
+    art, result = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_result")
+    isl_art = mem.artifact(f"{gid}_islands")
+    if not art or not result:
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    if not isl_art or not mem.artifact(f"{gid}_islandmap"):
+        raise HTTPException(400, "this texture was generated before the islands were numbered: press Generate texture again")
+    rec = mem.image(art["meta"]["mask"])
+    if not rec:
+        raise HTTPException(400, "the mask for this generation is missing")
+    prog.stage("materials", "the island materials")
+    tileset = _tileset_with_paths() or {"settings": {"tile_m": 4.0, "px": 1024, "variants": 3}, "tiles": {}}
+    try:
+        used = _apply_materials(tileset, {"square": (payload.get("materials") or {}).get("square")},
+                                bool(payload.get("match_tone", True)))
+        islands = _islands_for(gid, tileset, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    tile_m = float(tileset["settings"]["tile_m"])
+    looks = {s: {"tiles": [t["path"] for t in v["tiles"]], "tile_m": tile_m, "ground": v["kind"] == "ground"}
+             for s, v in islands["looks"].items()}
+    base = tileset["tiles"].get("block") or tileset["tiles"].get("sidewalk")
+    if not base:
+        if len(islands["slot_of"]) < len(json.loads(Path(isl_art["path"]).read_text())["islands"]):
+            raise HTTPException(400, "no sidewalk tiles yet for the islands without a material: build them in the "
+                                     "Memory tab, choose a Squares material, or give every island a material")
+        base = next(iter(islands["looks"].values()))["tiles"]
+    default = {"tiles": [t["path"] for t in base], "tile_m": tile_m, "ground": M3._sidewalk_kind(base[0]) == "ground"}
+    data = json.loads(Path(isl_art["path"]).read_text())
+    out, full = ARTIFACTS / f"gen_{gid}_islandtex.png", ARTIFACTS / f"gen_{gid}_full.png"
+    info = ISL.texture(np.array(Image.open(rec["path"]).convert("L")), islands["labels"], data["islands"],
+                       float(art["meta"]["scale"]), int(art["meta"].get("output_scale", 1)),
+                       bool(art["meta"].get("soft_edges", True)), islands["slot_of"], looks, default,
+                       int(payload.get("seed", 7)), out, result_path=result["path"], full_path=full)
+    mem.add_artifact(f"{gid}_islandtex", "generated_islands_texture", out, {"generation": gid, **info})
+    mem.add_artifact(f"{gid}_full", "generated_full_texture", full, {"generation": gid})
+    stem = Path((mem.image(art["meta"].get("base_mask")) or rec)["name"]).stem
+    names = {s: v["name"] for s, v in islands["looks"].items()}
+    by = [{"slot": s, "name": names.get(s) if s >= 0 else (used.get("square") or "Same as sidewalks"),
+           "islands": c} for s, c in sorted(info["by_slot"].items())]
+    mem.record("islands_texture", f"islands texture {info['size'][0]} x {info['size'][1]}: {info['islands']} islands",
+               {"generation": gid, "by_slot": by})
+    return {"ok": True, "size": info["size"], "islands": info["islands"], "by_slot": by,
+            "urls": {"islands": f"/api/artifact/{gid}_islandtex", "full": f"/api/artifact/{gid}_full"},
+            "downloads": {"islands": f"/api/download/{gid}_islandtex?name={stem}_islands.png",
+                          "full": f"/api/download/{gid}_full?name={stem}_roads_and_islands.png"}}
+
+
 @app.post("/api/export3d")
 @tracked("Building the 3D model", EXPORT_PLAN)
 def export3d(payload: dict):
@@ -1731,16 +1896,13 @@ def _export3d(payload):
             inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
     try:
         if mode == "tiled":
-            row = mem.latest_artifact("tileset")
-            if not row or not row["meta"].get("tiles"):
+            tileset = _tileset_with_paths()
+            if tileset is None:
                 raise ValueError("no material tiles yet: build them in the Memory tab, or train, which builds them")
-            tileset = json.loads(json.dumps(row["meta"]))
-            for part, lst in tileset["tiles"].items():
-                for tile in lst:
-                    tile["path"] = mem.artifact(tile["id"])["path"]
             prog.stage("materials", "street materials")
             used_materials = _apply_materials(tileset, payload.get("materials") or {},
                                               bool(payload.get("match_tone", True)))
+            islands = _islands_for(gid, tileset, payload)
             markings = mem.artifact(f"{gid}_markings")
             info = M3.export_road_tiled_glb(
                 rec["path"], result["path"], markings["path"] if markings else None, tileset,
@@ -1766,11 +1928,14 @@ def _export3d(payload):
                 bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
                             "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
                             "deck_m": float(payload.get("bridge_deck_m", 1.0))},
-                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")))
+                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")), islands=islands)
             prog.stage("check", "checking the tile repeat")
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["materials_used"] = used_materials
+            if islands is None and any(s.get("picks") for s in ISL.slot_list(payload.get("island_slots"))):
+                info["islands_warning"] = ("this texture was generated before the islands were numbered: "
+                                           "press Generate texture again to use the island materials")
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None
         elif mode == "traced":
             info = M3.export_road_glb(rec["path"], result["path"], float(art["meta"]["scale"]),

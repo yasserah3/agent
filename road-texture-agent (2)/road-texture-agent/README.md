@@ -555,6 +555,7 @@ app/placements.py    where each copy of a placement goes, for the 3D model and i
 app/streets.py       inner streets drawn between objects, built into the street mask
 app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
 app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
+app/islands.py       the islands between the roads: their numbers and outlines, slots, the islands texture
 app/looks.py         the Look panel's LUTs (.cube, Hald CLUT) and saved looks; app/looks holds bundled ones
 app/images.py        loading, hashing, noise isolation
 ui/index.html        the interface
@@ -790,7 +791,9 @@ made of, before you press Generate texture:
     Prague). Two real scans, CC0 from Poly Haven by Rob Tuytel: *grey granite*
     (arcs repeating every 1.2 m, setts about 8 cm) and *dark and worn* (2.5 m).
     Each square's fans are turned to its main street, as its paving always is;
-    the sidewalks round it keep their own paving.
+    the sidewalks round it keep their own paving. Also the **desert and
+    ground** materials (below). The small islands paved over completely (too
+    small for a ring of sidewalk) take this material too.
 - **Streets** get fresh tiles made from the scan, the way the tiles from your
   training are made (app/tiles.py), so a street never shows the scan
   repeating every couple of metres: patches of the scan half a metre across,
@@ -904,6 +907,65 @@ roads as a flat plane with the sidewalk paving, at the sidewalk height.
   stripes.
 - On the test mask (Optimised): 43 blocks, 5,896 quads plus small edge
   triangles, covering 93% of the image; road and blocks together cover all of it.
+
+### Island materials: a material for each island
+
+Under Blocks and islands, **Island materials** gives islands materials of
+their own, island by island:
+
+- **Every island has a number.** Generate texture finds the islands (every
+  area between the roads of at least 4 m², city blocks and traffic islands
+  alike, from the same cleaned mask the texture is made from) and numbers them
+  in reading order: by each island's topmost pixel, top to bottom, then left
+  to right. The same mask always gets the same numbers. **Show islands** draws
+  each island's outline with its number on the map. Your city map has 321.
+- **Material slots.** *Add material slot* adds one: a ball with its material
+  (click it to choose: the window shows the 9 **desert and ground** scans
+  first, then the pavings, concretes and asphalts the sidewalks can have, or
+  *As the other islands*), a **Pick** button and a remove button (×). Each
+  slot has its own colour on the map.
+- **Pick**: press it, then click islands on the map. A click puts the island
+  in this slot (taking it out of any other); a second click takes it out.
+  Press Pick again or Esc to finish. Under each slot are its islands by
+  number (such as `3, 7, 12-15`): you can also type numbers there and press
+  Enter, handy on a map with hundreds of islands.
+- Islands in no slot keep the **Squares, blocks and islands** material (by
+  default the sidewalk paving), as before.
+- A slot remembers its islands by a point inside each, not by number, so if
+  the islands change (an inner street splits one) the point still finds the
+  island it is in. The slots are kept on the server with the mask's picture:
+  loading the same mask again brings them back (press Generate texture to
+  number its islands again).
+- **In the 3D model** (Download 3D model, the Top view and the 3D tab): each
+  picked island's block is laid with its slot's material, island by island
+  (looked up for every triangle, so two islands that share a paved area each
+  keep their own), and a small paved island takes it too. The sidewalks round
+  an island keep their paving; the island's material starts at the
+  sidewalk's inner edge.
+- **Desert and ground** (sand, gravel, dry earth, cracked mud, red sand: 9
+  CC0 scans from Poly Haven, listed in `app/scans/README.md`) is laid as fresh
+  4 m tiles made from the scan's patches, like the streets, so the scan never
+  repeats; in its own colour (Match the tone does not grey it); with broad
+  light and dark over it (drifts and damper patches, features about 3, 10
+  and 35 m across, ±10%) so a large sandy block shows no tile repeat from
+  above.
+- **Generate islands texture** makes a texture of only the islands: the same
+  size as the road texture, each island laid with its material at real size
+  along its main kerb direction, the roads transparent (PNG with alpha). Its
+  edge is the exact counterpart of the road texture's smooth edge, so the two
+  laid together leave no gap and no overlap. It is quick: it does not touch
+  the roads (5 s on a 900 × 700 mask once the material tiles exist; the
+  first use of a desert material makes its tiles, a few seconds each).
+  - Ground is mixed from two of its tile variants by a smooth random field,
+    and paving keeps one variant and grid per island, as in the 3D model.
+  - At coarse scales (1.1 m per pixel) a texture pixel is wider than a whole
+    tile: each pixel then holds the material's average over it (no
+    flicker or moiré), with the broad light and dark on top.
+  - **Layers**: *Islands* shows the islands texture, *Roads + islands* the
+    road texture with the islands under it. *Save islands* and *Save roads
+    + islands* download them (`<mask>_islands.png`,
+    `<mask>_roads_and_islands.png`). The Top view is rebuilt with the island
+    materials.
 
 ## Workspace location
 
@@ -1495,7 +1557,8 @@ needs installing:
   `ui/sky_blender.js` (MIT, and Apache 2.0 for Cycles' sky lookup);
 - `oidn`: Open Image Denoise's trained weights (Apache 2.0), run by
   `ui/denoise.js`, a port of OIDN 2.4's network (Apache 2.0).
-- `app/scans` (server side): eleven scanned materials from Poly Haven, CC0
+- `app/scans` (server side): twenty scanned materials from Poly Haven (eleven street
+  surfaces, nine desert and ground), CC0
   (public domain), listed with their authors in `app/scans/README.md`;
 - `ui/skies`: four HDRI skies from Poly Haven, CC0, listed with their authors
   in `ui/skies/README.md`; HDR and EXR files are read by three.js's HDRLoader

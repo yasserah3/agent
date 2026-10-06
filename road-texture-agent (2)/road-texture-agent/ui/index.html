@@ -130,6 +130,25 @@
   .matPop .mp-card small{ font-size:11px; color:var(--muted); }
   .matPop .mp-foot{ margin-top:8px; }
   .btn-row.three{ grid-template-columns:1fr 1fr 1fr; }
+  .isl-box{ border:1px solid var(--line); border-radius:6px; padding:8px; margin:4px 0 8px; background:rgba(255,255,255,.015); }
+  .isl-box .isl-h{ display:flex; justify-content:space-between; align-items:baseline; font-size:12.5px; font-weight:600; }
+  .isl-box .isl-h span{ font-weight:400; color:var(--muted); font-size:11.5px; }
+  .isl-slot{ display:grid; grid-template-columns:6px 1fr auto auto; gap:6px; align-items:center; margin-top:6px; }
+  .isl-slot .isl-sw{ align-self:stretch; border-radius:3px; }
+  .isl-slot .matChip{ grid-template-columns:34px 1fr; gap:8px; padding:4px 6px; }
+  .isl-slot .matChip img{ width:34px; height:34px; }
+  .isl-slot .isl-pick{ background:var(--panel-2); border:1px solid var(--line); color:var(--ink); border-radius:5px; padding:6px 9px; cursor:pointer; font:inherit; font-size:12px; }
+  .isl-slot .isl-pick:hover:not(:disabled){ border-color:var(--blue); }
+  .isl-slot .isl-pick[aria-pressed="true"]{ background:rgba(70,130,220,.3); border-color:var(--blue); color:#fff; }
+  .isl-slot .isl-pick:disabled{ opacity:.45; cursor:default; }
+  .isl-slot .isl-x{ background:none; border:none; color:var(--muted); font-size:17px; cursor:pointer; padding:0 2px; }
+  .isl-slot .isl-x:hover{ color:var(--red); }
+  .isl-slot .isl-ids{ grid-column:2 / -1; width:100%; background:var(--field); border:1px solid var(--line); border-radius:4px; padding:4px 6px;
+                      color:var(--ink); font-size:11.5px; font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .isl-slot .isl-ids:disabled{ opacity:.55; }
+  .bridge-layer .isl{ pointer-events:none; }
+  .bridge-layer .isl.pickable{ pointer-events:all; cursor:pointer; }
+  .bridge-layer .isl-id{ pointer-events:none; font-family:system-ui, sans-serif; font-weight:700; paint-order:stroke; stroke:rgba(0,0,0,.75); fill:#fff; text-anchor:middle; dominant-baseline:central; }
   .btn.secondary.attention{ border-color:var(--blue); box-shadow:0 0 0 2px rgba(70,130,220,.45); color:#fff; }
   .btn.secondary.toggle[aria-pressed="true"]{ background:rgba(70,130,220,.28); border-color:var(--blue); }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
@@ -563,6 +582,20 @@
           <div class="note" style="margin:-2px 0 6px">Never more than half the space to the next road, so facing sidewalks cannot overlap</div>
           <div class="field"><label for="blocksOn">Blocks and islands</label><input type="checkbox" id="blocksOn" checked style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="note" style="margin:-2px 0 6px">Fills the areas between roads as flat planes at sidewalk height, with the sidewalk paving</div>
+          <div class="isl-box" id="islandBox">
+            <div class="isl-h">Island materials <span id="islandCount">no islands yet</span></div>
+            <div id="islandSlots"></div>
+            <div class="btn-row">
+              <button type="button" class="btn secondary" id="btnAddSlot" title="A new material slot: choose its material, then Pick the islands that get it">Add material slot</button>
+              <button type="button" class="btn secondary toggle" id="btnShowIslands" aria-pressed="false" disabled title="Show every island's outline and number on the map">Show islands</button>
+            </div>
+            <button type="button" class="btn" id="btnIslandsTex" disabled title="Make a texture of only the islands, each with its material, the same size as the road texture">Generate islands texture</button>
+            <div class="btn-row" id="islandSaves" hidden>
+              <a class="btn secondary" id="saveIslands" download style="text-align:center;text-decoration:none" title="The islands only, the roads transparent (PNG with alpha)">Save islands</a>
+              <a class="btn secondary" id="saveFull" download style="text-align:center;text-decoration:none" title="The road texture with the islands laid under it (PNG)">Save roads + islands</a>
+            </div>
+            <div class="note" id="islandNote">Generate texture finds the islands (the areas between the roads) and numbers them. Then add a slot, choose its material and press Pick to click the islands that get it. Islands in no slot use the Squares, blocks and islands material.</div>
+          </div>
           <div class="field"><label for="surfDetail">Surface detail</label>
             <select id="surfDetail" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="Bump and roughness maps, so light catches the surface (in the 3D tab, the photo render, Blender and other glTF viewers)">
               <option value="scan" selected>Scanned (real asphalt and concrete)</option>
@@ -626,6 +659,8 @@
             <button class="layer" aria-pressed="true" data-layer="noise"><div class="preview" id="lp-noise"><div class="ph">—</div></div><span>Noise</span></button>
             <button class="layer" aria-pressed="true" data-layer="markings"><div class="preview" id="lp-markings"><div class="ph">Needs engine</div></div><span>Markings</span></button>
             <button class="layer" aria-pressed="false" data-layer="top" title="The 3D model from straight above: streets, sidewalks, kerbs, blocks and objects with their materials"><div class="preview" id="lp-top"><div class="ph">—</div></div><span>Top view</span></button>
+            <button class="layer" aria-pressed="false" data-layer="islands" title="The islands texture: only the islands, each with its material, the roads transparent (Generate islands texture)"><div class="preview" id="lp-islands"><div class="ph">—</div></div><span>Islands</span></button>
+            <button class="layer" aria-pressed="false" data-layer="full" title="The road texture with the islands texture laid under it"><div class="preview" id="lp-full"><div class="ph">—</div></div><span>Roads + islands</span></button>
           </div>
         </div>
       </section>

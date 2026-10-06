@@ -29,6 +29,7 @@ from app import library as LIB
 from app import quadmesh as QM
 from app import progress as prog
 from app import placements as PL
+from app import islands as ISL
 from scipy import ndimage as ndi
 
 MAX_TEXTURE = 8192          # the largest texture Unreal accepts without extra settings
@@ -541,7 +542,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           output_scale, out_path, straightness=0.7, spacing_m=2.0,
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
-                          optimise=False, blocks=None, scatter=None, inner=None, surface="scan"):
+                          optimise=False, blocks=None, scatter=None, inner=None, surface="scan", islands=None):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
@@ -551,6 +552,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     inner: the inner streets as exact shapes, {"base_mask_path": the mask
     without them, "shapes": app/streets.py's shapes}: the other roads are
     built from the mask without them, and they are laid as they are.
+    islands: the island material slots (server.py's _islands_for): the islands
+    picked for a slot are laid with its material, block and small paved island.
     """
     from scipy.ndimage import map_coordinates
     gray = np.array(Image.open(mask_path).convert("L"))
@@ -781,6 +784,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         regions = QM.block_polygons(mesh, (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale),
                                     output_scale, mpp_out * output_scale, min_area_m2=0.5)
         frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac)
+        if islands:
+            frames.set_islands(islands, output_scale)
     prog.stage("sidewalk_meshes", "sidewalk paving")
     sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface, frames)
     scatter_info = None
@@ -961,6 +966,8 @@ class PavedFrames:
         import shapely
         from scipy import ndimage as _ndi
         self.regions, self.mpp, self.W, self.H, self.tile_m = list(regions), mpp_out, W, H, tile_m
+        self.seed, self.looks, self.ground = seed, {}, None
+        self.near, self.slot_map, self.iscale = None, None, 1
         self.tree = shapely.STRtree(self.regions) if self.regions else None
         self.theta, self.off, self.variant = [], [], []
         for k, g in enumerate(self.regions):
@@ -1007,6 +1014,41 @@ class PavedFrames:
 
     def variant_of(self, k):
         return self.variant[k] if self.regions else 0
+
+    def set_islands(self, islands, scale):
+        """
+        The island material slots (server.py's _islands_for): the numbered islands
+        (mask pixels, scale times coarser than the texture), each pixel of road
+        given its nearest island, so a point on the kerb line still finds one.
+        """
+        lab = islands["labels"]
+        if lab.any() and (lab == 0).any():
+            iy, ix = ndi.distance_transform_edt(lab == 0, return_distances=False, return_indices=True)
+            lab = lab[iy, ix]
+        self.near, self.iscale = lab, scale
+        self.slot_map = np.full(int(lab.max()) + 1, -1, np.int64)
+        for k, s in islands["slot_of"].items():
+            if 0 < int(k) < len(self.slot_map):
+                self.slot_map[int(k)] = int(s)
+        self.looks = islands["looks"]
+
+    def slot_at(self, x, z):
+        """The material slot of the island under each world point (x, z); -1: none (the default look)."""
+        x = np.atleast_1d(np.asarray(x, np.float64))
+        if self.slot_map is None:
+            return np.full(len(x), -1, np.int64)
+        px, pz = self.to_px(x, np.atleast_1d(z))
+        H, W = self.near.shape
+        xi = np.clip((px / self.iscale).astype(np.int64), 0, W - 1)
+        yi = np.clip((pz / self.iscale).astype(np.int64), 0, H - 1)
+        return self.slot_map[self.near[yi, xi]]
+
+    def ground_tone(self, x, z):
+        """Broad light and dark over ground (app/islands.py), on top of tone()."""
+        if self.ground is None:
+            self.ground = ISL.ground_field(self.W * self.mpp, self.H * self.mpp, self.seed)
+        f = ISL.field_at(self.ground, np.asarray(x) + self.W * self.mpp / 2, np.asarray(z) + self.H * self.mpp / 2)
+        return 1.0 + ISL.GROUND_AMP * f
 
     def tone(self, x, z):
         from scipy.ndimage import map_coordinates
@@ -1066,23 +1108,38 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
     pieces += [(list(t), "island") for t in (getattr(mesh, "sw_tris", None) or [])]
     paved = [i for i, (_, part) in enumerate(pieces) if part != "kerbstone"]
     region = np.zeros(len(pieces), int)
+    slot = np.full(len(pieces), -1, np.int64)
     if paved:
         cen = np.array([Wh[pieces[i][0]].mean(axis=0) for i in paved])
         region[paved] = frames.region_of(cen[:, 0], cen[:, 2])
+        slot[paved] = frames.slot_at(cen[:, 0], cen[:, 2])
     groups = {}
     for i, (vs, part) in enumerate(pieces):
         if part == "kerbstone":
-            groups.setdefault(("kerbstone", 0), []).append((vs, mesh.sw_owner[i], None))
+            groups.setdefault(("kerbstone", -1, 0), []).append((vs, mesh.sw_owner[i], None))
+            continue
+        k = int(region[i])
+        # a small island paved over completely: its island's material (a slot's, or the
+        # squares'), when it has one; else, as before, the sidewalk paving
+        s = int(slot[i]) if part == "island" else -1
+        own = frames.looks[s]["tiles"] if s >= 0 else (tiles.get("block") if part == "island" else None)
+        if own:
+            groups.setdefault(("island", s, frames.variant_of(k) % len(own)), []).append((vs, None, k))
         else:
-            k = int(region[i])
-            groups.setdefault(("paving", frames.variant_of(k) % len(tiles["sidewalk"])), []).append((vs, None, k))
+            groups.setdefault(("paving", -1, frames.variant_of(k) % len(tiles["sidewalk"])), []).append((vs, None, k))
 
     prims = []
     tone_all = None
-    for (part, vk), polys in sorted(groups.items()):
+    for (part, s, vk), polys in sorted(groups.items()):
+        ground = False
         if part == "paving":
             mat = add_tile_material(f"Sidewalk_paving_{vk + 1}", tiles["sidewalk"][vk],
                                     _sidewalk_kind(tiles["sidewalk"][vk]))
+        elif part == "island":
+            tile = (frames.looks[s]["tiles"] if s >= 0 else tiles["block"])[vk]
+            ground = _sidewalk_kind(tile) == "ground"
+            mat = add_tile_material(f"Island_{s + 1}_{vk + 1}" if s >= 0 else f"Block_paving_{vk + 1}", tile,
+                                    _sidewalk_kind(tile))
         else:
             mat = add_tile_material("Kerb_stone", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
@@ -1100,6 +1157,8 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                 else:                                          # paving: its area's layout
                     uvs.append(frames.uv(k, Wh[vi, 0], Wh[vi, 2]))
                     c = float(tone_all[vi]) if frames.regions else 1.0 + (float(vfac[vi]) - 1.0) * 0.5
+                    if ground:
+                        c *= float(frames.ground_tone(Wh[vi, 0], Wh[vi, 2])[0])
                 col.append((c, c, c, 1.0))
             return remap[key]
 
@@ -1390,10 +1449,17 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     cen = P32[t2].mean(axis=1)
     reg = frames.region_of(cen[:, 0], cen[:, 2])
     prims = []
-    # the squares' own material when one is chosen (cobblestone fans, say), else the sidewalks'
-    ptiles = tiles.get("block") or tiles["sidewalk"]
-    for vk in sorted({frames.variant_of(int(k)) % len(ptiles) for k in reg}):
-        sel = np.array([frames.variant_of(int(k)) % len(ptiles) == vk for k in reg])
+    # the squares' own material when one is chosen (cobblestone fans, say), else the
+    # sidewalks'; an island in a material slot, that slot's
+    default = tiles.get("block") or tiles["sidewalk"]
+    slots = frames.slot_at(cen[:, 0], cen[:, 2])            # by each triangle: two islands may share an area
+    keys = [(int(s), frames.variant_of(int(k)) % len(frames.looks[int(s)]["tiles"] if s >= 0 else default))
+            for s, k in zip(slots, reg)]
+    used_slots = {}
+    for key in sorted(set(keys)):
+        s, vk = key
+        ptiles = frames.looks[s]["tiles"] if s >= 0 else default
+        sel = np.array([kk == key for kk in keys])
         remap, pos, uvs, col, idx = {}, [], [], [], []
         for t, k in zip(t2[sel], reg[sel]):
             row = []
@@ -1407,8 +1473,14 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
         pos = np.array(pos)
         f = frames.tone(pos[:, 0], pos[:, 2])
         tile = ptiles[vk]
-        tile_material(f"Block_paving_{vk + 1}", Image.open(tile["path"]), images, materials,
-                      (tile_m, tile_m), _sidewalk_kind(tile), 0.85, surface, own=LIB.own_maps(tile))
+        kind = _sidewalk_kind(tile)
+        if kind == "ground":
+            f = f * frames.ground_tone(pos[:, 0], pos[:, 2])
+        if s >= 0:
+            used_slots[s] = used_slots.get(s, 0) + int(sel.sum())
+        tile_material(f"Island_{s + 1}_{vk + 1}" if s >= 0 else f"Block_paving_{vk + 1}", Image.open(tile["path"]),
+                      images, materials, (tile_m, tile_m), kind, 0.92 if kind == "ground" else 0.85, surface,
+                      own=LIB.own_maps(tile))
         prims.append({"positions": pos, "normals": np.tile([0, 1, 0], (len(pos), 1)), "uv0": np.array(uvs),
                       "colors": np.column_stack([f, f, f, np.ones_like(f)]),
                       "indices": np.array(idx), "material": len(materials) - 1})
@@ -1466,6 +1538,7 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     meshes.append({"name": "Blocks", "primitives": prims})
     return {"blocks": len(polys), "triangles": int(len(t2)), "quads": int(n_quads),
             "cell_m": cell_m, "kerb_faces": faces, "height_m": round(top, 3),
+            "island_slots": {int(s): {"name": frames.looks[s]["name"], "triangles": n} for s, n in used_slots.items()},
             "overlap_removed_m2": round(overlap_cut * mpp_out ** 2, 1)}
 
 

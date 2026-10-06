@@ -1,6 +1,6 @@
 # Scanned materials
 
-Measured colour, bump (normal) and roughness of real street surfaces, all
+Measured colour, bump (normal) and roughness of real street surfaces and desert ground, all
 CC0 (public domain) from Poly Haven (https://polyhaven.com/license), listed in
 `library.json` with their real size, source page and authors.
 
@@ -13,6 +13,10 @@ They are used in two ways (app/library.py, app/surface.py):
   three in exactly the same way, so every stone's bump sits on that stone.
   With "Match the tone of your tiles" its colour takes on the tone of your
   trained tiles.
+- **On islands** (Generate tab, Blocks and islands: island material slots,
+  and the Squares chip). Desert and ground (`kind: ground`) is laid as fresh
+  tiles made from the scan's patches, like the streets, so the scan does not
+  repeat; it keeps its own colour.
 - **As bump and roughness over your own tiles** (Surface detail: Scanned):
   the entry marked `bump_default` for asphalt and for concrete. Paving never,
   since its joints must line up with the paving in the colour.
@@ -22,7 +26,7 @@ convention, green up, as glTF wants), `<id>_rough.jpg` (roughness, grey, 0
 smooth to 1 rough). 1024 px, re-encoded from Poly Haven's 1K JPGs.
 
 To add a material: put its three maps here and add an entry to
-`library.json` (`id`, `name`, `kind`: asphalt, paving or concrete, `size_m`,
+`library.json` (`id`, `name`, `kind`: asphalt, paving, concrete or ground, `size_m`,
 the three file names, `source`, `authors`, `licence`). Only add maps whose
 licence allows bundling.
 
@@ -39,3 +43,12 @@ licence allows bundling.
 | Cobblestone fans, dark and worn | [Patterned Cobblestone](https://polyhaven.com/a/patterned_cobblestone) | 2.5 m | Rob Tuytel |
 | Concrete, exposed aggregate | [Concrete Floor 01](https://polyhaven.com/a/concrete_floor_01) | 2.0 m | Rob Tuytel |
 | Concrete, brushed | [Brushed Concrete 03](https://polyhaven.com/a/brushed_concrete_03) | 2.0 m | Amal Kumar |
+| Sand, pale desert | [Dense Sand](https://polyhaven.com/a/dense_sand) | 1.8 m | Dimitrios Savva |
+| Sand, pale with patches | [Sand 01](https://polyhaven.com/a/sand_01) | 1.5 m | Rob Tuytel |
+| Sand with gravel | [Gravelly Sand](https://polyhaven.com/a/gravelly_sand) | 2.48 m | Dario Barresi |
+| Gravel, sandy brown | [Sandy Gravel 02](https://polyhaven.com/a/sandy_gravel_02) | 2.53 m | Dario Barresi |
+| Gravel, pale grey | [Sandy Gravel](https://polyhaven.com/a/sandy_gravel) | 2.1 m | Charlotte Baglioni |
+| Dry ground with stones | [Dry Ground Rocks](https://polyhaven.com/a/dry_ground_rocks) | 4.0 m | Rob Tuytel |
+| Dry earth, brown | [Brown Mud Dry](https://polyhaven.com/a/brown_mud_dry) | 1.3 m | Rob Tuytel |
+| Cracked dry mud | [Mud Cracked Dry 03](https://polyhaven.com/a/mud_cracked_dry_03) | 1.5 m | Dario Barresi, Dimitrios Savva |
+| Red sand | [Red Sand](https://polyhaven.com/a/red_sand) | 3.0 m | Rohit Seervi |

@@ -18,10 +18,13 @@ from PIL import Image
 from scipy import ndimage as ndi
 
 DIR = Path(__file__).with_name("scans")
+# square: the blocks and islands between the roads; island: an island material
+# slot (desert ground, and what the sidewalks can have)
 KINDS_FOR_PART = {"street": ("asphalt", "concrete"),
                   "sidewalk": ("paving", "concrete", "asphalt"),
                   "kerb": ("concrete",),
-                  "square": ("paving", "concrete", "asphalt")}
+                  "square": ("ground", "paving", "concrete", "asphalt"),
+                  "island": ("ground", "paving", "concrete", "asphalt")}
 
 
 def materials():
