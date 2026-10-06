@@ -1155,6 +1155,7 @@ function stage({ lampMeshes = true, around = controls.target, lampCount = PHOTO_
   }
   scene.add(extra);
   st.extra = extra;
+  st.cutouts = decalCutouts();
   // every picture the tracer holds (colour, bump, roughness…) at one size: full while they fit
   const textures = new Set();
   world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) for(const k of TEXTURE_SLOTS) if(m[k]) textures.add(m[k]); });
@@ -1163,8 +1164,54 @@ function stage({ lampMeshes = true, around = controls.target, lampCount = PHOTO_
   return st;
 }
 
+// For the tracer, a see-through picture (a decal) also gets its alpha as a picture of its own
+// (alphaMap, kept in the colour channels) and an alpha test: its clear parts are left out
+// every time, whatever the graphics card makes of the picture's own alpha or of the random
+// numbers the tracer's see-through test draws. The live view keeps the material as it was
+const cutCache = new WeakMap();
+function cutoutOf(tex){
+  const img = tex && tex.image;
+  if(!img || !img.width) return null;
+  let c = cutCache.get(img);
+  if(c === undefined){
+    c = null;
+    try{
+      const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+      const g = cv.getContext('2d', { willReadFrequently: true });
+      g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, cv.width, cv.height), px = d.data;
+      let clear = 0;
+      for(let i = 0; i < px.length; i += 4){ const a = px[i + 3]; if(a < 250) clear++; px[i] = px[i + 1] = px[i + 2] = a; px[i + 3] = 255; }
+      if(clear){
+        g.putImageData(d, 0, 0);
+        c = new THREE.CanvasTexture(cv);
+        c.colorSpace = THREE.NoColorSpace; c.flipY = tex.flipY;
+        c.wrapS = tex.wrapS; c.wrapT = tex.wrapT;
+      }
+    }catch(_){ c = null; }
+    cutCache.set(img, c);
+  }
+  return c;
+}
+function decalCutouts(){
+  const done = [];
+  if(!world) return done;
+  world.traverse(o => {
+    if(!o.isMesh) return;
+    for(const m of [].concat(o.material)){
+      if(!m.transparent || !m.map || m.alphaMap || m.alphaTest || done.some(d => d[0] === m)) continue;
+      const cut = cutoutOf(m.map);
+      if(!cut) continue;
+      done.push([m]);
+      m.alphaMap = cut; m.alphaTest = 0.02;
+    }
+  });
+  return done;
+}
+
 function unstage(st){
   if(!st) return;
+  if(st.cutouts){ for(const [m] of st.cutouts){ m.alphaMap = null; m.alphaTest = 0; m.needsUpdate = true; } st.cutouts = null; }
   scene.environment = st.env; scene.background = st.bg; scene.environmentIntensity = st.envI;
   hemi.visible = true;
   if(stars) stars.visible = true;
@@ -1459,7 +1506,7 @@ function auxMaterial(m, kind){
   a.fog = false; a.toneMapped = false; a.transparent = false; a.blending = THREE.NoBlending;
   // a see-through picture (a decal): drawn where it is there, the road showing through the
   // rest, as the tracer sees it; drawn whole, its clear parts' black would darken the photo
-  if(m.transparent && (m.map || m.alphaMap) && !m.alphaTest) a.alphaTest = 0.5;
+  if(m.transparent && (m.map || m.alphaMap)) a.alphaTest = Math.max(m.alphaTest || 0, 0.5);
   a.onBeforeCompile = sh => {
     const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
     let out = kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`;

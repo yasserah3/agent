@@ -10,6 +10,8 @@
 // Wet streets (wetStreets uniform; materials with wetStreet true): a film of water over the
 // street surfaces as a clear coat, and puddles, smooth as a mirror, in the same places as
 // the live view's (the same pattern of the world position).
+// A see-through material with an alpha test too (a decal in the photo): what is under the
+// test is skipped every time, and the rest is still see-through as much as its alpha says.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
 import { SAH, MeshBVH, FloatVertexAttributeTexture, MeshBVHUniformStruct, UIntVertexAttributeTexture, BVHShaderGLSL } from 'three-mesh-bvh';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -6738,7 +6740,7 @@ const attenuate_hit_function = /* glsl */`
 						|| useAlphaTest && albedo.a < alphaTest
 
 						// opacity
-						|| material.transparent && ! useAlphaTest && albedo.a < rand( 10 )
+						|| material.transparent && albedo.a < rand( 10 )
 					)
 				) {
 
@@ -7301,7 +7303,7 @@ const get_surface_record_function = /* glsl */`
 			|| useAlphaTest && albedo.a < alphaTest
 
 			// opacity
-			|| material.transparent && ! useAlphaTest && albedo.a < rand( 3 )
+			|| material.transparent && albedo.a < rand( 3 )
 		) {
 
 			return SKIP_SURFACE;

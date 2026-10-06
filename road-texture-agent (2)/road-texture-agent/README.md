@@ -1516,7 +1516,11 @@ The **3D** tab shows the whole place in 3D, to look around:
     giving the same picture as OIDN itself (to within 0.1%). It works from
     the photo and the colour and direction of the surfaces in view, so edges
     and textures stay sharp. A decal's see-through parts show the road under
-    them in that colour too (as in the photo), never the picture's black. It runs after 4 samples, and again each time the
+    them in that colour too (as in the photo), never the picture's black.
+  - Decals in the photo: their clear parts are always left out (an alpha
+    test on a copy of the picture's alpha), so what the graphics card makes of
+    the picture's own alpha cannot turn them into black rectangles; soft
+    edges and half see-through paint stay as see-through as in the live view. It runs after 4 samples, and again each time the
     samples have grown four times over (16, 64, 256…); the panel says which
     one it shows. Save image denoises the latest samples first.
   - **If the photo comes out empty** (some graphics cards' drivers handle the
