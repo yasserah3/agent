@@ -60,7 +60,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.06-dcl1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.06-dcl2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1853,7 +1853,10 @@ def _decal_layers():
 
 @app.get("/api/decals")
 def list_decals():
-    return {"decals": [{**d, "url": f"/api/decals/{d['id']}/image"} for d in _decal_index()], "layers": _decal_layers()}
+    idx = _decal_index()
+    # layers saved before the four kinds of place come back in them (Place randomly: intersections or streets)
+    return {"decals": [{**d, "url": f"/api/decals/{d['id']}/image"} for d in idx],
+            "layers": DC.layer_list(_decal_layers(), {d["id"] for d in idx})}
 
 
 @app.post("/api/decals/import")

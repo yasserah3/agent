@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.06-dcl1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.06-dcl2';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1607,52 +1607,92 @@ const UI_VERSION = '2026.10.06-dcl1';   // must match VERSION in server.py
     renderDecals();
     $('#decalNote').textContent = S.gen.result ? 'Changed: press Place decals to lay them again.' : 'Generate texture lays them.';
   }
+  // a layer's places, in words (the card's second line)
+  function decalWhere(L){
+    const w = [];
+    if(L.inter) w.push(L.all_edges ? 'every junction edge' : L.even_edges ? 'two opposite edges per junction' : `${L.chance}% of junction edges`);
+    if(L.streets) w.push(`streets (weight ${L.streets_w})`);
+    if(L.jn) w.push(`junctions (weight ${L.jn_w})`);
+    if(L.edge) w.push(`${L.edge_side} kerb at junctions (weight ${L.edge_w})`);
+    return w.length ? w.join(', ') : 'off';
+  }
+  const DEC_JUNC = ['junctions', 'all_edges', 'even_edges'];
   function renderDecals(){
     const box = $('#decalList'); box.innerHTML = '';
     DEC.layers.forEach((L, i) => {
       const d = decalById(L.decal); if(!d) return;
-      const junc = !!(L.junctions || L.all_edges || L.even_edges);
       const card = document.createElement('div'); card.className = 'dc-layer';
       card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
           <button type="button" class="dc-x" title="Remove this decal layer">×</button></div>
-        <label class="dc-chk" title="Lay this decal: along the streets (never in a junction), or with one of the three below at the junctions' edges"><input type="checkbox" data-k="random"> Place randomly</label>
-        <div class="dc-sub">
-          <label class="dc-chk" title="At the edges of the junctions (where a street enters one): a random share of them"><input type="checkbox" data-k="junctions"> Place at junctions</label>
+        <label class="dc-chk" title="Across the street, right where it meets a junction, its top towards the junction (a crossing, a stop line)"><input type="checkbox" data-k="inter"> Place intersections</label>
+        <div class="dc-sub" data-for="inter">
+          <label class="dc-chk" title="At a random share of the junctions' edges"><input type="checkbox" data-k="junctions"> Place at junctions</label>
           <label class="dc-chk" title="At every edge of every junction"><input type="checkbox" data-k="all_edges"> At all edges</label>
           <label class="dc-chk" title="At two opposite edges of every junction: the two streets most in line"><input type="checkbox" data-k="even_edges"> Even edges</label>
+          <div class="dc-nums">
+            <label data-only="chance" title="The share of junction edges that get one">Share of edges (%)<input type="number" step="5" min="0" max="100" data-n="chance"></label>
+            <label title="0: right at the junction's edge. More: further back along the street">Back from the edge (m)<input type="number" step="0.5" min="0" data-n="back_m"></label>
+          </div>
+          <label class="dc-chk" title="Scaled to the road's width at that edge (a crossing from kerb to kerb)"><input type="checkbox" data-k="fit"> Fit the road's width</label>
+        </div>
+        <label class="dc-chk" title="Anywhere on the road, streets and junctions alike, at random"><input type="checkbox" data-k="streets"> Place on streets</label>
+        <div class="dc-sub" data-for="streets">
+          <label class="dc-w" title="More weight, more decals: 50 is about one per 400 m² of road, 100 twice as many">Weight<input type="range" min="0" max="300" step="5" data-w="streets_w"><output></output></label>
+        </div>
+        <label class="dc-chk" title="Inside the junctions only: T, Y, crossroads and any other junction"><input type="checkbox" data-k="jn"> Place on junctions</label>
+        <div class="dc-sub" data-for="jn">
+          <label class="dc-w" title="More weight, more decals: 100 is one per junction on average, 50 one in two junctions, 200 two each">Weight<input type="range" min="0" max="300" step="5" data-w="jn_w"><output></output></label>
+        </div>
+        <label class="dc-chk" title="Next to the junctions, against the right or the left kerb of each street, its top towards the junction (an arrow before a junction)"><input type="checkbox" data-k="edge"> Place junction edge</label>
+        <div class="dc-sub" data-for="edge">
+          <div class="dc-side" title="Which kerb, as seen driving along the street towards the junction">
+            <label class="dc-chk"><input type="radio" value="right"> Right</label>
+            <label class="dc-chk"><input type="radio" value="left"> Left</label>
+          </div>
+          <label class="dc-w" title="More weight, more decals: 100 is one at every street end, 50 at half of them, 200 two one behind the other">Weight<input type="range" min="0" max="300" step="5" data-w="edge_w"><output></output></label>
         </div>
         <div class="dc-nums">
-          <label title="Across the road; its length along the road follows the picture's proportions">Width (m)<input type="number" step="0.1" min="0.1" data-n="width_m"></label>
-          <label data-only="streets" title="On average one decal every this many metres of street">Every (m)<input type="number" step="5" min="2" data-n="every_m"></label>
-          <label data-only="chance" title="The share of junction edges that get one">Share of edges (%)<input type="number" step="5" min="0" max="100" data-n="chance"></label>
-          <label data-only="junction" title="0: just outside the junction. More: further back along the street (an arrow 10 m before the junction)">Back from the edge (m)<input type="number" step="0.5" min="0" data-n="back_m"></label>
+          <label data-only="width" title="Across the road; its length along the road follows the picture's proportions">Width (m)<input type="number" step="0.1" min="0.1" data-n="width_m"></label>
         </div>
-        <label class="dc-chk" data-only="junction" title="Scaled to the road's width at that edge (a crossing from kerb to kerb)"><input type="checkbox" data-k="fit"> Fit the road's width</label>
-        <label class="dc-chk" data-only="streets" title="Turned any way (a manhole cover, a stain); off, it lies along the street, facing either way"><input type="checkbox" data-k="spin"> Turn randomly</label>`;
+        <label class="dc-chk" data-only="spin" title="On streets and junctions: turned any way (a manhole cover, a stain); off, it lies along the street, facing either way"><input type="checkbox" data-k="spin"> Turn randomly</label>`;
       $('.dc-thumb', card).src = API + d.url;
       $('b', card).textContent = d.name;
+      const fitted = L.inter && L.fit && !(L.streets || L.jn || L.edge);
       const len = L.width_m * d.height / d.width;
-      $('small', card).textContent = `${(L.fit && junc) ? 'road width' : L.width_m + ' m'} × ${(L.fit && junc) ? 'in proportion' : len.toFixed(1) + ' m'}`
-        + (L.random ? (junc ? (L.all_edges ? ', every junction edge' : L.even_edges ? ', two opposite edges per junction' : `, ${L.chance}% of junction edges`)
-                            : `, about one per ${L.every_m} m of street`) : ', off');
+      $('small', card).textContent = (fitted ? 'road width × in proportion' : `${L.width_m} m × ${len.toFixed(1)} m`) + ', ' + decalWhere(L);
       $$('[data-k]', card).forEach(c => {
         const k = c.dataset.k; c.checked = !!L[k];
-        if(['junctions', 'all_edges', 'even_edges'].includes(k)) c.disabled = !L.random;
         c.addEventListener('change', () => {
           L[k] = c.checked;
-          // the three junction choices: one at a time
-          if(c.checked && ['junctions', 'all_edges', 'even_edges'].includes(k))
-            ['junctions', 'all_edges', 'even_edges'].forEach(o => { if(o !== k) L[o] = false; });
+          // the three intersection choices: one at a time, and one of them always on
+          if(DEC_JUNC.includes(k)){
+            if(c.checked) DEC_JUNC.forEach(o => { if(o !== k) L[o] = false; });
+            else if(!DEC_JUNC.some(o => L[o])) L[k] = true;
+          }
+          if(k === 'inter' && c.checked && !DEC_JUNC.some(o => L[o])) L.all_edges = true;
           decalsChanged();
         });
+      });
+      // right or left kerb: one of the two
+      const side = 'dcside' + i;
+      $$('.dc-side input', card).forEach(r => {
+        r.name = side; r.checked = (L.edge_side || 'right') === r.value;
+        r.addEventListener('change', () => { if(r.checked){ L.edge_side = r.value; decalsChanged(); } });
       });
       $$('[data-n]', card).forEach(n => {
         n.value = L[n.dataset.n];
         n.addEventListener('change', () => { const v = parseFloat(n.value); if(isFinite(v)) L[n.dataset.n] = v; decalsChanged(); });
       });
+      $$('[data-w]', card).forEach(n => {
+        const out = n.nextElementSibling;
+        n.value = L[n.dataset.w] ?? 50; out.textContent = n.value;
+        n.addEventListener('input', () => { out.textContent = n.value; });
+        n.addEventListener('change', () => { L[n.dataset.w] = +n.value; decalsChanged(); });
+      });
+      $$('[data-for]', card).forEach(e => { e.hidden = !L[e.dataset.for]; });
       $$('[data-only]', card).forEach(e => {
         const o = e.dataset.only;
-        e.hidden = !L.random || (o === 'streets' ? junc : o === 'junction' ? !junc : !L.junctions);
+        e.hidden = o === 'chance' ? !L.junctions : o === 'spin' ? !(L.streets || L.jn) : o === 'width' ? fitted : false;
       });
       $('.dc-x', card).addEventListener('click', async () => {
         DEC.layers.splice(i, 1);
@@ -1675,13 +1715,21 @@ const UI_VERSION = '2026.10.06-dcl1';   // must match VERSION in server.py
       const d = await api('/api/decals/import', { method:'POST', body: fd });
       DEC.decals.push(d);
       const wide = d.width >= 1.5 * d.height;
-      DEC.layers.push({ decal: d.id, random: true, junctions: false, all_edges: false, even_edges: false,
-                        width_m: wide ? 3 : 1, every_m: 40, chance: 50, back_m: 0, fit: wide, spin: false });
+      // a wide picture (a crossing): across every junction edge, kerb to kerb; else here and there on the streets
+      DEC.layers.push({ decal: d.id, width_m: wide ? 3 : 1, spin: false,
+                        inter: wide, junctions: false, all_edges: true, even_edges: false, chance: 50, back_m: 0, fit: wide,
+                        streets: !wide, streets_w: 50, jn: false, jn_w: 50, edge: false, edge_side: 'right', edge_w: 100 });
       log(`Decal ${d.name} imported (${d.width} × ${d.height} px${d.see_through ? '' : ', no transparent background: it will show as a rectangle'}): `
         + 'set where it goes, then Place decals.', d.see_through ? 'ok' : 'bad');
       decalsChanged();
     }catch(e){ log('Decal not imported: ' + e.message, 'bad'); }
   });
+  // "12 at intersections, 30 on streets": a layer's decals by where they lie
+  const DEC_AT = { intersection: 'at intersections', edge: 'at junction edges', junction: 'in junctions', street: 'on streets' };
+  const decalCounted = l => {
+    const parts = Object.keys(DEC_AT).filter(k => l[k]);
+    return parts.length > 1 ? ' (' + parts.map(k => `${l[k]} ${DEC_AT[k]}`).join(', ') + ')' : parts.length ? ' ' + DEC_AT[parts[0]] : '';
+  };
   // lay the decals on the generated texture: their places, the Decals layer, and the
   // road texture with them painted in or not (Decals, under 3D model)
   async function applyDecals(){
@@ -1696,7 +1744,7 @@ const UI_VERSION = '2026.10.06-dcl1';   // must match VERSION in server.py
       S.gen.result.urls.result = res.urls.result;
       log(`Decals: ${res.count.toLocaleString()} laid, ${mode === 'painted' ? 'painted into the road texture and part of the road in the 3D model'
                                                             : 'on a layer of their own and an object of their own in the 3D model'}`
-        + (res.layers.length ? ': ' + res.layers.map(l => `${l.count} ${l.name}` + (l.edges ? ` at junction edges` : l.streets ? ' along streets' : '')).join(', ') : '') + '.', 'ok');
+        + (res.layers.length ? ': ' + res.layers.map(l => `${l.count} ${l.name}` + decalCounted(l)).join(', ') : '') + '.', 'ok');
       $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
       try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
       if(['result', 'decals'].includes(S.gen.layer)) await showLayer(S.gen.layer);

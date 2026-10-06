@@ -578,7 +578,7 @@ app/streets.py       inner streets drawn between objects, built into the street 
 app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
 app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
 app/islands.py       the islands between the roads: their numbers and outlines, slots, the islands texture
-app/decals.py        decals: where each layer's go (streets, junction edges), painted into the texture, 3D quads
+app/decals.py        decals: where each layer's go (intersections, streets, junctions, junction edges), painted into the texture, 3D quads
 app/formats.py       the 3D model as FBX (binary 7.4) and OBJ, and parts combined, read from the GLB
 app/looks.py         the Look panel's LUTs (.cube, Hald CLUT) and saved looks; app/looks holds bundled ones
 app/images.py        loading, hashing, noise isolation
@@ -997,27 +997,44 @@ Pictures laid on the streets: arrows, crossings, manhole covers, stains,
 patches. In the Generate tab, **Decals**, **Import decal (PNG)** adds one as a
 layer (a PNG with a transparent background; WebP and JPEG work too). The top
 of the picture is its front, its width goes across the road and its length
-along it, in proportion. Each layer has where it goes:
+along it, in proportion. A layer can use any of these four at once:
 
-- **Place randomly** lays it along the streets, never inside a junction:
-  about one every **Every (m)** metres of street, at a random point across the
-  road, lying along it facing either way (**Turn randomly**: any way, for
-  manhole covers and stains). Never where the road is narrower than it, never
-  two of the same layer on top of each other.
-- With one of these three (one at a time), it goes to the junctions instead:
-  - **Place at junctions**: at the edges of the junctions (where a street
-    enters one), a random **Share of edges (%)** of them.
-  - **At all edges**: at every edge of every junction.
-  - **Even edges**: at two opposite edges of every junction: the two streets
+- **Place intersections**: across the street right where it meets a
+  junction, its top towards the junction (a crossing, a stop line). With one
+  of these three (one at a time):
+  - **Place at junctions**: a random **Share of edges (%)** of the junctions'
+    edges.
+  - **At all edges**: every edge of every junction.
+  - **Even edges**: two opposite edges of every junction: the two streets
     most in line (the through road of a T, either road of a crossroads).
 
-  At an edge it lies across the street just outside the junction, its top
-  towards the junction (an arrow before a junction points into it), turned
-  with that street's own centre line. **Back from the edge (m)** moves it
-  further along the street (an arrow 10 m before the junction). **Fit the
-  road's width** scales it to the road's width there (a crossing from kerb to
-  kerb). A short street between two junctions gets one, not one from each end.
-- **Width (m)**: its size across the road (when not fitted).
+  The junction's edge is where the street really meets it: walking along the
+  street towards the junction, the place where the road starts to widen (the
+  kerb corners begin), so the decal sits right there, not back at the
+  junction's middle. **Back from the edge (m)** moves it further along the
+  street. **Fit the road's width** scales it to the road's width there (a
+  crossing from kerb to kerb). A short street between two junctions gets one,
+  not one from each end; two crossings may touch at a junction's corner.
+- **Place on streets**: anywhere on the road, streets and junctions alike, at
+  random, lying along the road facing either way. **Weight**: more weight,
+  more decals; 50 is about one per 400 m² of road, 100 twice that, 0 none.
+- **Place on junctions**: inside the junctions only (T, Y, crossroads and any
+  other kind), at random. **Weight**: 100 is one per junction on average, 50
+  one in two junctions, 200 two each.
+- **Place junction edge**: next to the junction, against the **Right** or the
+  **Left** kerb (one of the two; as seen driving along the street towards the
+  junction), 0.3 m from the kerb (plus half a mask pixel), its top towards
+  the junction (an arrow before a junction). Behind a crossing when there is
+  one. **Weight**: 100 is one at every street end, 50 at half of them, 200
+  two, one behind the other.
+
+**Width (m)** is its size across the road (not used when fitted). **Turn
+randomly** (on streets and junctions) turns it any way, for manhole covers
+and stains. Decals never lie where the road is narrower than them, never two of
+a layer on top of each other, and the later kinds keep clear of the earlier
+ones (crossings first, then junction-edge decals, then junctions, then
+streets). Layers saved before this (Place randomly) come back as Place
+intersections (with a junction choice) or Place on streets.
 
 The layers are kept on the server for every map. **Generate texture** lays
 them, and **Place decals** lays them again after a change (quickly: the
@@ -1036,9 +1053,10 @@ Under 3D model, **Decals** (beside Markings) sets how they lie:
   its surface: tiles repeat, so they cannot be painted into them). With
   Combine streets and kerbs they are in "Streets".
 
-On the 900 × 700 test crop at 4× (3600 × 2800): 526 decals (156 arrows on even
-edges 6 m back, 236 fitted crossings on all edges, 134 manhole covers along
-streets) in 9 s.
+On the 900 × 700 test crop (1.1 m per pixel): 965 decals in under 4 s (257
+fitted crossings at all intersection edges, 251 arrows at the right kerb at
+weight 100, 119 oil stains in junctions at weight 150, 338 manhole covers on
+streets at weight 30).
 
 ## Workspace location
 

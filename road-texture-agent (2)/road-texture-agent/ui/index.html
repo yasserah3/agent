@@ -145,6 +145,11 @@
   .dc-nums label{ display:flex; flex-direction:column; font-size:11px; color:var(--muted); gap:2px; }
   .dc-nums input{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:3px 6px; color:var(--ink); width:100%; }
   .dc-nums label[hidden]{ display:none; }
+  .dc-sub[hidden], .dc-chk[hidden]{ display:none; }
+  .dc-side{ display:flex; gap:14px; }
+  .dc-w{ display:grid; grid-template-columns:auto 1fr 30px; align-items:center; gap:8px; font-size:11px; color:var(--muted); margin-top:5px; }
+  .dc-w input{ accent-color:var(--blue); width:100%; margin:0; }
+  .dc-w output{ color:var(--ink); text-align:right; font-variant-numeric:tabular-nums; }
   .modal{ position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; padding:16px; }
   .modal[hidden]{ display:none; }
   .modal-card{ width:440px; max-width:100%; background:var(--panel); border:1px solid var(--line); border-radius:10px;
