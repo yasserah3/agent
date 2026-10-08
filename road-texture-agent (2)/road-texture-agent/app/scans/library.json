@@ -17,7 +17,10 @@
         "Dimitrios Savva"
       ],
       "licence": "CC0 1.0",
-      "bump_default": "asphalt"
+      "bump_default": "asphalt",
+      "height": "asphalt_pit_lane_height.jpg",
+      "ao": "asphalt_pit_lane_ao.jpg",
+      "relief_m": 0.004
     },
     {
       "id": "clean_asphalt",
@@ -35,7 +38,10 @@
       "authors": [
         "Dimitrios Savva"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "clean_asphalt_height.jpg",
+      "ao": "clean_asphalt_ao.jpg",
+      "relief_m": 0.004
     },
     {
       "id": "asphalt_04",
@@ -54,7 +60,10 @@
         "Jenelle van Heerden",
         "Sergej Majboroda"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "asphalt_04_height.jpg",
+      "ao": "asphalt_04_ao.jpg",
+      "relief_m": 0.008
     },
     {
       "id": "concrete_pavers_02",
@@ -72,7 +81,10 @@
       "authors": [
         "Amal Kumar"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "concrete_pavers_02_height.jpg",
+      "ao": "concrete_pavers_02_ao.jpg",
+      "relief_m": 0.012
     },
     {
       "id": "square_concrete_pavers",
@@ -90,7 +102,10 @@
       "authors": [
         "Amal Kumar"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "square_concrete_pavers_height.jpg",
+      "ao": "square_concrete_pavers_ao.jpg",
+      "relief_m": 0.012
     },
     {
       "id": "hexagonal_concrete_paving",
@@ -108,7 +123,10 @@
       "authors": [
         "Stephan Seeliger"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "hexagonal_concrete_paving_height.jpg",
+      "ao": "hexagonal_concrete_paving_ao.jpg",
+      "relief_m": 0.01
     },
     {
       "id": "brick_pavement",
@@ -126,7 +144,10 @@
       "authors": [
         "Charlotte Baglioni"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "brick_pavement_height.jpg",
+      "ao": "brick_pavement_ao.jpg",
+      "relief_m": 0.015
     },
     {
       "id": "floor_pattern_02",
@@ -146,7 +167,10 @@
       "authors": [
         "Rob Tuytel"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "floor_pattern_02_height.jpg",
+      "ao": "floor_pattern_02_ao.jpg",
+      "relief_m": 0.008
     },
     {
       "id": "patterned_cobblestone",
@@ -166,7 +190,10 @@
       "authors": [
         "Rob Tuytel"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "patterned_cobblestone_height.jpg",
+      "ao": "patterned_cobblestone_ao.jpg",
+      "relief_m": 0.025
     },
     {
       "id": "concrete_floor_01",
@@ -185,7 +212,10 @@
         "Rob Tuytel"
       ],
       "licence": "CC0 1.0",
-      "bump_default": "concrete"
+      "bump_default": "concrete",
+      "height": "concrete_floor_01_height.jpg",
+      "ao": "concrete_floor_01_ao.jpg",
+      "relief_m": 0.003
     },
     {
       "id": "brushed_concrete_03",
@@ -204,7 +234,10 @@
       "authors": [
         "Amal Kumar"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "brushed_concrete_03_height.jpg",
+      "ao": "brushed_concrete_03_ao.jpg",
+      "relief_m": 0.003
     },
     {
       "id": "dense_sand",
@@ -222,7 +255,10 @@
       "authors": [
         "Dimitrios Savva"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "dense_sand_height.jpg",
+      "ao": "dense_sand_ao.jpg",
+      "relief_m": 0.012
     },
     {
       "id": "sand_01",
@@ -240,7 +276,10 @@
       "authors": [
         "Rob Tuytel"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "sand_01_height.jpg",
+      "ao": "sand_01_ao.jpg",
+      "relief_m": 0.015
     },
     {
       "id": "gravelly_sand",
@@ -258,7 +297,10 @@
       "authors": [
         "Dario Barresi"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "gravelly_sand_height.jpg",
+      "ao": "gravelly_sand_ao.jpg",
+      "relief_m": 0.02
     },
     {
       "id": "sandy_gravel_02",
@@ -276,7 +318,10 @@
       "authors": [
         "Dario Barresi"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "sandy_gravel_02_height.jpg",
+      "ao": "sandy_gravel_02_ao.jpg",
+      "relief_m": 0.025
     },
     {
       "id": "sandy_gravel",
@@ -294,7 +339,10 @@
       "authors": [
         "Charlotte Baglioni"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "sandy_gravel_height.jpg",
+      "ao": "sandy_gravel_ao.jpg",
+      "relief_m": 0.03
     },
     {
       "id": "dry_ground_rocks",
@@ -312,7 +360,10 @@
       "authors": [
         "Rob Tuytel"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "dry_ground_rocks_height.jpg",
+      "ao": "dry_ground_rocks_ao.jpg",
+      "relief_m": 0.06
     },
     {
       "id": "brown_mud_dry",
@@ -330,7 +381,10 @@
       "authors": [
         "Rob Tuytel"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "brown_mud_dry_height.jpg",
+      "ao": "brown_mud_dry_ao.jpg",
+      "relief_m": 0.02
     },
     {
       "id": "mud_cracked_dry_03",
@@ -349,7 +403,10 @@
         "Dario Barresi",
         "Dimitrios Savva"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "mud_cracked_dry_03_height.jpg",
+      "ao": "mud_cracked_dry_03_ao.jpg",
+      "relief_m": 0.02
     },
     {
       "id": "red_sand",
@@ -367,7 +424,10 @@
       "authors": [
         "Rohit Seervi"
       ],
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "height": "red_sand_height.jpg",
+      "ao": "red_sand_ao.jpg",
+      "relief_m": 0.015
     }
   ]
 }

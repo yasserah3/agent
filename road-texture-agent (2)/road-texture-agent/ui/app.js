@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.06-dcl3';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];

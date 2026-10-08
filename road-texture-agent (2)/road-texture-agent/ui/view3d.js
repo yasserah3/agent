@@ -54,7 +54,7 @@ const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emis
 
 // the Light panel: the sun's (or moon's) strength, the street lamps' brightness
 // and colour, and how wet the streets are, kept in this browser for the next time
-const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0, puddles: 0.4, mirror: true };
+const LIGHT = { sun: 1, lamps: 1, colour: '#ffcf96', wet: 0, puddles: 0.4, mirror: true, relief: 1 };
 try{ Object.assign(LIGHT, JSON.parse(localStorage.getItem('rta.view3d.light') || '{}')); }catch(e){}
 const saveLight = () => { try{ localStorage.setItem('rta.view3d.light', JSON.stringify(LIGHT)); }catch(e){} };
 // the Ground plane panel: the land round the place, moved, turned and sized (metres);
@@ -924,6 +924,7 @@ async function generate(keep = false){
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
     dropBakes();
     world = gltf.scene;
+    await loadRelief(gltf);
     prepare(world);
     scene.add(world);
     const g = scene.getObjectByName('grid'); if(g) scene.remove(g);
@@ -1291,6 +1292,9 @@ function wetForPhoto(on){
   if(!u) return;
   const wet = on ? LIGHT.wet : 0;
   u.value.set(wet, wet > 0 ? LIGHT.puddles * Math.min(1, wet * 1.5) : 0, STREET_Y, 0);
+  // and the surfaces' relief, as deep as Surface relief says (the bake records light on flat ground)
+  const r = photo.pt._pathTracer.material.uniforms.reliefPT;
+  if(r) r.value.set(on ? LIGHT.relief : 0, 0);
 }
 
 function stopPhoto(why){
@@ -1507,7 +1511,10 @@ function auxMaterial(m, kind){
   // a see-through picture (a decal): drawn where it is there, the road showing through the
   // rest, as the tracer sees it; drawn whole, its clear parts' black would darken the photo
   if(m.transparent && (m.map || m.alphaMap)) a.alphaTest = Math.max(m.alphaTest || 0, 0.5);
+  const rel = RELIEF.get(m);
   a.onBeforeCompile = sh => {
+    // the colour and direction where the photo's rays meet the relief
+    if(rel && (kind === 'albedo' || kind === 'normal')) reliefPatch(sh, rel, false);
     const normal = sh.fragmentShader.includes('#include <normal_fragment_begin>') ? 'normal' : 'vec3(0.0)';
     let out = kind === 'albedo' ? 'gl_FragColor = vec4(clamp(diffuseColor.rgb, 0.0, 1.0), 1.0);' : `gl_FragColor = vec4(${normal}, 1.0);`;
     if(kind === 'dist'){
@@ -1526,7 +1533,7 @@ function auxMaterial(m, kind){
     }
     sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n' + out);
   };
-  a.customProgramCacheKey = () => 'aux-' + kind;
+  a.customProgramCacheKey = () => 'aux-' + kind + (rel && (kind === 'albedo' || kind === 'normal') ? '-relief' : '');
   return c[kind] = a;
 }
 
@@ -1760,10 +1767,108 @@ if( bakeOn > 0.5 ){
 
 // a material that can take the baked light (prepare); a street surface (wet: the street
 // materials Wet roads works on) also the wet roads' reflections and puddles
+// ----------------------------------------------------------------- surface relief
+// Each street, sidewalk, kerb, block and island material comes with a height map
+// (its extras: relief, the texture and the metres its 0 to 1 spans): the blue of the
+// picture whose red is the occlusion and green the roughness. The live view
+// uses it for parallax occlusion: for every pixel, the view ray is followed down
+// into the relief until it meets the surface, and every picture of the material
+// (colour, bump, roughness, occlusion) is read there, so stones stand up, hide the
+// ones behind them and move as the camera does, with no extra faces. From that point
+// a second, short walk towards the sun (and the moon) finds whether a stone stands in
+// the way: the stones' own shadows. Fades out with distance (Surface relief: 0 is off).
+const RELIEF = new WeakMap();                              // material -> { map, depth (m) }
+const RELIEF_U = { reliefScale: { value: LIGHT.relief }, reliefFar: { value: 40 } };
+async function loadRelief(gltf){
+  const mats = new Set();
+  gltf.scene.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) mats.add(m); });
+  await Promise.all([...mats].map(async m => {
+    const r = m.userData && m.userData.relief;
+    if(!r || !(r.depth_m > 0) || r.index == null) return;
+    try{
+      const map = await gltf.parser.getDependency('texture', r.index);
+      map.colorSpace = THREE.NoColorSpace;
+      RELIEF.set(m, { map, depth: r.depth_m });
+      m.pomMap = map; m.pomDepth = r.depth_m;                         // read by the path tracer only
+    }catch(_){ /* without its height map the material stays flat */ }
+  }));
+}
+const POM_PARS = `
+uniform sampler2D pomMap;
+uniform float pomDepth, reliefScale, reliefFar;
+varying vec2 vPomUv;
+vec2 pomOff = vec2( 0.0 ), pomDx = vec2( 0.0 ), pomDy = vec2( 0.0 );
+vec3 pomGu = vec3( 0.0 ), pomGv = vec3( 0.0 ), pomN = vec3( 0.0, 0.0, 1.0 );
+float pomDet = 1.0, pomD = 0.0, pomH = 1.0, pomFill = 0.0;
+float pomHeight( vec2 uv ){ return textureGrad( pomMap, uv, pomDx, pomDy ).b; }   // blue: the height
+// the uv change for a move w across the surface (view space, metres)
+vec2 pomUv( vec3 w ){ return vec2( dot( pomGu, w ), dot( pomGv, w ) ) / pomDet; }
+void pomMarch( vec3 N ){
+  // the uv's gradients over the surface from the pixel's neighbours: no tangents needed
+  vec3 q0 = dFdx( - vViewPosition ), q1 = dFdy( - vViewPosition );
+  pomDx = dFdx( vPomUv ); pomDy = dFdy( vPomUv );
+  vec3 q1p = cross( q1, N ), q0p = cross( N, q0 );
+  pomGu = q1p * pomDx.x + q0p * pomDy.x;
+  pomGv = q1p * pomDx.y + q0p * pomDy.y;
+  pomDet = dot( q0, cross( q1, N ) );
+  pomN = N;
+  vec3 E = normalize( vViewPosition );
+  float En = dot( E, N );
+  pomD = pomDepth * reliefScale * ( 1.0 - smoothstep( reliefFar * 0.5, reliefFar, length( vViewPosition ) ) ) * ( 1.0 - pomFill );
+  if( pomD <= 0.0 || En <= 0.05 || abs( pomDet ) < 1e-30 ){ pomD = 0.0; return; }
+  // down the view ray to the full depth: this far across the surface, in uv
+  vec2 duv = pomUv( ( N * En - E ) / max( En, 0.2 ) ) * pomD;
+  float n = floor( mix( 24.0, 8.0, En ) ), dl = 1.0 / n, layer = 0.0;
+  float h = pomHeight( vPomUv ), prevH = h, prevL = 0.0;
+  for( int i = 0; i < 24; i ++ ){
+    if( float( i ) >= n || 1.0 - h <= layer ) break;
+    prevH = h; prevL = layer; layer += dl;
+    h = pomHeight( vPomUv + duv * layer );
+  }
+  // between the last two steps, where the ray met the surface
+  float a = ( 1.0 - h ) - layer, b = ( 1.0 - prevH ) - prevL;
+  layer = mix( prevL, layer, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
+  pomOff = duv * layer;
+  pomH = 1.0 - layer;
+}
+// light from L (view space, towards the light) on the point found: in the shade of the
+// relief between it and the light, softer the farther off the stone
+float pomShadow( vec3 L ){
+  float Ln = dot( L, pomN ), d0 = 1.0 - pomH;
+  if( pomD <= 0.0 || Ln <= 0.0 || d0 < 0.01 ) return 1.0;
+  vec2 duv = pomUv( ( L - pomN * Ln ) / max( Ln, 0.08 ) ) * pomD * d0;
+  vec2 uv0 = vPomUv + pomOff;
+  float sh = 0.0;
+  for( int i = 1; i <= 8; i ++ ){
+    float f = float( i ) / 8.0;
+    sh = max( sh, ( pomHeight( uv0 + duv * f ) - ( 1.0 - d0 * ( 1.0 - f ) ) ) * ( 1.0 - 0.5 * f ) );
+  }
+  return 1.0 - clamp( sh * 8.0, 0.0, 1.0 );
+}
+`;
+const POM_CALL = '\npomMarch( normalize( vNormal ) * ( gl_FrontFacing ? 1.0 : -1.0 ) );\n';
+// a chunk with its pictures read where the view ray met the relief
+const pomChunk = name => THREE.ShaderChunk[name]
+  .replace(/texture2D\( (map|normalMap|roughnessMap|metalnessMap|aoMap), (v\w+Uv) \)/g, 'textureGrad( $1, $2 + pomOff, pomDx, pomDy )');
+function reliefPatch(sh, rel, wet){
+  Object.assign(sh.uniforms, RELIEF_U);
+  sh.uniforms.pomMap = { value: rel.map };
+  sh.uniforms.pomDepth = { value: rel.depth };
+  sh.vertexShader = 'varying vec2 vPomUv;\n' + sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\nvPomUv = uv;');
+  let f = sh.fragmentShader.replace('void main() {', POM_PARS + '\nvoid main() {')
+    .replace('#include <map_fragment>', (wet ? 'pomFill = rPud;' : '') + POM_CALL + pomChunk('map_fragment'));
+  for(const c of ['normal_fragment_maps', 'roughnessmap_fragment', 'metalnessmap_fragment', 'aomap_fragment'])
+    f = f.replace(`#include <${c}>`, pomChunk(c));
+  f = f.replace('#include <lights_fragment_begin>', THREE.ShaderChunk.lights_fragment_begin.replace(
+    'getDirectionalLightInfo( directionalLight, directLight );',
+    'getDirectionalLightInfo( directionalLight, directLight );\n\t\tdirectLight.color *= pomShadow( directionalLight.direction );'));
+  sh.fragmentShader = f;
+}
+
 function bakePatch(m){
   if(!m.isMeshStandardMaterial || m.userData.bakeable) return;
   m.userData.bakeable = true;
-  const wet = !!m.userData.dry;
+  const wet = !!m.userData.dry, rel = RELIEF.get(m);
   m.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, BAKE_U);
     if(wet) Object.assign(sh.uniforms, REFL_U);
@@ -1773,13 +1878,15 @@ function bakePatch(m){
       + 'uniform highp sampler2D vbMap;\nuniform float vbOn;\nuniform int vbN;\nuniform vec3 vbPos;\nuniform mat4 vbMat[ 4 ];\nuniform vec4 vbRect[ 4 ];\n'
       + 'varying vec3 vBakeWorld;\nvarying float vBakeUp;\nvarying vec3 vBakeN;\n'
       + sh.fragmentShader.replace('#include <lights_fragment_end>', '#include <lights_fragment_end>\n' + BAKE_FRAG);
-    if(wet) f = REFL_PARS + f.replace('#include <color_fragment>', '#include <color_fragment>\n' + REFL_PUDDLE)
+    // the puddles first: their water fills the relief
+    if(wet) f = REFL_PARS + f.replace('#include <map_fragment>', REFL_PUDDLE + '\n#include <map_fragment>')
       .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix( roughnessFactor, 0.03, rPud );')
       .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\nnormal = normalize( mix( normal, nonPerturbedNormal, 0.9 * rPud ) );')
       .replace('#include <lights_fragment_maps>', '#include <lights_fragment_maps>\n' + REFL_FRAG);
     sh.fragmentShader = f;
+    if(rel) reliefPatch(sh, rel, wet);
   };
-  m.customProgramCacheKey = () => wet ? 'bakeable-wet' : 'bakeable';
+  m.customProgramCacheKey = () => (wet ? 'bakeable-wet' : 'bakeable') + (rel ? '-relief' : '');
 }
 
 // ----------------------------------------------------------------- wet roads: reflections
@@ -2273,6 +2380,7 @@ const showLight = () => {
   $('#puddles').value = Math.round(LIGHT.puddles * 100); $('#puddlesVal').textContent = Math.round(LIGHT.puddles * 100) + '%';
   $('#liveMirror').checked = !!LIGHT.mirror;
   $('#puddles').disabled = !(LIGHT.wet > 0); $('#liveMirror').disabled = !(LIGHT.wet > 0);
+  $('#reliefAmt').value = Math.round(LIGHT.relief * 100); $('#reliefAmtVal').textContent = Math.round(LIGHT.relief * 100) + '%';
 };
 showLight();
 $('#sunStrength').addEventListener('input', () => {
@@ -2299,6 +2407,11 @@ $('#puddles').addEventListener('input', () => {
   if(photo && photo.on) stopPhoto();
 });
 $('#liveMirror').addEventListener('change', () => { LIGHT.mirror = $('#liveMirror').checked; saveLight(); });
+$('#reliefAmt').addEventListener('input', () => {
+  LIGHT.relief = +$('#reliefAmt').value / 100; showLight(); saveLight();
+  RELIEF_U.reliefScale.value = LIGHT.relief;
+  if(photo && photo.on) stopPhoto();
+});
 $('#lampColour').addEventListener('input', () => {
   LIGHT.colour = $('#lampColour').value; saveLight();
   if(photo && photo.on) stopPhoto();

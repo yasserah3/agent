@@ -380,10 +380,19 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
     A material for a repeating tile: its colour, and with surface, the bump
     (normal map) and roughness (app/surface.py): "scan" from a bundled scan of
     the kind where there is one, else from the tile's grain; "grain" always from
-    the grain; False: colour only. own: the tile's own (normal, roughness, name)
-    pictures, made with its colour (library materials), used unless surface is
-    off. size_m: the width and height the picture covers; kind: asphalt, paving
-    or concrete. Returns the material's index.
+    the grain; False: colour only. own: the tile's own (normal, roughness, name,
+    height, ao, relief_m) pictures, made with its colour (library materials),
+    used unless surface is off. size_m: the width and height the picture
+    covers; kind: asphalt, paving or concrete. Returns the material's index.
+
+    With surface, also its ambient occlusion (glTF occlusionTexture: the gaps
+    between stones and the pores, in the shade of the sky) and its height map,
+    which glTF has no slot for. All three grey maps share one picture, as glTF
+    lays them out: occlusion in red, roughness in green, and the height in blue
+    (metalness's channel, unused: the metallic factor is 0). The material's
+    extras say so: "relief": {"index": the texture, "channel": 2, "depth_m":
+    metres from its 0 to its 1}. The 3D tab and the photo render use it for
+    parallax (no extra faces); other programs ignore it.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=92)
@@ -391,10 +400,12 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
            "metallicFactor": 0.0, "roughnessFactor": roughness}
     mat = {"name": name, "doubleSided": True, "pbrMetallicRoughness": pbr}
     if surface:
-        nrm, rgh, used = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan", own=own)
-        mat["extras"] = {"surface": used}
+        nrm, rgh, hgt, ao, used, relief = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan", own=own)
+        orh = _image_index(images, SF.pack_orh(rgh, ao, hgt), "image/jpeg")
+        mat["extras"] = {"surface": used, "relief": {"index": orh, "channel": 2, "depth_m": relief}}
         mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
-        pbr["metallicRoughnessTexture"] = {"index": _image_index(images, rgh, "image/jpeg")}
+        mat["occlusionTexture"] = {"index": orh}
+        pbr["metallicRoughnessTexture"] = {"index": orh}
         pbr["roughnessFactor"] = 1.0                      # the map holds it
     materials.append(mat)
     return len(materials) - 1
@@ -1323,7 +1334,7 @@ def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
     For a tile with its own bump and roughness (a library material): those maps
     laid exactly as marked_texture lays its colour (the same repeats, stretch
     and size), without the paint, which app/surface.py adds from the colour.
-    (normal, roughness, name) pictures, or None.
+    (normal, roughness, name, height, ao, relief_m) pictures, or None.
     """
     own = LIB.own_maps(tile)
     if own is None:
@@ -1338,8 +1349,14 @@ def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
     nn = LIB._resize(np.tile(n, (k_across, k_along, 1)), out_w, out_h)
     rr = LIB._resize(np.tile(r, (k_across, k_along)), out_w, out_h)
     nn = LIB.squeeze_normals(nn, (k_along * tile_m / cycle_m, k_across * tile_m / across_m))
+    grey = lambda a: Image.fromarray(np.clip(a * 255 + 0.5, 0, 255).astype(np.uint8))
+    extra = [None, None]
+    for i, pic in enumerate(own[3:5]):
+        if pic is not None:
+            a = np.asarray(pic).astype(np.float32) / 255.0
+            extra[i] = grey(LIB._resize(np.tile(a, (k_across, k_along)), out_w, out_h))
     return (Image.fromarray(np.clip((nn * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)),
-            Image.fromarray(np.clip(rr * 255 + 0.5, 0, 255).astype(np.uint8)), own[2])
+            grey(rr), own[2], extra[0], extra[1], own[5] if extra[0] is not None else 0.0)
 
 
 def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_rgb, max_px=2048):

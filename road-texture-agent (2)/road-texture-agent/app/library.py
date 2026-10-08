@@ -3,11 +3,14 @@ The scanned material library (app/scans, CC0 scans from Poly Haven): real
 street surfaces with their own colour, bump and roughness.
 
 A library material stands in for a part's material tile (streets, sidewalks or
-kerbs). Its three pictures are laid over the tile together: repeated a whole
-number of times each way, so the tile still joins itself, and stretched by
-the little it takes to fit, all three in exactly the same way, so every
-stone's bump and roughness sit on that stone. Optionally its colour takes on
-the tone of the trained tile it replaces.
+kerbs). Its pictures (colour, bump, roughness, height and ambient occlusion)
+are laid over the tile together: repeated a whole number of times each way, so
+the tile still joins itself, and stretched by the little it takes to fit, all
+in exactly the same way, so every stone's bump, height and shade sit on that
+stone. Optionally its colour takes on the tone of the trained tile it replaces.
+The height (0 lowest to 1 highest) spans the material's relief_m metres: the 3D
+tab and the photo render use it for parallax (stones that stand up and hide
+and shade one another, with no extra faces).
 """
 import hashlib
 import json
@@ -64,17 +67,18 @@ def _resize(arr, w, h):
     return np.stack([_resize(arr[..., c], w, h) for c in range(arr.shape[2])], axis=-1)
 
 
-def layout(colour, normal, rough, reps, out_w, out_h):
+def layout(colour, normal, rough, reps, out_w, out_h, extra=()):
     """
-    The three pictures of a material repeated reps = (across, down) times and
-    resampled to out_w x out_h, the same way for all three. Returns RGB uint8,
-    the normals (-1..1) and roughness (0..1) as float arrays.
+    The pictures of a material repeated reps = (across, down) times and
+    resampled to out_w x out_h, the same way for all. Returns RGB uint8, the
+    normals (-1..1) and roughness (0..1) as float arrays, then each of extra
+    (grey float pictures: height, ambient occlusion) laid the same way.
     """
     rx, ry = reps
     c = Image.fromarray(np.tile(colour, (ry, rx, 1))).resize((out_w, out_h), Image.LANCZOS)
     n = _resize(np.tile(normal, (ry, rx, 1)), out_w, out_h)
     r = _resize(np.tile(rough, (ry, rx)), out_w, out_h)
-    return np.asarray(c), n, r
+    return (np.asarray(c), n, r) + tuple(_resize(np.tile(a, (ry, rx)), out_w, out_h) for a in extra)
 
 
 def squeeze_normals(n, scale):
@@ -89,11 +93,26 @@ def squeeze_normals(n, scale):
     return out / np.linalg.norm(out, axis=-1, keepdims=True)
 
 
+def _grey(name, w, h, fill):
+    """A grey picture of the library (0..1) at w x h, or fill where the material has none."""
+    if name and (DIR / name).exists():
+        a = np.asarray(Image.open(DIR / name).convert("L")).astype(np.float32) / 255.0
+        return a if a.shape == (h, w) else _resize(a, w, h)
+    return np.full((h, w), fill, np.float32)
+
+
 def _load(e):
+    """A material's colour, normals (-1..1), roughness, height (0..1) and ambient occlusion (0..1)."""
     colour = np.asarray(Image.open(DIR / e["colour"]).convert("RGB"))
     normal = np.asarray(Image.open(DIR / e["normal"]).convert("RGB")).astype(np.float32) / 127.5 - 1.0
     rough = np.asarray(Image.open(DIR / e["roughness"]).convert("L")).astype(np.float32) / 255.0
-    return colour, normal, rough
+    h, w = rough.shape
+    return colour, normal, rough, _grey(e.get("height"), w, h, 0.5), _grey(e.get("ao"), w, h, 1.0)
+
+
+def relief_of(e):
+    """The material's relief: metres from its lowest to its highest point (its height map's 0 to 1)."""
+    return float(e.get("relief_m") or 0.0) if e.get("height") else 0.0
 
 
 def turn_normals(p, k, flipped):
@@ -137,18 +156,21 @@ def _synth(e, tile_m, px, variant):
     training (app/tiles.py): patches of the scan, half a metre across, placed
     at random, turned and flipped, blended into a tile that joins itself on
     every edge, then its large blotches and extreme spots evened out. Colour,
-    bump and roughness are placed together, patch by patch, so they still line
-    up; a turned patch has its slopes turned with it. Each variant is another
-    arrangement, so the scan no longer repeats every couple of metres.
+    bump, roughness, height and ambient occlusion are placed together, patch by
+    patch, so they still line up; a turned patch has its slopes turned with it.
+    Each variant is another arrangement, so the scan no longer repeats every
+    couple of metres. Returns colour, normals, roughness, height, occlusion.
     """
     from app import tiles as TL
-    colour, normal, rough = _load(e)
+    colour, normal, rough, height, ao = _load(e)
     # to the tile's scale (metres per pixel)
     mpp = tile_m / px
     w, h = max(64, int(round(float(e["size_m"][0]) / mpp))), max(64, int(round(float(e["size_m"][1]) / mpp)))
     c = np.asarray(Image.fromarray(colour).resize((w, h), Image.LANCZOS if w > colour.shape[1] else Image.BOX), np.float64)
     n = _resize(normal, w, h).astype(np.float64)
     r = _resize(rough, w, h).astype(np.float64)
+    hgt = _resize(height, w, h).astype(np.float64)
+    occ = _resize(ao, w, h).astype(np.float64)
     # the scan's broad light and dark (wear, stains), shine and undulation evened out
     # first, over about half a patch: neighbouring patches then match in tone and
     # blend unseen, instead of showing as a quilt. The detail inside (stones, pores,
@@ -157,51 +179,54 @@ def _synth(e, tile_m, px, variant):
     flat = lambda a: a - ndi.gaussian_filter(a, patch / 2, mode="wrap") + a.mean()
     c = np.stack([flat(c[..., i]) for i in range(3)], -1)
     r = flat(r)
+    hgt = flat(hgt)                                       # the undulation goes, the stones stay
     nz = np.maximum(n[..., 2], 0.05)
     sx, sy = flat(n[..., 0] / nz), flat(n[..., 1] / nz)
     n = np.stack([sx, sy, np.ones_like(sx)], -1)
     n /= np.linalg.norm(n, axis=-1, keepdims=True)
-    src = np.concatenate([c, n, r[..., None]], axis=-1)
+    src = np.concatenate([c, n, r[..., None], hgt[..., None], occ[..., None]], axis=-1)
     rng = np.random.default_rng([variant, 9001])
     out = TL._seamless_synth(src, int(px), patch, rng, quarter_turns=e.get("quarter_turns", True),
                              turned=turn_normals)
     c = _calm(out[..., :3], int(px))
     n = out[..., 3:6]
     n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-6)
-    return c, n, np.clip(out[..., 6], 0.0, 1.0)
+    return c, n, np.clip(out[..., 6], 0.0, 1.0), np.clip(out[..., 7], 0.0, 1.0), np.clip(out[..., 8], 0.0, 1.0)
 
 
 def tile_for(mid, tile_m, px, cache_dir, tone=None, variant=None):
     """
-    A material tile made from a library material: its colour, normal and
-    roughness pictures covering tile_m x tile_m at px x px, made together so
-    they line up. tone: the mean colour (0-255 RGB) its colour should take on,
+    A material tile made from a library material: its colour, normal,
+    roughness, height and ambient occlusion pictures covering tile_m x tile_m
+    at px x px, made together so they line up. tone: the mean colour (0-255 RGB) its colour should take on,
     or None for its own. variant: None lays the scan itself, repeated (paving,
     whose joints must stay on their grid); a number makes a fresh tile from
     the scan's patches, that arrangement (streets: no visible repeat).
     Returns a tile record as the tileset's (path), with normal_path,
-    rough_path and the material's name; the pictures are kept in cache_dir.
+    rough_path, height_path, ao_path, relief_m (metres the height's 0 to 1
+    spans) and the material's name; the pictures are kept in cache_dir.
     """
     e = entry(mid)
     if not e:
         raise ValueError(f"no material {mid} in the library")
-    files = [DIR / e[k] for k in ("colour", "normal", "roughness")]
+    files = [DIR / e[k] for k in ("colour", "normal", "roughness", "height", "ao") if e.get(k)]
     key = hashlib.sha1(json.dumps([mid, float(tile_m), int(px), [round(float(t), 1) for t in tone] if tone is not None else None,
-                                   [f.stat().st_mtime for f in files], variant, e.get("quarter_turns", True), 2]).encode()).hexdigest()[:16]
+                                   [f.stat().st_mtime for f in files], variant, e.get("quarter_turns", True), 3]).encode()).hexdigest()[:16]
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    paths = {k: cache_dir / f"lib_{mid}_{key}_{k}.png" for k in ("colour", "normal", "rough")}
+    paths = {k: cache_dir / f"lib_{mid}_{key}_{k}.png" for k in ("colour", "normal", "rough", "height", "ao")}
     rec = {"id": f"lib_{mid}" + (f"_{variant}" if variant is not None else ""), "library": mid, "name": e["name"],
            "method": "library" if variant is None else "library synth", "variant": variant, "covers_m": [tile_m, tile_m],
-           "path": str(paths["colour"]), "normal_path": str(paths["normal"]), "rough_path": str(paths["rough"])}
+           "path": str(paths["colour"]), "normal_path": str(paths["normal"]), "rough_path": str(paths["rough"]),
+           "height_path": str(paths["height"]), "ao_path": str(paths["ao"]), "relief_m": relief_of(e)}
     if all(p.exists() for p in paths.values()):
         return rec
     if variant is not None:
-        c, n, r = _synth(e, tile_m, px, variant)
+        c, n, r, hgt, occ = _synth(e, tile_m, px, variant)
     else:
-        colour, normal, rough = _load(e)
+        colour, normal, rough, height, ao = _load(e)
         reps = (max(1, int(round(tile_m / e["size_m"][0]))), max(1, int(round(tile_m / e["size_m"][1]))))
-        c, n, r = layout(colour, normal, rough, reps, int(px), int(px))
+        c, n, r, hgt, occ = layout(colour, normal, rough, reps, int(px), int(px), (height, ao))
         # reps x the scan's real size fit into tile_m: squeezed (or stretched) by that much
         n = squeeze_normals(n, (reps[0] * e["size_m"][0] / tile_m, reps[1] * e["size_m"][1] / tile_m))
     c = c.astype(np.float32)
@@ -212,15 +237,23 @@ def tile_for(mid, tile_m, px, cache_dir, tone=None, variant=None):
     Image.fromarray(np.clip(c + 0.5, 0, 255).astype(np.uint8)).save(paths["colour"], compress_level=1)
     Image.fromarray(np.clip((n * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["normal"], compress_level=1)
     Image.fromarray(np.clip(r * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths["rough"], compress_level=1)
+    for k, a in (("height", hgt), ("ao", occ)):
+        Image.fromarray(np.clip(np.asarray(a) * 255 + 0.5, 0, 255).astype(np.uint8)).save(paths[k], compress_level=1)
     return rec
 
 
 def own_maps(tile):
-    """A tile's own normal and roughness pictures and its name, if it has them (library tiles), else None."""
+    """
+    A tile's own pictures, if it has them (library tiles), else None: (normal,
+    roughness, name, height or None, ambient occlusion or None, relief_m).
+    """
     if not tile or not tile.get("normal_path"):
         return None
+    grey = lambda k: Image.open(tile[k]).convert("L") if tile.get(k) and Path(tile[k]).exists() else None
+    hgt = grey("height_path")
     return (Image.open(tile["normal_path"]).convert("RGB"), Image.open(tile["rough_path"]).convert("L"),
-            tile.get("name") or tile.get("library") or "library")
+            tile.get("name") or tile.get("library") or "library", hgt, grey("ao_path"),
+            float(tile.get("relief_m") or 0.0) if hgt is not None else 0.0)
 
 
 # ------------------------------------------------------------------ material balls
@@ -317,7 +350,7 @@ def material_ball(mid, cache_dir, px=152):
     path = Path(cache_dir) / f"ball_{mid}_{key}.png"
     if path.exists():
         return path.read_bytes()
-    colour, normal, rough = _load(e)
+    colour, normal, rough = _load(e)[:3]
     data = ball(colour, normal, rough, e["size_m"], px)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)

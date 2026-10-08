@@ -23,11 +23,17 @@ They are used in two ways (app/library.py, app/surface.py):
 
 Files per material: `<id>_diff.jpg` (colour, sRGB), `<id>_normal.jpg` (OpenGL
 convention, green up, as glTF wants), `<id>_rough.jpg` (roughness, grey, 0
-smooth to 1 rough). 1024 px, re-encoded from Poly Haven's 1K JPGs.
+smooth to 1 rough). 1024 px, re-encoded from Poly Haven's 1K JPGs. Also
+`<id>_height.jpg` (Poly Haven's displacement, 1K PNG, stretched so 0.5% to
+99.5% of it spans 0 to 1; `relief_m` in `library.json` is how many metres that
+is) and `<id>_ao.jpg` (ambient occlusion, 1K PNG, scaled so the open surface is
+white), grey, quality 85. They give the parallax and occlusion of the 3D tab and
+the photo render.
 
-To add a material: put its three maps here and add an entry to
+To add a material: put its maps here and add an entry to
 `library.json` (`id`, `name`, `kind`: asphalt, paving, concrete or ground, `size_m`,
-the three file names, `source`, `authors`, `licence`). Only add maps whose
+the file names (`colour`, `normal`, `roughness`, and optionally `height` with
+its `relief_m` and `ao`), `source`, `authors`, `licence`). Only add maps whose
 licence allows bundling.
 
 | Material | Poly Haven | Size | Authors |

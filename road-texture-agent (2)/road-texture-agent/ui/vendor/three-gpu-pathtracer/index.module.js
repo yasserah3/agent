@@ -10,6 +10,13 @@
 // Wet streets (wetStreets uniform; materials with wetStreet true): a film of water over the
 // street surfaces as a clear coat, and puddles, smooth as a mirror, in the same places as
 // the live view's (the same pattern of the world position).
+// Relief (reliefPT uniform; materials with pomMap, a height map, and pomDepth, the metres its
+// 0 to 1 spans): at each hit the ray is followed down into the height map and the material's
+// pictures are read where it meets the surface (parallax, no extra faces); each light and sky
+// sample is shaded by the stones between the point and it; the aoMap darkens the diffuse a
+// little (the gaps the flat surface cannot trace). Height (blue: Road Texture Agent packs it
+// with occlusion in red and roughness in green) and occlusion use the uv as it is.
+// One more pixel per material (47) holds them.
 // A see-through material with an alpha test too (a decal in the photo): what is under the
 // test is skipped every time, and the rest is still see-through as much as its alpha says.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
@@ -3061,7 +3068,7 @@ function getLights( scene ) {
 
 }
 
-const MATERIAL_PIXELS = 47;
+const MATERIAL_PIXELS = 48;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
 
 class MaterialFeatures {
@@ -3488,6 +3495,12 @@ class MaterialsTexture extends DataTexture {
 
 			// alphaMap transform 45
 			index += writeTextureMatrixToArray( m, 'alphaMap', floatArray, index );
+
+			// sample 47: relief (height map, metres) and ambient occlusion (map, strength)
+			floatArray[ index ++ ] = getTexture( m, 'pomMap' );
+			floatArray[ index ++ ] = getField( m, 'pomDepth', 0.0 );
+			floatArray[ index ++ ] = getTexture( m, 'aoMap' );
+			floatArray[ index ++ ] = m.aoMap ? getField( m, 'aoMapIntensity', 1.0 ) : 0.0;
 
 		}
 
@@ -4565,6 +4578,10 @@ const material_struct = /* glsl */ `
 		bool transparent;
 		bool fogVolume;
 		bool wetStreet;
+		int pomMap;
+		float pomDepth;
+		int aoMap;
+		float aoIntensity;
 
 		mat3 mapTransform;
 		mat3 metalnessMapTransform;
@@ -4619,6 +4636,7 @@ const material_struct = /* glsl */ `
 		vec4 s12 = texelFetch1D( tex, i + 12u );
 		vec4 s13 = texelFetch1D( tex, i + 13u );
 		vec4 s14 = texelFetch1D( tex, i + 14u );
+		vec4 s47 = texelFetch1D( tex, i + 47u );
 
 		Material m;
 		m.color = s0.rgb;
@@ -4682,6 +4700,10 @@ const material_struct = /* glsl */ `
 		m.flatShading = bool( int( s14.b ) & 2 );
 		m.fogVolume = bool( int( s14.b ) & 4 );
 		m.wetStreet = bool( int( s14.b ) & 8 );
+		m.pomMap = int( round( s47.r ) );
+		m.pomDepth = s47.g;
+		m.aoMap = int( round( s47.b ) );
+		m.aoIntensity = s47.a;
 		m.transparent = bool( s14.a );
 
 		uint firstTextureTransformIdx = i + 15u;
@@ -7075,7 +7097,7 @@ const direct_light_contribution_function = /*glsl*/`
 
 					// spot, point and directional lights only here: no MIS (they cannot be hit)
 					float lightPdf = lightRec.pdf * selectPdf;
-					result = attenuatedColor * lightRec.emission * state.throughputColor * sampleColor / lightPdf;
+					result = pomShadowTrace( lightRec.direction ) * attenuatedColor * lightRec.emission * state.throughputColor * sampleColor / lightPdf;
 
 				}
 
@@ -7110,7 +7132,7 @@ const direct_light_contribution_function = /*glsl*/`
 
 					envPdf *= selectPdf;
 					float misWeight = misHeuristic( envPdf, envMaterialPdf );
-					result = attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
+					result = pomShadowTrace( envDirection ) * attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
 
 				}
 
@@ -7169,7 +7191,7 @@ const direct_light_contribution_function = /*glsl*/`
 					// weight the direct light contribution
 					float lightPdf = lightRec.pdf / lightsDenom;
 					float misWeight = lightRec.type == SPOT_LIGHT_TYPE || lightRec.type == DIR_LIGHT_TYPE || lightRec.type == POINT_LIGHT_TYPE ? 1.0 : misHeuristic( lightPdf, lightMaterialPdf );
-					result = attenuatedColor * lightRec.emission * state.throughputColor * sampleColor * misWeight / lightPdf;
+					result = pomShadowTrace( lightRec.direction ) * attenuatedColor * lightRec.emission * state.throughputColor * sampleColor * misWeight / lightPdf;
 
 				}
 
@@ -7212,7 +7234,7 @@ const direct_light_contribution_function = /*glsl*/`
 					// weight the direct light contribution
 					envPdf /= lightsDenom;
 					float misWeight = misHeuristic( envPdf, envMaterialPdf );
-					result = attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
+					result = pomShadowTrace( envDirection ) * attenuatedColor * environmentIntensity * envColor * state.throughputColor * sampleColor * misWeight / envPdf;
 
 				}
 
@@ -7243,6 +7265,7 @@ const get_surface_record_function = /* glsl */`
 		inout SurfaceRecord surf
 	) {
 
+		pomDg = 0.0;
 		if ( material.fogVolume ) {
 
 			vec3 normal = vec3( 0, 0, 1 );
@@ -7264,6 +7287,46 @@ const get_surface_record_function = /* glsl */`
 		vec2 uv = textureSampleBarycoord( attributesArray, ATTR_UV, surfaceHit.barycoord, surfaceHit.faceIndices.xyz ).xy;
 		vec4 vertexColor = textureSampleBarycoord( attributesArray, ATTR_COLOR, surfaceHit.barycoord, surfaceHit.faceIndices.xyz );
 
+		// relief: the ray followed down into the height map; every picture is read where it
+		// meets the surface (the triangle's dP/du, dP/dv turn moves across it into uv)
+		if ( material.pomMap != - 1 && material.pomDepth > 0.0 && reliefPT.x > 0.0 ) {
+
+			uvec3 fi = surfaceHit.faceIndices.xyz;
+			vec3 p0 = texelFetch1D( bvh.position, fi.x ).xyz;
+			vec3 e1 = texelFetch1D( bvh.position, fi.y ).xyz - p0, e2 = texelFetch1D( bvh.position, fi.z ).xyz - p0;
+			vec2 t0 = texelFetch1D( attributesArray, ATTR_UV, fi.x ).xy;
+			vec2 d1 = texelFetch1D( attributesArray, ATTR_UV, fi.y ).xy - t0, d2 = texelFetch1D( attributesArray, ATTR_UV, fi.z ).xy - t0;
+			float tdet = d1.x * d2.y - d2.x * d1.y;
+			vec3 N = surfaceHit.faceNormal * surfaceHit.side;
+			vec3 E = - surfRayDir;
+			float En = dot( E, N );
+			if ( abs( tdet ) > 1e-12 && En > 0.05 ) {
+
+				pomDug = ( e1 * d2.y - e2 * d1.y ) / tdet;
+				pomDvg = ( e2 * d1.x - e1 * d2.x ) / tdet;
+				pomNg = N;
+				pomMapg = material.pomMap;
+				pomDg = material.pomDepth * reliefPT.x;
+				vec2 duv = pomToUv( ( N * En - E ) / max( En, 0.2 ) ) * pomDg;
+				float n = floor( mix( 16.0, 6.0, En ) ), dl = 1.0 / n, layer = 0.0;
+				float h = texture2D( textures, vec3( uv, material.pomMap ) ).b, prevH = h, prevL = 0.0;
+				for ( int i = 0; i < 16; i ++ ) {
+
+					if ( float( i ) >= n || 1.0 - h <= layer ) break;
+					prevH = h; prevL = layer; layer += dl;
+					h = texture2D( textures, vec3( uv + duv * layer, material.pomMap ) ).b;
+
+				}
+				float a = ( 1.0 - h ) - layer, b = ( 1.0 - prevH ) - prevL;
+				layer = mix( prevL, layer, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
+				uv += duv * layer;
+				pomHg = 1.0 - layer;
+				pomUvg = uv;
+
+			}
+
+		}
+
 		// albedo
 		vec4 albedo = vec4( material.color, material.opacity );
 		if ( material.map != - 1 ) {
@@ -7284,6 +7347,14 @@ const get_surface_record_function = /* glsl */`
 
 			vec3 uvPrime = material.alphaMapTransform * vec3( uv, 1 );
 			albedo.a *= texture2D( textures, vec3( uvPrime.xy, material.alphaMap ) ).x;
+
+		}
+
+		// ambient occlusion: the gaps and pores the flat surface cannot trace, a little darker
+		if ( material.aoMap != - 1 ) {
+
+			float ao = texture2D( textures, vec3( uv, material.aoMap ) ).r;
+			albedo.rgb *= mix( 1.0, ao, 0.6 * clamp( material.aoIntensity, 0.0, 1.0 ) );
 
 		}
 
@@ -7756,6 +7827,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				environmentIntensity: { value: 1.0 },
 				environmentRotation: { value: new Matrix4() },
 				wetStreets: { value: new Vector4() },  // wet (0-1), puddles (0-1), the streets' level (y)
+				reliefPT: { value: new Vector2() },    // relief: x, how deep (1: the materials' own depth; 0: flat)
 				envMapInfo: { value: new EquirectHdrInfoUniform() },
 
 				// background uniforms
@@ -7854,6 +7926,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				uniform mat4 environmentRotation;
 				uniform float environmentIntensity;
 				uniform vec4 wetStreets;
+				uniform vec2 reliefPT;
 
 				// lighting
 				uniform sampler2DArray iesProfiles;
@@ -7905,6 +7978,13 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				float lightsDenom;
 				float envSelectPdf; // light tree: the chance the sky was picked at the last surface
 				vec3 surfHitPoint; // where the ray met the surface being read (wet streets)
+				vec3 surfRayDir;   // the ray that met it (relief)
+				// relief at the surface being read: depth (m, 0: none), the height found, the uv there,
+				// the surface's dP/du and dP/dv, its normal facing the ray, and the height map
+				float pomDg = 0.0, pomHg = 1.0;
+				vec2 pomUvg = vec2( 0.0 );
+				vec3 pomDug = vec3( 0.0 ), pomDvg = vec3( 0.0 ), pomNg = vec3( 0.0, 1.0, 0.0 );
+				int pomMapg = - 1;
 
 				// sampling
 				${ shape_sampling_functions }
@@ -7952,6 +8032,34 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				${ camera_util_functions }
 				${ trace_scene_function }
 				${ attenuate_hit_function }
+				// relief: a move w across the surface (world, metres) as a change of uv
+				vec2 pomToUv( vec3 w ) {
+
+					float a = dot( pomDug, pomDug ), b = dot( pomDug, pomDvg ), c = dot( pomDvg, pomDvg );
+					float r1 = dot( w, pomDug ), r2 = dot( w, pomDvg );
+					return vec2( c * r1 - b * r2, a * r2 - b * r1 ) / max( a * c - b * b, 1e-20 );
+
+				}
+
+				// light arriving from L at the point found in the relief: in the shade of the stones
+				// between it and the light, softer the farther off they are
+				float pomShadowTrace( vec3 L ) {
+
+					float Ln = dot( L, pomNg ), d0 = 1.0 - pomHg;
+					if ( pomDg <= 0.0 || Ln <= 0.0 || d0 < 0.01 ) return 1.0;
+					vec2 duv = pomToUv( ( L - pomNg * Ln ) / max( Ln, 0.08 ) ) * pomDg * d0;
+					float sh = 0.0;
+					for ( int i = 1; i <= 8; i ++ ) {
+
+						float f = float( i ) / 8.0;
+						float h = texture2D( textures, vec3( pomUvg + duv * f, pomMapg ) ).b;
+						sh = max( sh, ( h - ( 1.0 - d0 * ( 1.0 - f ) ) ) * ( 1.0 - 0.5 * f ) );
+
+					}
+					return 1.0 - clamp( sh * 8.0, 0.0, 1.0 );
+
+				}
+
 				${ direct_light_contribution_function }
 				${ get_surface_record_function }
 
@@ -8119,6 +8227,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 
 						SurfaceRecord surf;
 						surfHitPoint = ray.origin + ray.direction * surfaceHit.dist;
+						surfRayDir = ray.direction;
 						if (
 							getSurfaceRecord(
 								material, surfaceHit, attributesArray, state.accumulatedRoughness,

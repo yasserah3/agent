@@ -60,7 +60,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.06-dcl3"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.08-rel1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -869,7 +869,7 @@ def your_tiles_ball(part: str):
         import io as _io
         img = Image.open(t["path"]).convert("RGB")
         kind = "asphalt" if part == "street" else ("concrete" if part == "kerb" else M3._sidewalk_kind(t))
-        nrm, rgh, _ = SF.maps(img, (t["tile_m"], t["tile_m"]), kind, source="scan")
+        nrm, rgh = SF.maps(img, (t["tile_m"], t["tile_m"]), kind, source="scan")[:2]
         normal = np.asarray(Image.open(_io.BytesIO(nrm)).convert("RGB")).astype(np.float32) / 127.5 - 1.0
         rough = np.asarray(Image.open(_io.BytesIO(rgh)).convert("L")).astype(np.float32) / 255.0
         cache.parent.mkdir(parents=True, exist_ok=True)

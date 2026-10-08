@@ -575,8 +575,8 @@ app/junctions.py     junction detection and classification
 app/curves.py        placements' maths: curves and curve lines, mirroring, alignment, packages, random spaces, ids, space cells
 app/placements.py    where each copy of a placement goes, for the 3D model and inner streets
 app/streets.py       inner streets drawn between objects, built into the street mask
-app/surface.py       bump and roughness maps for the material tiles (scanned, or from a tile's grain)
-app/library.py       the scanned material library (app/scans): tiles with colour, bump and roughness lined up
+app/surface.py       bump, roughness, height and occlusion maps for the material tiles (scanned, or from a tile's grain)
+app/library.py       the scanned material library (app/scans): tiles with colour, bump, roughness, height and occlusion lined up
 app/islands.py       the islands between the roads: their numbers and outlines, slots, the islands texture
 app/decals.py        decals: where each layer's go (intersections, streets, junctions, junction edges), painted into the texture, 3D quads
 app/formats.py       the 3D model as FBX (binary 7.4) and OBJ, and parts combined, read from the GLB
@@ -895,6 +895,40 @@ catch the surface: the asphalt's stones and pores, the joints of paving.
 - Pictures used by several materials are stored once in the GLB. In a
   990 × 770 m test the model is about 3.4 to 5 MB with surface detail and
   2.2 MB without.
+
+### Relief and ambient occlusion
+
+With surface detail, every one of these materials also gets a **height map**
+and an **ambient occlusion** map, so the stones, pebbles, pores and joints look
+raised, hide the ones behind them, and the gaps between them stay in shade:
+
+- Scanned materials use the scan's own measured height and occlusion (Poly
+  Haven's displacement and AO maps, bundled at 1K, about 10 MB for all 20).
+  Each has a real depth in the library (`relief_m`): 4 mm for fine asphalt,
+  1 to 1.5 cm for paving and sand, 3 cm for gravel, 6 cm for dry ground with
+  stones. Your own tiles get theirs from the same source as their bump: the
+  scan laid over them, or their grain (the occlusion from how far each point
+  lies below its surroundings). Paint fills the pores and sits on top.
+- **No extra faces.** The height is used for parallax: for every pixel the
+  view ray is followed down into the height map until it meets the surface, and
+  the colour, bump, roughness and occlusion are read there, so the stones move
+  and overlap as real ones would. From that point a short walk towards the sun
+  (and the moon) finds whether a stone stands in the way: their own small
+  shadows. The model keeps exactly the same triangles; only the 3D tab and the
+  photo render use the height. (The only limit: at a grazing edge the outline
+  of the ground stays straight.)
+- In the GLB the three grey maps share one picture, as glTF lays them out:
+  occlusion in red (the standard `occlusionTexture`), roughness in green, and
+  the height in blue (metalness's channel, unused: the metallic factor is 0).
+  The material's extras say where the height is (`relief`: texture, channel 2,
+  `depth_m`). Blender and Unreal read the occlusion and roughness as usual and
+  ignore the height; FBX and OBJ get the roughness as before.
+- The 3D tab: **Surface relief** under Light (100%: the materials' real depth,
+  200% twice that, 0 flat and quickest). It fades out beyond about 40 m, where
+  it is too fine to see. Render photo traces it too: the ray meets the relief,
+  every light and sky sample is shaded by the stones in its way, and the
+  occlusion darkens the diffuse a little (the gaps a flat surface cannot trace).
+  Puddles fill it (flat water).
 
 ## Blocks and islands
 
@@ -1455,6 +1489,10 @@ The **3D** tab shows the whole place in 3D, to look around:
     and squares. Render photo has them in the same places, traced: the water
     over the wet surfaces is a clear coat (glossier the wetter they are), the
     puddles a mirror-smooth coat that fills the grain.
+  - *Surface relief* (0 to 200%, 100% their real depth): how deep the stones,
+    pebbles, pores and joints of the street, sidewalk, kerb and island
+    materials look (parallax from their height maps, no extra faces; see
+    Relief and ambient occlusion). 0 is flat and quicker on a slow card.
   - *Live reflections* (on): wet streets mirror the scene, not only the sky:
     the buildings, the lamp posts and their lit heads, your objects, the clouds.
     The scene is drawn a second time, mirrored under the street, at half size,
