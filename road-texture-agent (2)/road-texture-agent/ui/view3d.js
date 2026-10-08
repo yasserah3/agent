@@ -1294,7 +1294,7 @@ function wetForPhoto(on){
   u.value.set(wet, wet > 0 ? LIGHT.puddles * Math.min(1, wet * 1.5) : 0, STREET_Y, 0);
   // and the surfaces' relief, as deep as Surface relief says (the bake records light on flat ground)
   const r = photo.pt._pathTracer.material.uniforms.reliefPT;
-  if(r) r.value.set(on ? LIGHT.relief : 0, 0);
+  if(r) r.value.set(on ? LIGHT.relief : 0, RELIEF_U.reliefFar.value);      // faded out as far off as the live view
 }
 
 function stopPhoto(why){

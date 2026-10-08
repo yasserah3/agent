@@ -7306,9 +7306,11 @@ const get_surface_record_function = /* glsl */`
 				pomDvg = ( e2 * d1.x - e1 * d2.x ) / tdet;
 				pomNg = N;
 				pomMapg = material.pomMap;
-				pomDg = material.pomDepth * reliefPT.x;
+				// faded out with the distance from the camera, as the live view does (reliefPT.y: where it ends)
+				float camD = distance( surfHitPoint, cameraWorldMatrix[ 3 ].xyz );
+				pomDg = material.pomDepth * reliefPT.x * ( 1.0 - smoothstep( 0.5 * reliefPT.y, reliefPT.y, camD ) );
 				vec2 duv = pomToUv( ( N * En - E ) / max( En, 0.2 ) ) * pomDg;
-				float n = floor( mix( 16.0, 6.0, En ) ), dl = 1.0 / n, layer = 0.0;
+				float n = pomDg > 0.0 ? floor( mix( 16.0, 6.0, En ) ) : 0.0, dl = 1.0 / max( n, 1.0 ), layer = 0.0;
 				float h = texture2D( textures, vec3( uv, material.pomMap ) ).b, prevH = h, prevL = 0.0;
 				for ( int i = 0; i < 16; i ++ ) {
 
@@ -7835,7 +7837,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 				environmentIntensity: { value: 1.0 },
 				environmentRotation: { value: new Matrix4() },
 				wetStreets: { value: new Vector4() },  // wet (0-1), puddles (0-1), the streets' level (y)
-				reliefPT: { value: new Vector2() },    // relief: x, how deep (1: the materials' own depth; 0: flat)
+				reliefPT: { value: new Vector2( 0, 40 ) }, // relief: x, how deep (1: the materials' own depth; 0: flat); y, metres from the camera where it has faded out
 				envMapInfo: { value: new EquirectHdrInfoUniform() },
 
 				// background uniforms
