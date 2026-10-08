@@ -256,11 +256,13 @@ def _strokes(cover, line, half_w, strength, piece_px):
 
 
 def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m, rng,
-                 align=False, width_ratio=None, nomark=None):
+                 align=False, width_ratio=None, nomark=None, lane_picks=None):
     """
-    Lay each street's lane lines (app/lanes.py: how many its width calls for,
-    where across it, dashed or solid), stopping short of each junction, and on
-    highways its raised island.
+    Lay each street's lane lines (app/lanes.py: its lanes on each side, even
+    or as picked, where across it, dashed or solid), stopping short of each
+    junction, and on highways its raised island. lane_picks: the Lanes tool's
+    choices, [{"pt": [x, y] in this picture's pixels, "sides": [a, b]}], each
+    for the street nearest its point.
 
     The number of cycles per street is rounded to a whole number and the gaps
     stretched slightly to fit, so each street starts and ends on a full dash.
@@ -272,8 +274,10 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
     one pixel wide but only as strong as the share of the pixel it covers, the
     way a photo from that height shows it, not widened to a whole pixel.
 
-    Returns the paint's coverage, a report, and the islands' (coverage, top's
-    coverage): the top a little narrower, so its rim can be shaded as a kerb.
+    Returns the paint's coverage, a report, the islands' (coverage, top's
+    coverage): the top a little narrower, so its rim can be shaded as a kerb,
+    and the streets for the Lanes tool: [{"id", "line": centreline (x, y) the
+    canonical way, "width_m", "limit", "sides", "even", "cut"}].
     """
     road = det["road"]
     H, W = road.shape
@@ -287,11 +291,12 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
     setback_px = setback_m / px
     width_px = width_m / px
     placed = 0
-    widths_used, street_m = [], []
+    widths_used, layouts, streets = [], [], []
     seg_px = det.get("segment_pixels") or J.label_coords(seg_lab, n)
+    # every street's ordered centreline and width first, so the Lanes tool's
+    # choices can be matched to the street they were made on
+    found = {}
     for s in range(1, n + 1):
-        if s % 50 == 0:
-            prog.part(s / n)
         coords = seg_px[s]
         if len(coords) < 4:
             continue
@@ -304,11 +309,22 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
         # the junctions); the distance field reads half a pixel more than the half width
         pa = np.array(path)
         mid = pa[int(len(pa) * 0.15): max(int(len(pa) * 0.85), int(len(pa) * 0.15) + 1)]
-        w_m = 2 * max(0.0, float(np.median(det["dt"][mid[:, 0], mid[:, 1]])) - 0.5) * px
-        lay = LN.layout(w_m)
+        found[s] = (path, 2 * max(0.0, float(np.median(det["dt"][mid[:, 0], mid[:, 1]])) - 0.5) * px)
+    chosen = {}
+    if lane_picks and found:
+        labs = np.concatenate([np.full(len(v[0]), k) for k, v in found.items()])
+        pts = np.concatenate([np.array(v[0], float)[:, ::-1] for v in found.values()])
+        chosen = LN.match_picks(lane_picks, pts, labs, lambda k, d: d <= found[k][1] / 2 / px + 1.0 / px)
+    for s, (path, w_m) in found.items():
+        if s % 50 == 0:
+            prog.part(s / n)
+        lay = LN.layout(w_m, chosen.get(s))
+        layouts.append(lay)
+        line = np.array(path[::-1] if not LN.canonical(path[0][::-1], path[-1][::-1]) else path, float)[:, ::-1]
+        streets.append({"id": int(s), "line": line, "width_m": round(w_m, 2), "limit": lay["limit"],
+                        "sides": list(lay["sides"]), "even": lay["even"], "cut": lay["cut"]})
         if not lay["lines"]:
             continue                       # too narrow for a line
-        street_m.append(w_m)
         line_w = LN.line_width(w_m, width_ratio, width_m) / px
         half_w, strength = max(0.5, line_w / 2), min(1.0, line_w)
         widths_used.append(line_w)
@@ -376,7 +392,8 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
                    "width_px": round(width_shown, 2),
                    "width_mode": "learned" if width_ratio else "fixed",
                    "width_ratio": width_ratio, "faint": width_shown < 1.0, "warning": warning,
-                   "lanes": LN.summary(street_m)}, (isl, isl_top)
+                   "lanes": LN.summary(layouts), "picked": len(chosen),
+                   "cut": sum(1 for st in streets if st["cut"])}, (isl, isl_top), streets
 
 
 def group_map(det, groups):
@@ -618,14 +635,26 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     # ---- 3. markings ----
     prog.stage("markings", "markings")
     paint_rgb = np.array(params.get("paint_colour", [235, 232, 222]), np.float32)
-    paint, dash_info, (island, island_top) = place_dashes(
+    picks = [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in (params.get("lane_picks") or [])]
+    paint, dash_info, (island, island_top), streets = place_dashes(
         det, mpp_out,
         cycle_m=float(params.get("cycle_m", 9.0)),
         dash_share=float(params.get("dash_share", 0.6)),
         width_m=float(params.get("width_m", 0.15)),
         setback_m=float(params.get("setback_m", 2.0)),
         rng=rng, align=align_lines, width_ratio=params.get("width_ratio"),
-        nomark=_at_size(params.get("nomark"), scale, road.shape))
+        nomark=_at_size(params.get("nomark"), scale, road.shape), lane_picks=picks)
+    if out_paths.get("streets"):
+        # the streets for the Lanes tool, in mask pixels, their lines simplified to about 0.5 m
+        import json
+        from shapely.geometry import LineString
+        tol = max(0.5, 0.5 / mpp_out)
+        for st in streets:
+            ls = LineString(st["line"]) if len(st["line"]) > 1 else None
+            q = np.asarray(ls.simplify(tol).coords) if ls is not None else st["line"]
+            st["line"] = np.round(q / scale, 1).tolist()
+        with open(out_paths["streets"], "w") as fh:
+            json.dump({"mpp": mpp, "streets": streets}, fh, separators=(",", ":"))
 
     prog.stage("finishing", "blending and saving the pictures")
     result = worn.copy()

@@ -697,17 +697,17 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             for sid, st in dashed.items():
                 d = st["dash"]
                 wc = min(centres, key=lambda c: abs(c - d["width_m"] * 100))
-                by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k == "dash")), []).append(
-                    (d["street_m"], sid))
+                by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k == "dash"),
+                               tuple(d["sides"]) if d.get("sides") else None), []).append((d["street_m"], sid))
             tol = 0.6
             while True:
                 classes = []
-                for (wc, kind, nd), items in sorted(by.items()):
+                for (wc, kind, nd, sides), items in sorted(by.items(), key=lambda kv: str(kv[0])):
                     items = sorted(items)
                     run = []
                     for w, sid in items + [(math.inf, None)]:
                         if run and (sid is None or (nd > 1 and w - run[0][0] > tol)):
-                            classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run]))
+                            classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run], sides))
                             run = []
                         if sid is not None:
                             run.append((w, sid))
@@ -716,8 +716,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                 if len(classes) <= 8 or tol >= 1.2:
                     break
                 tol = 1.2
-            for ci, (wc, w_m, sids) in enumerate(classes):
-                xs = [x for x, k in LN.layout(w_m)["lines"] if k == "dash"]
+            for ci, (wc, w_m, sids, sides) in enumerate(classes):
+                xs = [x for x, k in LN.layout(w_m, sides)["lines"] if k == "dash"]
                 img = marked_texture(tiles["open"][0]["path"], tile_m, cycle, share, E, wc / 100.0, paint_rgb, xs)
                 marked[ci] = len(mark_tex)
                 mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids)},
@@ -963,6 +963,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "painted_dashes": painted_dashes if painted else 0,
             "marked_textures": [dict(info, px=list(im.size)) for info, im in mark_tex],
             "lane_islands": island_info,
+            "lanes_cut": sum(1 for st in mesh.streets.values() if (st.get("dash") or {}).get("cut")),
             "marked_quads": sum(len(v) for k, v in groups.items() if k[0] == "marked"),
             "strip_dashes": len(mesh.dashes) - (painted_dashes if painted else 0),
             "bridges": [{k: (float(v) if isinstance(v, (np.floating, float)) else v)

@@ -54,13 +54,14 @@ from app import streets as ST
 from app import islands as ISL
 from app import formats as FMT
 from app import decals as DC
+from app import lanes as LN
 from app.generation import prepare_mask as _prep
 from app import routing as R
 from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.08-lane1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.08-lane2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1527,7 +1528,11 @@ def generate(payload: dict):
     outs = {k: ARTIFACTS / f"gen_{gid}_{k}.png"
             for k in ("result", "material", "wear", "markings")}
     map_path = ARTIFACTS / f"gen_{gid}_map.npz"
+    streets_path = ARTIFACTS / f"gen_{gid}_streets.json"
+    # the Lanes tool's choices: sent with the request, else the ones kept for this mask
+    lane_picks = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base))
     res = G.generate(rec["path"], libraries, {
+        "lane_picks": lane_picks,
         "nomark": streets["nomark"],
         "metres_per_pixel": float(payload.get("scale", 0.25)),
         "wear": float(payload.get("wear", 50)) / 100.0,
@@ -1545,7 +1550,8 @@ def generate(payload: dict):
         "match_tone": _priming_tone() if payload.get("match_material") else None,
         "soft_edges": bool(payload.get("soft_edges", True)),
         "street_material": _street_material(payload),
-    }, outs, map_path)
+    }, dict(outs, streets=streets_path), map_path)
+    mem.add_artifact(f"{gid}_streets", "generated_streets", streets_path, {"mask": rec["id"]})
 
     prog.stage("saving", "saving")
     urls = {}
@@ -1584,7 +1590,8 @@ def generate(payload: dict):
     return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions,
             "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3),
-            "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"}}
+            "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
+            "streets": {"url": f"/api/artifact/{gid}_streets"}}
 
 
 def _street_material(payload):
@@ -1769,6 +1776,36 @@ def _build_key(payload):
 # remembers its islands by a point inside each.
 def _slots_key(rec):
     return f"islandslots_{(rec.get('sha256') or rec['id'])[:20]}"
+
+
+# ------------------------------------------------------------------ lanes
+# The Lanes tool's choices (app/lanes.py): streets given their own lanes on each
+# side, by a point on each, kept with the mask as the island slots are.
+def _lanes_key(rec):
+    return f"lanepicks_{(rec.get('sha256') or rec['id'])[:20]}"
+
+
+def _load_lanes(rec):
+    art = mem.artifact(_lanes_key(rec)) if rec else None
+    return json.loads(Path(art["path"]).read_text()) if art and Path(art["path"]).exists() else []
+
+
+@app.get("/api/lanes")
+def load_lanes(mask: str):
+    return {"picks": _load_lanes(mem.image(mask))}
+
+
+@app.post("/api/lanes")
+def save_lanes(payload: dict):
+    rec = mem.image(payload.get("mask"))
+    if not rec:
+        raise HTTPException(400, "unknown mask")
+    picks = LN.picks_list(payload.get("picks"))
+    key = _lanes_key(rec)
+    path = ARTIFACTS / f"{key}.json"
+    path.write_text(json.dumps(picks))
+    mem.add_artifact(key, "lane_picks", path, {"mask": rec["id"], "picks": len(picks)})
+    return {"ok": True, "picks": len(picks)}
 
 
 @app.get("/api/islands")
@@ -2057,6 +2094,8 @@ def _export3d(payload):
     out = final.with_name(f"gen_{gid}.{uuid.uuid4().hex[:8]}.part.glb")
     mode = payload.get("mesh", "tiled")
     dash_cfg = dict(art["meta"].get("dashes") or {})
+    base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
+    dash_cfg["lane_picks"] = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base_rec))
     if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
         dash_cfg["nomark"] = np.array(Image.open(art["meta"]["nomark"]).convert("L")) > 127
     stale, inner = None, None

@@ -278,6 +278,16 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     prog.stage("streets", "street strips")
     seg_px = J.label_coords(seg_lab)                # every street's pixels, in one pass
     n_seg = int(seg_lab.max())
+    # the Lanes tool's choices: each for the street whose centreline is nearest its point
+    lane_of = {}
+    picks = (dashes or {}).get("lane_picks") or []
+    if picks:
+        have = [k for k in range(1, n_seg + 1) if len(seg_px[k])]
+        if have:
+            med = {k: float(np.median(dt[seg_px[k][:, 0], seg_px[k][:, 1]])) for k in have}
+            lane_of = LN.match_picks(picks, np.concatenate([seg_px[k][:, ::-1] for k in have]).astype(float),
+                                     np.concatenate([np.full(len(seg_px[k]), k) for k in have]),
+                                     lambda k, d: d <= med[k] + 1.0 / mpp)
     for sid in range(1, n_seg + 1):
         if sid % 20 == 0:
             prog.part(sid / n_seg)
@@ -354,7 +364,7 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         if dashes and not narrow_ramp and not unmarked:
             n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
             cfg_d = dict(dashes, min_cycles=2) if grp is not None else dashes
-            layout = _dash_strips(mesh, pts, side, arc, hw_final, mpp, scale, cfg_d)
+            layout = _dash_strips(mesh, pts, side, arc, hw_final, mpp, scale, cfg_d, sides=lane_of.get(sid))
             mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
             mesh.island_owner.extend([sid] * (len(mesh.lane_islands) - i0))
 
@@ -461,7 +471,18 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         mesh.exact_edges = unary_union([ex["road"].boundary for ex in exact if not ex["road"].is_empty])
         mesh.exact_roads = [_scale_poly(ex["road"], scale) for ex in exact if not ex["road"].is_empty]
     built = None
-    for ex in exact or []:
+    # the Lanes tool's choices on inner streets: each for the nearest of their lines
+    inner_lanes = {}
+    if exact and picks:
+        from shapely.geometry import LineString, Point
+        lines = [(i, k, LineString(np.asarray(l, float)), float(hw)) for i, ex in enumerate(exact)
+                 for k, (l, hw) in enumerate(ex["lines"]) if len(l) > 1]
+        for pk in picks:
+            pt = Point(*pk["pt"])
+            best = min(((ls.distance(pt), i, k, hw) for i, k, ls, hw in lines), default=None)
+            if best and best[0] <= best[3] + 1.0 / mpp:
+                inner_lanes[(best[1], best[2])] = tuple(pk["sides"])
+    for ei, ex in enumerate(exact or []):
         road = ex["road"]
         for g in (road.geoms if hasattr(road, "geoms") else [road]):
             if g.geom_type == "Polygon" and not g.is_empty:
@@ -471,7 +492,7 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             continue
         if built is None:
             built = _built_index(mesh, scale)
-        for pts, hw in ex["lines"]:
+        for li, (pts, hw) in enumerate(ex["lines"]):
             # the street up to the roads already built: one that goes on to a street
             # stops at its edge, so its road and markings never lie over that street's
             pts = _outside(np.asarray(pts, float), built, 0.25 / mpp, float(hw))
@@ -482,7 +503,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
             side = np.column_stack([-tg[:, 1], tg[:, 0]])
             n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
-            layout = _dash_strips(mesh, pts, side, arc, np.full(len(pts), float(hw)), mpp, scale, dashes)
+            layout = _dash_strips(mesh, pts, side, arc, np.full(len(pts), float(hw)), mpp, scale, dashes,
+                                  sides=inner_lanes.get((ei, li)))
             if layout is None:
                 continue
             sid = INNER_OWNER + len(mesh.streets) + 1
@@ -698,7 +720,7 @@ def _line_strip(pts, side, arc, a, b, off, halfw, scale):
             for k in range(len(ts))]
 
 
-def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True):
+def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=None):
     """
     A street's lane lines as their own thin quads, following its smoothed
     centreline: as many as its width calls for, where app/lanes.py puts them,
@@ -708,7 +730,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True):
     Same rules as the texture: a setback from each end so no dash is cut at a
     junction, a whole number of cycles with the gaps stretched to fit, every
     lane's dashes side by side, a width that is either the learned share of the
-    street's width or fixed, and the street read the canonical way. Returns the
+    street's width or fixed, and the street read the canonical way. sides: the
+    lanes on each side (the Lanes tool's choice), None for even. Returns the
     layout ("run_m": where the dashes run, in metres along the street as built),
     or None for a street with no lines.
     """
@@ -724,7 +747,7 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True):
     k = len(hw)
     inner = np.asarray(hw)[int(k * 0.15): max(int(k * 0.85), int(k * 0.15) + 1)]
     street_m = 2 * float(np.median(inner)) * mpp            # its width, away from the flared ends
-    lay = LN.layout(street_m)
+    lay = LN.layout(street_m, sides)
     if not lay["lines"]:
         return None
     step = usable / n
@@ -736,6 +759,7 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True):
     run = (setback - gap, setback + n * step) if canon else (setback, L - setback + gap)
     layout = {"setback_m": setback, "step_m": step, "n": n, "share": share, "width_m": width_m,
               "street_m": street_m, "kind": lay["kind"], "lines": lay["lines"], "island": lay["island"],
+              "sides": None if lay["even"] else lay["sides"], "cut": lay["cut"],
               "canon": canon, "length_m": L, "run_m": run}
     halfw = width_m / 2 / mpp
     for x_m, kind in lay["lines"]:

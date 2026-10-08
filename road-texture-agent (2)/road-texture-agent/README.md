@@ -364,30 +364,36 @@ the image rather than adding detail: for close-up work, generate at 2× or 4×.
 
 ## Lane lines by road width
 
-How many lines a street gets, and where, follows its width (`app/lanes.py`,
-the same rules for the road texture and the 3D model):
+Every street's lanes are **split evenly between its two sides**, as many as its
+width holds (`app/lanes.py`; the road texture, the 3D model and the Lanes tool
+use the same equation):
 
-| Road width | Lines |
-| --- | --- |
-| under 6 m | none |
-| 6 to 9 m | one, in the centre |
-| 9 to 12 m | two |
-| 12 to 15 m | three |
-| 15 to 22 m | four |
-| 22 m and up | a two-way highway (below) |
+    limit      = floor((width - island) / 3 m)     the most lanes it can hold
+    each side  = floor(limit / 2)                  an odd lane left over is dropped
+    lane width = (width - island) / (side 1 + side 2)
 
-- The lines split the road into **equal lanes** (9 m: lines 3 m and 6 m from
-  the kerb; 10.5 m: 3.5 m and 7 m), all dashed. A road keeps the count of the
-  last width it reached: an 18 m road has four lines and 3.6 m lanes.
-- **Highways (22 m and up)**: lanes of 3 m (stretched a little to fill the
-  width exactly) and a **raised island** 1 m wide down the road. Five lanes on
-  the first side (lines 1 to 4 between them), the island, then the other
-  direction's lanes (lines 5, 6 ...): 22 m = 7 lanes x 3 m + 1 m (5 lines),
-  25 m 6 lines, 28 m 7, 31 to 33 m 8 (five lanes each way). Wider still, each
-  further lane goes to the direction with fewer, so both stay equal (34 m: 6
-  and 5 lanes, 9 lines; 37 m: 6 and 6, 10 lines).
-  - The lane lines are dashed. A **solid line** runs along both kerbs (30 cm
-    in) and along both sides of the island (30 cm from it).
+where island is 1 m from 22 m up (a raised island between the two
+directions), and 0 below.
+
+| Road width | Limit | Even split | Lane width | Lines |
+| --- | --- | --- | --- | --- |
+| under 6 m | 1 | one lane | | none |
+| 6 m | 2 | 1 + 1 | 3.0 m | 1 |
+| 9 m | 3 | 1 + 1 | 4.5 m | 1 |
+| 12 m | 4 | 2 + 2 | 3.0 m | 3 |
+| 15 m | 5 | 2 + 2 | 3.75 m | 3 |
+| 18 m | 6 | 3 + 3 | 3.0 m | 5 |
+| 22 m | 7 | 3 + 3, island | 3.5 m | 4 dashed + 4 solid |
+| 25 m | 8 | 4 + 4, island | 3.0 m | 6 dashed + 4 solid |
+| 28 m | 9 | 4 + 4, island | 3.375 m | 6 dashed + 4 solid |
+| 32 m | 10 | 5 + 5, island | 3.1 m | 8 dashed + 4 solid |
+| 37 m | 12 | 6 + 6, island | 3.0 m | 10 dashed + 4 solid |
+
+- The lines between lanes are dashed (the line between the two sides too).
+- **From 22 m**, with lanes on both sides, a **raised island** 1 m wide lies
+  between the sides (in the middle when they are even), and a **solid line**
+  runs along both kerbs (30 cm in) and along both sides of the island (30 cm
+  from it).
   - **The island** is a concrete strip 15 cm high with kerb faces, in the kerb
     stone's material, from the first dash to the last (it stops short of the
     junctions, as the lines do). In the 3D model it is a mesh of its own,
@@ -395,21 +401,49 @@ the same rules for the road texture and the 3D model):
     darker rim (it is also in the *Markings* layer, so the 3D model's tone
     leaves it out).
 - Every lane's dashes lie side by side, measured along the centreline.
-- **Which side is first** (where the five lanes go) is the left of the
-  street's canonical direction (along its main axis, towards the right or
-  down the picture), the same in the texture and the 3D model, whichever end
-  the street was traced from.
 - A width read from the mask is a little short or long, so each width counts
-  from 40 cm below it: a road measured at 5.7 m gets the 6 m line.
+  from 40 cm below it: a road measured at 5.7 m holds 2 lanes.
+- **Side 1** is the left of the street's canonical direction (along its main
+  axis, towards the right or down the picture): the top of a street running
+  across the map, the right of one running down it. The same in the texture,
+  the 3D model and the Lanes tool, whichever end the street was traced from.
 - A learned line width (a share of the road's width, below) is taken of at
   most 9 m of it, so wide roads keep 15 cm-like lines instead of thick ones.
 - Single-lane ramps and slip roads inside junction groups still get no lines,
   as before.
 - **Painted into the road texture** (3D model, Markings): one marked texture
-  per kind of street (its line width, and how many lines and where; streets
-  less than 60 cm apart in width share one), holding all its lanes' dashes.
-  The solid lines stay thin strips 1 cm above the road, so they run exactly
-  as far as the island.
+  per kind of street (its line width, its split and its lines; streets less
+  than 60 cm apart in width share one), holding all its lanes' dashes. The
+  solid lines stay thin strips 1 cm above the road, so they run exactly as far
+  as the island.
+
+### The Lanes tool: a street's own lanes
+
+In the Generate tab, under Settings, **Lanes**. After Generate texture,
+**Set lanes on the map** shows every street's split on it (such as 2|2), and a
+click on a street selects it: its two sides show in blue (side 1) and orange
+(side 2), each as wide as its lanes, with its lines and island as they will
+be laid. The panel shows its width and its limit; **−** and **+** set the
+lanes on each side.
+
+- **The limit is never passed**: + stops when the two sides together reach
+  it (a 22 m road holds 7 lanes: 4 + 3 or 5 + 2 at most; even, it is 3 + 3
+  of 3.5 m). A
+  choice that no longer fits (the mask changed, the street measures narrower)
+  is cut back to the limit, one lane off the larger side at a time, and the
+  console says so.
+- **Fewer lanes are fine**: they widen to fill the road (a 22 m road at 2 + 2
+  has 5.25 m lanes). A side may have none: a **one-way** road, lines between
+  its lanes only, no island.
+- **Even** puts the street back to the even split; **All even** does it for
+  every street. The list under the panel shows the streets with their own
+  lanes; click one to select it, × to undo it.
+- The choices are kept with the mask (on the server, like the island slots),
+  each by a point on its street, so they survive a new texture of the same
+  mask. **Generate texture** again to paint them into the texture; the 3D
+  model, the Top view and the 3D tab use them at once (Update view).
+- The console says how many streets got each split, how many were set in the
+  tool, and how many were cut back.
 
 ## Line width
 

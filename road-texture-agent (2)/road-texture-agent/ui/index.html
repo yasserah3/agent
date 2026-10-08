@@ -161,6 +161,27 @@
   .isl-box{ border:1px solid var(--line); border-radius:6px; padding:8px; margin:4px 0 8px; background:rgba(255,255,255,.015); }
   .isl-box .isl-h{ display:flex; justify-content:space-between; align-items:baseline; font-size:12.5px; font-weight:600; }
   .isl-box .isl-h span{ font-weight:400; color:var(--muted); font-size:11.5px; }
+  .lanes-bar{ display:flex; gap:6px; flex-wrap:wrap; }
+  .lanes-bar button, #laneEdit button{ background:var(--panel-2); border:1px solid var(--line); color:var(--ink); border-radius:5px; padding:6px 9px; cursor:pointer; font:inherit; font-size:12px; }
+  .lanes-bar button:hover:not(:disabled), #laneEdit button:hover:not(:disabled){ border-color:var(--blue); }
+  .lanes-bar button[aria-pressed="true"]{ background:rgba(70,130,220,.3); border-color:var(--blue); color:#fff; }
+  .lanes-bar button:disabled, #laneEdit button:disabled{ opacity:.45; cursor:default; }
+  #laneEdit{ margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); font-size:12px; }
+  #laneEdit .le-h{ font-weight:600; margin-bottom:4px; }
+  #laneEdit .le-sides{ display:grid; grid-template-columns:auto auto 1fr; gap:6px 8px; align-items:center; margin:6px 0; }
+  #laneEdit .le-sw{ width:12px; height:12px; border-radius:3px; display:inline-block; vertical-align:middle; margin-right:5px; }
+  #laneEdit .le-step{ display:inline-flex; align-items:center; gap:4px; }
+  #laneEdit .le-step b{ min-width:20px; text-align:center; font-size:14px; }
+  #laneEdit .le-step button{ padding:2px 9px; font-size:14px; }
+  #laneEdit .le-out{ color:var(--muted); margin-top:2px; }
+  #laneEdit .le-cut{ color:var(--amber, #e0a040); }
+  #lanesList{ margin-top:6px; font-size:12px; color:var(--muted); }
+  #lanesList .ll-row{ display:flex; align-items:center; gap:6px; padding:2px 0; cursor:pointer; }
+  #lanesList .ll-row:hover{ color:var(--ink); }
+  #lanesList .ll-x{ background:none; border:none; color:var(--muted); font-size:15px; cursor:pointer; padding:0 2px; margin-left:auto; }
+  #lanesList .ll-x:hover{ color:var(--red); }
+  .bridge-layer .lane-hit{ pointer-events:stroke; cursor:pointer; }
+  .bridge-layer .lane-lbl{ pointer-events:none; font-family:system-ui, sans-serif; font-weight:700; paint-order:stroke; stroke:rgba(0,0,0,.8); fill:#fff; text-anchor:middle; dominant-baseline:central; }
   .isl-slot{ display:grid; grid-template-columns:6px 1fr auto auto; gap:6px; align-items:center; margin-top:6px; }
   .isl-slot .isl-sw{ align-self:stretch; border-radius:3px; }
   .isl-slot .matChip{ grid-template-columns:34px 1fr; gap:8px; padding:4px 6px; }
@@ -587,6 +608,12 @@
               <option value="fixed">Fixed, in metres</option>
             </select></div>
           <div class="field"><label for="markW">Fixed width (m)</label><input type="number" id="markW" value="0.15" step="0.05" min="0.02" disabled></div>
+          <div style="margin-top:12px;font-weight:600;font-size:13px">Lanes</div>
+          <div class="note" id="lanesNote" style="margin:2px 0 6px">Every street's lanes are split evenly between its two sides, as many as its width holds (3 m a lane at least). Generate texture, then Set lanes and click a street to choose its own.</div>
+          <div class="lanes-bar"><button type="button" id="btnLanes" aria-pressed="false" disabled>Set lanes on the map</button>
+            <button type="button" id="btnLanesEven" disabled title="Every street back to the even split">All even</button></div>
+          <div id="laneEdit" hidden></div>
+          <div id="lanesList"></div>
           <div class="field"><label for="quality">Quality (1 to 3)</label><input type="number" id="quality" value="1" step="1" min="1" max="3"></div>
           <div class="field"><label for="outScale">Output size</label>
             <select id="outScale" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">

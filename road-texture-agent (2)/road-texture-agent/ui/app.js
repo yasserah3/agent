@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.08-lane2';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -145,6 +145,9 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
   // for it, remembered by a point inside each (mask pixels), kept with the mask on the server.
   // data: the numbered islands of the last texture; pick: the slot being picked for, or -1
   const ISLS = { slots: [], data: null, pick: -1, show: false, changed: () => {} };
+  // the Lanes tool (lanes below): the streets of the last texture, the choices kept for the mask
+  const LN = { TOL: 0.4, LANE: 3.0, HIGHWAY: 22.0, ISLAND: 1.0, EDGE: 0.3 };
+  const LANES = { picks: [], streets: null, mpp: 1, on: false, sel: -1, mask: null };
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
     if(kept){
@@ -820,6 +823,7 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
         const sc = await api('/api/scatter?mask=' + rec.id);
         S.gen.placements = sc.placements || []; S.gen.plSel = -1; maskPixels = null;
         await loadSlots(rec.id);
+        await loadLanes(rec.id);
         if(S.gen.placements.length) log(`${S.gen.placements.length} saved object placement(s) restored for this mask.`);
         renderObjList();
         drawBridges();
@@ -857,10 +861,11 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
           output_scale: +$('#outScale').value, soft_edges: $('#softEdges').checked,
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
           line_width_mode: $('#lineMode').value,
-          materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked }) });
+          materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks }) });
       S.gen.result = res;
       S.gen.top = null; S.gen.decals = null;
       await loadIslands(res);
+      await loadStreets(res);
       $('#lp-decals').innerHTML = '<div class="ph">—</div>';
       if(DEC.layers.length) await applyDecals();
       renderDecals();
@@ -873,9 +878,11 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
         s.markings.width_mode === 'learned' ? ` (${(s.markings.width_ratio*100).toFixed(1)}% of each street's width, learned)`
           : ' (fixed width)'}${s.markings.faint ? ': narrower than a pixel, so drawn faint, as a photo from this height shows them' : ''}.`);
       if(s.markings.lanes && Object.keys(s.markings.lanes).length)
-        log('  Lane lines by road width: ' + Object.entries(s.markings.lanes).sort()
-          .map(([k, n]) => `${n} street${n === 1 ? '' : 's'} ${k === 'highway' ? 'as highways (lanes, solid edges, a raised island)' : `with ${k}${k.startsWith('1 ') ? '' : 's'}`}`)
-          .join(', ') + '; under 6 m none.');
+        log('  Lanes (side 1 + side 2): ' + Object.entries(s.markings.lanes).sort()
+          .map(([k, n]) => `${n} street${n === 1 ? '' : 's'} ${k === 'none' ? 'too narrow for lines' : k.endsWith(' highway')
+            ? `${k.replace(' highway', '')} with an island` : k}`)
+          .join(', ') + (s.markings.picked ? `; ${s.markings.picked} set in the Lanes tool` : '')
+          + (s.markings.cut ? `, ${s.markings.cut} cut back to its limit` : '') + '.');
       if(s.markings.warning) log(`  Markings: ${s.markings.warning}.`, 'bad');
       if($('#lineMode').value === 'learned' && s.markings.width_mode !== 'learned')
         log('  No line width has been learned yet: train on pairs whose photos show painted lines. Using the fixed width.', 'bad');
@@ -965,6 +972,7 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
                        square: $('#matSquare').value },
           match_tone: $('#matTone').checked,
           island_slots: ISLS.slots,
+          lane_picks: LANES.picks,
           decals: $('#decalMode').value, decal_version: S.gen.decalVersion || 0,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
@@ -1032,6 +1040,8 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
         else log(`  Markings: ${res.dashes} dashes and lines as separate strips.`);
         if(res.lane_islands)
           log(`  Highways: ${res.lane_islands.count} raised island(s), ${res.lane_islands.length_m} m in all (Median islands).`);
+        if(res.lanes_cut)
+          log(`  Lanes: ${res.lanes_cut} street(s) measured a little narrower in the 3D model than in the texture, so their chosen lanes were cut back to its limit there.`, 'bad');
         if(res.materials_used && Object.keys(res.materials_used).length)
           log('  Scanned materials: ' + Object.entries(res.materials_used).map(([p, n]) => `${p} ${n}`).join(', ') + '.', 'ok');
         if(res.surface && res.surface.length)
@@ -1289,6 +1299,7 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
     layer.innerHTML = '';
     if(!S.gen.mask) return;
     drawIslands(f);
+    drawLanes(f);
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
     // ramps and deck along the road, from the last preview
     S.gen.bridgePreview.forEach(p => {
@@ -1557,6 +1568,7 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
     }
   }
   function setPick(i){
+    if(i >= 0 && LANES.on) lanesMode(false);
     ISLS.pick = i;
     if(i >= 0) log(`Pick islands for slot ${i + 1} (${slotMaterial(i).name}): click an island to add it, click it again to take it out.`);
     renderSlots(); drawBridges();
@@ -1631,6 +1643,230 @@ const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
       }
     });
   }
+  // ------------------------------------------------ lanes (app/lanes.py: the same equation)
+  // Every street's lanes are split evenly between its two sides, as many as its width
+  // holds: limit = floor((width - island) / 3 m), the island 1 m from 22 m. The Lanes
+  // tool gives a street its own: click it, set side 1 and side 2, never more than its
+  // limit together. Kept with the mask, by a point on each street, as the island slots.
+  const laneHighway = W => W >= LN.HIGHWAY - LN.TOL;
+  const laneLimit = W => Math.max(0, Math.floor((W + LN.TOL - (laneHighway(W) ? LN.ISLAND : 0)) / LN.LANE));
+  function laneSides(W, want){
+    const lim = laneLimit(W);
+    if(!want) return [Math.floor(lim / 2), Math.floor(lim / 2), false];
+    let a = Math.max(0, Math.trunc(want[0])), b = Math.max(0, Math.trunc(want[1])), cut = false;
+    while(a + b > lim){ if(a >= b) a--; else b--; cut = true; }
+    return [a, b, cut];
+  }
+  function laneLayout(W, want){
+    const [a, b, cut] = laneSides(W, want), lanes = a + b, half = W / 2;
+    const out = { limit: laneLimit(W), sides: [a, b], cut, lanes, lines: [], island: null, kind: 'none', lane_m: W };
+    if(lanes < 2) return out;
+    if(laneHighway(W) && a >= 1 && b >= 1){
+      const s = (W - LN.ISLAND) / lanes, i0 = a * s;
+      for(let k = 1; k < a; k++) out.lines.push([s * k - half, 'dash']);
+      for(let k = 1; k < b; k++) out.lines.push([i0 + LN.ISLAND + s * k - half, 'dash']);
+      [LN.EDGE, i0 - LN.EDGE, i0 + LN.ISLAND + LN.EDGE, W - LN.EDGE].forEach(x => out.lines.push([x - half, 'solid']));
+      return Object.assign(out, { kind: 'highway', lane_m: s, island: [i0 - half, i0 + LN.ISLAND - half] });
+    }
+    const s = W / lanes;
+    for(let k = 1; k < lanes; k++) out.lines.push([s * k - half, 'dash']);
+    return Object.assign(out, { kind: 'road', lane_m: s });
+  }
+  // a street's line moved d mask pixels to its side (-ty, tx), as the texture and the model move it
+  function offsetLine(line, d){
+    const n = line.length;
+    return line.map((p, i) => {
+      const a = line[Math.max(0, i - 1)], b = line[Math.min(n - 1, i + 1)];
+      let tx = b[0] - a[0], ty = b[1] - a[1]; const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+      return [p[0] - ty * d, p[1] + tx * d];
+    });
+  }
+  function distToLine(p, line){
+    let best = Infinity;
+    for(let i = 0; i + 1 < line.length; i++){
+      const a = line[i], b = line[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2)) : 0;
+      best = Math.min(best, Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy));
+    }
+    return line.length === 1 ? Math.hypot(p[0] - line[0][0], p[1] - line[0][1]) : best;
+  }
+  function midOf(line){
+    let total = 0; for(let i = 0; i + 1 < line.length; i++) total += Math.hypot(line[i+1][0] - line[i][0], line[i+1][1] - line[i][1]);
+    let left = total / 2;
+    for(let i = 0; i + 1 < line.length; i++){
+      const L = Math.hypot(line[i+1][0] - line[i][0], line[i+1][1] - line[i][1]);
+      if(left <= L){ const t = L ? left / L : 0; return [line[i][0] + (line[i+1][0] - line[i][0]) * t, line[i][1] + (line[i+1][1] - line[i][1]) * t]; }
+      left -= L;
+    }
+    return line[0].slice();
+  }
+  // which street each choice is for (the nearest, if the point lies on it), as the server matches them
+  function laneMatch(){
+    const of = new Map(), st = LANES.streets || [];
+    LANES.picks.forEach((p, k) => {
+      let best = -1, bd = Infinity;
+      st.forEach((s, i) => { const d = distToLine(p.pt, s.line); if(d < bd){ bd = d; best = i; } });
+      if(best >= 0 && bd <= st[best].width_m / 2 / LANES.mpp + 1 / LANES.mpp) of.set(best, k);
+    });
+    return of;
+  }
+  function streetLayout(i, of){
+    const s = LANES.streets[i], k = (of || laneMatch()).get(i);
+    return { s, k, L: laneLayout(s.width_m, k != null ? LANES.picks[k].sides : null) };
+  }
+  let lanesTimer = null;
+  function lanesChanged(){
+    renderLanes(); drawBridges();
+    window.dispatchEvent(new Event('materials'));                    // the 3D tab's scene is out of date
+    if(!S.gen.mask) return;
+    clearTimeout(lanesTimer);
+    const mask = S.gen.mask.id, picks = JSON.parse(JSON.stringify(LANES.picks));
+    lanesTimer = setTimeout(() => api('/api/lanes', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ mask, picks }) }).catch(e => log('Lane choices not saved: ' + e.message, 'bad')), 300);
+  }
+  function lanesMode(on){
+    LANES.on = on && !!LANES.streets;
+    if(LANES.on && ISLS.pick >= 0) setPick(-1);
+    if(!LANES.on) LANES.sel = -1;
+    else log('Set lanes: click a street to choose how many lanes each side has (the two sides show in blue and orange). Esc or Set lanes to finish.');
+    renderLanes(); drawBridges();
+  }
+  function setSides(i, a, b){
+    const of = laneMatch(), s = LANES.streets[i];
+    const [ca, cb] = laneSides(s.width_m, [a, b]);
+    let k = of.get(i);
+    if(k == null){ LANES.picks.push({ pt: midOf(s.line).map(v => Math.round(v * 10) / 10), sides: [ca, cb] }); }
+    else LANES.picks[k].sides = [ca, cb];
+    lanesChanged();
+  }
+  function setEven(i){
+    const k = laneMatch().get(i);
+    if(k != null){ LANES.picks.splice(k, 1); log(`Street ${LANES.streets[i].id}: back to the even split.`); lanesChanged(); }
+  }
+  function renderLanes(){
+    const has = !!LANES.streets;
+    $('#btnLanes').disabled = !has;
+    $('#btnLanes').setAttribute('aria-pressed', LANES.on);
+    $('#btnLanes').title = has ? 'Click streets on the map to choose their lanes' : 'Generate texture first: it finds the streets';
+    $('#btnLanesEven').disabled = !LANES.picks.length;
+    const of = laneMatch();
+    // the street being set
+    const ed = $('#laneEdit');
+    ed.hidden = !(LANES.on && LANES.sel >= 0 && has);
+    if(!ed.hidden){
+      const i = LANES.sel, { s, k, L } = streetLayout(i, of);
+      const [a, b] = L.sides, full = a + b >= L.limit;
+      const what = L.lanes < 2 ? 'one lane, no lines'
+        : `${a} + ${b} lane${a + b === 1 ? '' : 's'} of ${L.lane_m.toFixed(2)} m`
+          + (L.kind === 'highway' ? ', a raised island between the sides, solid lines at the kerbs and the island' : '')
+          + (a === 0 || b === 0 ? ' (one-way)' : '');
+      ed.innerHTML = `<div class="le-h">Street ${s.id} · ${s.width_m.toFixed(1)} m wide · holds at most ${L.limit} lane${L.limit === 1 ? '' : 's'}</div>
+        <div class="le-sides">
+          <span><span class="le-sw" style="background:rgb(70,140,255)"></span>Side 1</span>
+          <span class="le-step"><button type="button" data-s="0" data-d="-1" ${a <= 0 ? 'disabled' : ''}>−</button><b>${a}</b><button type="button" data-s="0" data-d="1" ${full ? 'disabled' : ''}>+</button></span><span></span>
+          <span><span class="le-sw" style="background:rgb(255,150,60)"></span>Side 2</span>
+          <span class="le-step"><button type="button" data-s="1" data-d="-1" ${b <= 0 ? 'disabled' : ''}>−</button><b>${b}</b><button type="button" data-s="1" data-d="1" ${full ? 'disabled' : ''}>+</button></span><span></span>
+        </div>
+        <div class="le-out">${k == null ? 'Even split: ' : 'Your choice: '}${what}.${full && L.limit ? ' That is its limit.' : ''}</div>
+        ${L.cut ? '<div class="le-cut">More than this street can hold: cut back to its limit.</div>' : ''}
+        <div style="margin-top:6px;display:flex;gap:6px"><button type="button" class="le-even" ${k == null ? 'disabled' : ''}>Even</button><button type="button" class="le-done">Done</button></div>`;
+      ed.querySelectorAll('.le-step button').forEach(btn => btn.addEventListener('click', () => {
+        const sd = [a, b]; sd[+btn.dataset.s] += +btn.dataset.d;
+        setSides(i, sd[0], sd[1]);
+      }));
+      $('.le-even', ed).addEventListener('click', () => setEven(i));
+      $('.le-done', ed).addEventListener('click', () => { LANES.sel = -1; renderLanes(); drawBridges(); });
+    }
+    // the streets given their own lanes
+    const list = $('#lanesList'); list.innerHTML = '';
+    const owner = new Map([...of.entries()].map(([i, k]) => [k, i]));
+    LANES.picks.forEach((p, k) => {
+      const row = document.createElement('div'); row.className = 'll-row';
+      const i = owner.get(k);
+      row.innerHTML = `<span></span><button type="button" class="ll-x" title="Back to the even split">×</button>`;
+      $('span', row).textContent = i != null
+        ? `Street ${LANES.streets[i].id} (${LANES.streets[i].width_m.toFixed(1)} m): ${laneSides(LANES.streets[i].width_m, p.sides).slice(0, 2).join(' + ')} lanes`
+        : `${p.sides.join(' + ')} lanes at (${Math.round(p.pt[0])}, ${Math.round(p.pt[1])})${LANES.streets ? ': on no street now' : ''}`;
+      row.addEventListener('click', () => { if(i != null){ LANES.sel = i; if(!LANES.on) lanesMode(true); else { renderLanes(); drawBridges(); } } });
+      $('.ll-x', row).addEventListener('click', e => { e.stopPropagation(); LANES.picks.splice(k, 1); LANES.sel = -1; lanesChanged(); });
+      list.appendChild(row);
+    });
+  }
+  function drawLanes(f){
+    const st = LANES.streets;
+    if(!st || !LANES.on) return;
+    const of = laneMatch(), g = el('g', {}, layer), top = el('g', {}, layer);
+    const pts = l => l.map(q => `${(q[0] * f).toFixed(1)},${(q[1] * f).toFixed(1)}`).join(' ');
+    const hr = Math.max(4, genVp.canvas.width / 260), m2px = f / LANES.mpp;   // display pixels per metre
+    st.forEach((s, i) => {
+      if(s.line.length < 2) return;
+      const { k, L } = streetLayout(i, of), sel = i === LANES.sel;
+      const fs = Math.max(hr * 1.2, Math.min(hr * 8, s.width_m * m2px * 0.42));     // a label that fits the road
+      if(sel){
+        // its two sides, in two colours, each as wide as its lanes (split at the island, or at the
+        // line between the sides), and its lines and island as they will be laid
+        const half = s.width_m / 2 / LANES.mpp, [a, b] = L.sides;
+        const split = (L.island ? (L.island[0] + L.island[1]) / 2 : (a + b ? a * L.lane_m - s.width_m / 2 : 0)) / LANES.mpp;
+        const bands = [[-half, split, 'rgba(70,140,255,.40)', '1'], [split, half, 'rgba(255,150,60,.40)', '2']];
+        bands.forEach(([d0, d1, c, t]) => {
+          if(d1 - d0 < 1e-6) return;
+          el('polygon', { points: pts(offsetLine(s.line, d0).concat(offsetLine(s.line, d1).reverse())), fill: c, stroke: 'none' }, g);
+          const p = midOf(offsetLine(s.line, (d0 + d1) / 2));
+          const tx = el('text', { x: p[0] * f, y: p[1] * f, 'font-size': Math.min(fs * 1.4, (d1 - d0) * f * 0.8 + hr),
+                                  'stroke-width': fs * 0.2, class: 'lane-lbl' }, top);
+          tx.textContent = t;
+        });
+        if(L.island) el('polygon', { points: pts(offsetLine(s.line, L.island[0] / LANES.mpp).concat(offsetLine(s.line, L.island[1] / LANES.mpp).reverse())),
+                                    fill: 'rgba(200,196,186,.95)', stroke: 'rgba(90,88,84,.9)', 'stroke-width': Math.max(1, 0.1 * m2px) }, g);
+        L.lines.forEach(([x, kind]) => el('polyline', { points: pts(offsetLine(s.line, x / LANES.mpp)), fill: 'none',
+          stroke: '#fff', 'stroke-width': Math.max(1, 0.3 * m2px), 'stroke-dasharray': kind === 'dash' ? `${3 * m2px} ${6 * m2px}` : 'none' }, g));
+      }
+      el('polyline', { points: pts(s.line), fill: 'none', stroke: k != null ? 'rgba(255,200,80,.95)' : 'rgba(255,255,255,.55)',
+        'stroke-width': Math.max(1, hr * (sel ? 0.18 : 0.3)), 'stroke-dasharray': sel ? 'none' : `${hr} ${hr * 0.7}` }, g);
+      // what it has, on it
+      const p = midOf(s.line);
+      if(!sel){
+        const tx = el('text', { x: p[0] * f, y: p[1] * f, 'font-size': fs, 'stroke-width': fs * 0.2, class: 'lane-lbl',
+          fill: k != null ? '#ffd27a' : '#fff' }, top);
+        tx.textContent = L.lanes < 2 ? '–' : `${L.sides[0]}|${L.sides[1]}`;
+      }
+      const hit = el('polyline', { points: pts(s.line), fill: 'none', stroke: 'rgba(0,0,0,0)',
+        'stroke-width': Math.max(hr * 2, s.width_m * m2px), class: 'lane-hit' }, top);
+      hit.addEventListener('click', e => {
+        if(genVp.wasDrag && genVp.wasDrag()) return;
+        e.stopPropagation();
+        LANES.sel = i; renderLanes(); drawBridges();
+      });
+    });
+  }
+  async function loadLanes(maskId){
+    LANES.mask = maskId; LANES.picks = []; LANES.streets = null; LANES.sel = -1; LANES.on = false;
+    try{
+      const r = await api('/api/lanes?mask=' + maskId);
+      if(LANES.mask !== maskId) return;
+      LANES.picks = r.picks || [];
+      if(LANES.picks.length) log(`${LANES.picks.length} street(s) with their own lanes restored for this mask.`);
+    }catch(_){}
+    renderLanes();
+  }
+  async function loadStreets(res){
+    LANES.streets = null; LANES.sel = -1;
+    if(res.streets && res.streets.url){
+      try{
+        const d = await api(res.streets.url);
+        LANES.streets = d.streets || []; LANES.mpp = +d.mpp || mppMask();
+      }catch(e){ log('Streets for the Lanes tool not loaded: ' + e.message, 'bad'); }
+    }
+    if(!LANES.streets) LANES.on = false;
+    renderLanes(); drawBridges();
+  }
+  $('#btnLanes').addEventListener('click', () => lanesMode(!LANES.on));
+  $('#btnLanesEven').addEventListener('click', () => {
+    if(!LANES.picks.length) return;
+    log(`All ${LANES.picks.length} street choice(s) cleared: every street splits its lanes evenly.`);
+    LANES.picks = []; LANES.sel = -1; lanesChanged();
+  });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && LANES.on && !MAT.open) lanesMode(false); });
   $('#btnAddSlot').addEventListener('click', () => {
     const first = MAT.lib && MAT.lib.materials.find(m => m.kind === 'ground');
     ISLS.slots.push({ material: first ? first.id : 'same', picks: [] });
