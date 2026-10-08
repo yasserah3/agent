@@ -50,7 +50,7 @@ const TIMES = {
 };
 const LAMP = { height: 8.0, arm: 1.6, candela: 320, pool: 12 };
 const PHOTO_LAMPS = 1000;
-const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'alphaMap', 'aoMap', 'bumpMap', 'pomMap', 'mixMap', 'mixNormal', 'mixOrh'];
+const TEXTURE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'alphaMap', 'aoMap', 'bumpMap', 'pomMap', 'mixMap', 'mixNormal', 'mixOrh', 'groundPattern'];
 
 // the Light panel: the sun's (or moon's) strength, the street lamps' brightness
 // and colour, and how wet the streets are, kept in this browser for the next time
@@ -1781,16 +1781,6 @@ if( bakeOn > 0.5 ){
 // the way: the stones' own shadows. Fades out with distance (Surface relief: 0 is off).
 const RELIEF = new WeakMap();                              // material -> { map, depth (m) }
 const RELIEF_U = { reliefScale: { value: LIGHT.relief }, reliefFar: { value: 40 } };
-// the threshold of the ground's patch pattern (gFbm, about normal: mean 0.5, spread 0.132 measured)
-// above which a share `amount` of the ground lies
-function mixThreshold(amount){
-  const p = Math.min(0.999, Math.max(0.001, 1 - amount));
-  // the normal distribution's quantile (Acklam's approximation, central part)
-  const q = p - 0.5, r = q * q;
-  const z = (((((-39.69683028665376 * r + 220.9460984245205) * r - 275.9285104469687) * r + 138.357751867269) * r - 30.66479806614716) * r + 2.506628277459239) * q
-          / (((((-54.47609879822406 * r + 161.5858368580409) * r - 155.6989798598866) * r + 66.80131188771972) * r - 13.28068155288572) * r + 1);
-  return 0.5 + 0.132 * z;
-}
 async function loadRelief(gltf){
   const mats = new Set();
   gltf.scene.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) mats.add(m); });
@@ -1799,25 +1789,36 @@ async function loadRelief(gltf){
     const r = m.userData && m.userData.relief;
     if(!r || !(r.depth_m > 0) || r.index == null) return;
     try{
-      const rel = { map: await tex(r.index, false), depth: r.depth_m, drift: +m.userData.drift || 0 };
+      const rel = { map: await tex(r.index, false), depth: r.depth_m, drift: 0 };
       m.pomMap = rel.map; m.pomDepth = r.depth_m;                      // read by the path tracer only
-      const x = m.userData.mix;
-      if(x && x.map != null && x.normal != null && x.orh != null){
-        // a second ground material in patches through this one
-        rel.mix = { map: await tex(x.map, true), normal: await tex(x.normal, false), orh: await tex(x.orh, false),
-                    depth: +x.depth_m || 0, thresh: mixThreshold(+x.amount || 0), size: Math.max(1, +x.size_m || 10),
-                    seed: (+x.seed || 0) * 17.31 + 3.7 };
-        Object.assign(m, { mixMap: rel.mix.map, mixNormal: rel.mix.normal, mixOrh: rel.mix.orh, mixDepth: rel.mix.depth,
-                           mixThresh: rel.mix.thresh, mixSize: rel.mix.size, mixSeed: rel.mix.seed });
+      // the ground pattern (the same picture in every model, made by the server): where a
+      // slot's Mix lies and how the colour drifts, as the islands texture has them too
+      const pi = m.userData.pattern;
+      if(pi != null){
+        rel.pattern = await tex(pi, false);
+        rel.pattern.wrapS = rel.pattern.wrapT = THREE.RepeatWrapping;
+        m.groundPattern = rel.pattern;
+        rel.drift = +m.userData.drift || 0;
+        const x = m.userData.mix;
+        if(x && x.map != null && x.normal != null && x.orh != null && x.thresh != null && x.scale > 0){
+          // a second ground material in patches through this one
+          const off = Array.isArray(x.offset) ? x.offset : [0, 0];
+          rel.mix = { map: await tex(x.map, true), normal: await tex(x.normal, false), orh: await tex(x.orh, false),
+                      depth: +x.depth_m || 0, thresh: +x.thresh, scale: +x.scale, offset: new THREE.Vector2(+off[0] || 0, +off[1] || 0) };
+          Object.assign(m, { mixMap: rel.mix.map, mixNormal: rel.mix.normal, mixOrh: rel.mix.orh, mixDepth: rel.mix.depth,
+                             mixThresh: rel.mix.thresh, mixScale: rel.mix.scale, mixOffX: rel.mix.offset.x, mixOffY: rel.mix.offset.y });
+        }
       }
+      // (a model made before the pattern: no mix and no drift, as before them)
       if(rel.drift) m.groundDrift = rel.drift;
       RELIEF.set(m, rel);
     }catch(_){ /* without its height map the material stays flat */ }
   }));
 }
 // The ground's variety (Island material slots' Mix, and every ground material's drift):
-// a broad pattern of the ground (gFbm of the world position, the same function as the
-// photo's) decides where the second material lies; at the edges of its patches whichever
+// the ground pattern (a picture in the model, read at the world position; the photo and
+// the islands texture read it the same way) decides where the second material lies: where
+// its red is above the slot's threshold. At the edges of its patches whichever
 // stones stand higher show, as gravel pokes through sand. Each of the material's pictures
 // is read from both and blended, and the relief is that of the blend. Drift: the colour
 // and the shine wander a little over a metre or few, never repeating.
@@ -1829,15 +1830,13 @@ varying vec2 vGroundW;
 vec2 pomOff = vec2( 0.0 ), pomDx = vec2( 0.0 ), pomDy = vec2( 0.0 );
 vec3 pomGu = vec3( 0.0 ), pomGv = vec3( 0.0 ), pomN = vec3( 0.0, 0.0, 1.0 );
 float pomDet = 1.0, pomD = 0.0, pomH = 1.0, pomFill = 0.0;
-float gHash( vec2 p ){ return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 ); }
-float gNoise( vec2 p ){
-  vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
-  return mix( mix( gHash( i ), gHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( gHash( i + vec2( 0.0, 1.0 ) ), gHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
-}
-float gFbm( vec2 p ){ return 0.5 * gNoise( p ) + 0.3 * gNoise( p * 2.03 + 7.1 ) + 0.2 * gNoise( p * 4.07 + 3.3 ); }
+#if defined( USE_MIX ) || defined( USE_DRIFT )
+uniform sampler2D groundPattern;
+#endif
 #ifdef USE_MIX
 uniform sampler2D mixMap, mixNormal, mixOrh;
-uniform float mixDepth, mixThresh, mixSize, mixSeed;
+uniform float mixDepth, mixThresh, mixScale;
+uniform vec2 mixOffset;
 const vec2 mixShift = vec2( 0.37, 0.61 );
 float mixN = 0.0, mixW = 0.0;
 // how much of the second material, from the pattern here and the two heights (metres)
@@ -1876,7 +1875,7 @@ void pomMarch( vec3 N ){
   pomDet = dot( q0, cross( q1, N ) );
   pomN = N;
 #ifdef USE_MIX
-  mixN = gFbm( vGroundW / mixSize + mixSeed );
+  mixN = textureLod( groundPattern, vGroundW * mixScale + mixOffset, 0.0 ).r;   // its finest, as the photo and the 2D read it
 #endif
   vec3 E = normalize( vViewPosition );
   float En = dot( E, N );
@@ -1938,7 +1937,8 @@ const pomChunk = (name, mix) => THREE.ShaderChunk[name]
            (_, t, uv) => mix ? `mixTex( ${t}, ${MIX_OF[t]}, ${uv} )` : `relTex( ${t}, ${uv} )`);
 const DRIFT_COLOUR = `
 #ifdef USE_DRIFT
-gDriftA = gFbm( vGroundW / 1.7 + 11.0 ) - 0.5; gDriftB = gFbm( vGroundW / 5.3 + 23.0 ) - 0.5;
+gDriftA = texture2D( groundPattern, vGroundW / 54.4 + vec2( 0.11, 0.23 ) ).g - 0.5;    // as app/islands.py's DRIFT_READS
+gDriftB = texture2D( groundPattern, vGroundW / 169.6 + vec2( 0.71, 0.47 ) ).b - 0.5;
 diffuseColor.rgb *= ( 1.0 + driftAmt * ( 2.0 * gDriftA + 1.6 * gDriftB ) ) * vec3( 1.0 + driftAmt * gDriftB, 1.0, 1.0 - driftAmt * gDriftB );
 #endif
 `;
@@ -1952,9 +1952,10 @@ function reliefPatch(sh, rel, wet){
   if(mix){
     defs += '#define USE_MIX\n';
     Object.assign(sh.uniforms, { mixMap: { value: mix.map }, mixNormal: { value: mix.normal }, mixOrh: { value: mix.orh },
-      mixDepth: { value: mix.depth }, mixThresh: { value: mix.thresh }, mixSize: { value: mix.size }, mixSeed: { value: mix.seed } });
+      mixDepth: { value: mix.depth }, mixThresh: { value: mix.thresh }, mixScale: { value: mix.scale }, mixOffset: { value: mix.offset } });
   }
   if(rel.drift){ defs += '#define USE_DRIFT\n'; sh.uniforms.driftAmt = { value: rel.drift }; }
+  if(rel.pattern) sh.uniforms.groundPattern = { value: rel.pattern };
   sh.vertexShader = 'varying vec2 vPomUv;\nvarying vec2 vGroundW;\n' + sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\nvPomUv = uv;')
     .replace('#include <project_vertex>', '#include <project_vertex>\nvGroundW = ( modelMatrix * vec4( transformed, 1.0 ) ).xz;');
   let f = sh.fragmentShader.replace('void main() {', defs + POM_PARS + '\nvoid main() {')

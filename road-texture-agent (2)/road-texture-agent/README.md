@@ -1016,20 +1016,34 @@ their own, island by island:
   ground of about its colour, `mix_with` in `library.json`); *None* lays the
   material alone. Its colour is moved halfway to the slot material's, so the
   patches differ in grain more than in hue.
-  - Where the patches lie is a broad random pattern of the ground (the world
-    position, never repeating); at their edges whichever material's stones
-    stand higher shows (each one's height map, in metres), so the gravel pokes
-    through the sand instead of a soft fade. Every picture (colour, bump,
-    roughness, occlusion) is read from both and blended, and the relief is
-    that of the blend: no extra faces.
-  - The 3D tab and Render photo show it (the same pattern in both, and in the
-    denoiser's pass). In the GLB the second material's three pictures are in
-    the material's extras (`mix`); Blender, Unreal, FBX and OBJ see the slot's
-    material alone. Generate islands texture (2D) does not mix them.
+  - Where the patches lie is the **ground pattern** (below): the patches are
+    where its red is above the slot's threshold, which is worked out from the
+    pattern itself so that exactly the Amount of the ground is covered. Each
+    slot reads it at its own place, so two slots' patches differ. At their
+    edges whichever material's stones stand higher shows (each one's height
+    map, in metres), so the gravel pokes through the sand instead of a soft
+    fade. Every picture (colour, bump, roughness, occlusion) is read from both
+    and blended, and the relief is that of the blend: no extra faces.
+  - The 3D tab, Render photo (and the denoiser's pass), the Top view and
+    Generate islands texture all show it, with the patches in the same places.
+    In the GLB the second material's three pictures are in the material's
+    extras (`mix`, with `thresh`, `scale` and `offset`: where it lies);
+    Blender, Unreal, FBX and OBJ see the slot's material alone.
 - **Drift.** Every desert and ground material's colour and shine wander a
   little (about ±7%, a warmer or cooler tint, slightly glossier or duller)
-  over a metre or few, never repeating: on top of the broad light and dark,
-  so a large sandy island has no two metres alike.
+  over a metre or few: on top of the broad light and dark, so a large sandy
+  island has no two metres alike. The 3D tab, the photo, the Top view and the
+  islands texture drift the same way (the pattern's green and blue).
+- **The ground pattern** is one small picture (512 × 512, PNG, about 360 KB)
+  made by the server, the same for every model, and put in the GLB once
+  (material extras `pattern`: its texture). Its three colours are three smooth
+  random fields: red places the Mix's patches, green and blue drive the drift.
+  It repeats only every 32 patches (320 m at 10 m patches; the drift every 54
+  and 170 m), so the repeat is not seen. Everything that shows the ground
+  reads this one picture at the same world positions (`app/islands.py`:
+  `ground_pattern`, `mix_params`, `pattern_at`), which is why the 2D texture
+  and the 3D views agree. A model built before the pattern (version
+  2026.10.08-mix1) shows no Mix or drift until it is built again.
 - **Generate islands texture** makes a texture of only the islands: the same
   size as the road texture, each island laid with its material at real size
   along its main kerb direction, the roads transparent (PNG with alpha). Its
@@ -1039,6 +1053,13 @@ their own, island by island:
   first use of a desert material makes its tiles, a few seconds each).
   - Ground is mixed from two of its tile variants by a smooth random field,
     and paving keeps one variant and grid per island, as in the 3D model.
+  - Ground has the 3D model's variety too: the slot's Mix in patches (in the
+    same places as in the 3D tab and the Top view, the higher stones of either
+    at the edges) and the drift, read from the same ground pattern and blended
+    in linear colour as the GPU blends them. Only the tiles' own placement
+    (their rotation and offset in each island) differs from the 3D model's.
+    The Mix makes it take about half as long again (a 3600 × 2800 texture of
+    a 990 × 770 m map: 23 s with Mix on its ground slots, 15 s without).
   - At coarse scales (1.1 m per pixel) a texture pixel is wider than a whole
     tile: each pixel then holds the material's average over it (no
     flicker or moiré), with the broad light and dark on top.

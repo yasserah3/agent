@@ -17,10 +17,12 @@
 // little (the gaps the flat surface cannot trace). Height (blue: Road Texture Agent packs it
 // with occlusion in red and roughness in green) and occlusion use the uv as it is.
 // One more pixel per material (47) holds them.
-// Ground mix and drift (pixels 48, 49): a second material (mixMap, mixNormal, mixOrh, mixDepth) in
-// patches where a broad pattern of the world position (gFbm, as the live view's) is above mixThresh
-// (mixSize metres, mixSeed); at the patch edges the higher stones of either show; every picture is
-// read from both and blended, the relief too. groundDrift: colour and shine wander over metres.
+// Ground mix and drift (pixels 48 to 50): a second material (mixMap, mixNormal, mixOrh, mixDepth) in
+// patches where the ground pattern (groundPattern, a picture Road Texture Agent puts in the model,
+// read at world xz * mixScale + mixOffset, as the live view and the islands texture read it) has
+// its red above mixThresh; at the patch edges the higher stones of either show; every picture is
+// read from both and blended, the relief too. groundDrift: colour and shine wander over metres
+// (the pattern's green and blue).
 // A see-through material with an alpha test too (a decal in the photo): what is under the
 // test is skipped every time, and the rest is still see-through as much as its alpha says.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
@@ -3072,7 +3074,7 @@ function getLights( scene ) {
 
 }
 
-const MATERIAL_PIXELS = 50;
+const MATERIAL_PIXELS = 51;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
 
 class MaterialFeatures {
@@ -3506,15 +3508,19 @@ class MaterialsTexture extends DataTexture {
 			floatArray[ index ++ ] = getTexture( m, 'aoMap' );
 			floatArray[ index ++ ] = m.aoMap ? getField( m, 'aoMapIntensity', 1.0 ) : 0.0;
 
-			// samples 48, 49: the ground's mix (a second material) and its drift
+			// samples 48 to 50: the ground's mix (a second material), the pattern and the drift
 			floatArray[ index ++ ] = getTexture( m, 'mixMap' );
 			floatArray[ index ++ ] = getTexture( m, 'mixNormal' );
 			floatArray[ index ++ ] = getTexture( m, 'mixOrh' );
 			floatArray[ index ++ ] = getField( m, 'mixDepth', 0.0 );
 			floatArray[ index ++ ] = getField( m, 'mixThresh', 2.0 );
-			floatArray[ index ++ ] = getField( m, 'mixSize', 10.0 );
-			floatArray[ index ++ ] = getField( m, 'mixSeed', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'mixScale', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'mixOffX', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'mixOffY', 0.0 );
+			floatArray[ index ++ ] = getTexture( m, 'groundPattern' );
 			floatArray[ index ++ ] = getField( m, 'groundDrift', 0.0 );
+			floatArray[ index ++ ] = 0.0;
+			floatArray[ index ++ ] = 0.0;
 
 		}
 
@@ -4601,8 +4607,9 @@ const material_struct = /* glsl */ `
 		int mixOrh;
 		float mixDepth;
 		float mixThresh;
-		float mixSize;
-		float mixSeed;
+		float mixScale;
+		vec2 mixOffset;
+		int groundPattern;
 		float groundDrift;
 
 		mat3 mapTransform;
@@ -4661,6 +4668,7 @@ const material_struct = /* glsl */ `
 		vec4 s47 = texelFetch1D( tex, i + 47u );
 		vec4 s48 = texelFetch1D( tex, i + 48u );
 		vec4 s49 = texelFetch1D( tex, i + 49u );
+		vec4 s50 = texelFetch1D( tex, i + 50u );
 
 		Material m;
 		m.color = s0.rgb;
@@ -4733,9 +4741,10 @@ const material_struct = /* glsl */ `
 		m.mixOrh = int( round( s48.b ) );
 		m.mixDepth = s48.a;
 		m.mixThresh = s49.r;
-		m.mixSize = s49.g;
-		m.mixSeed = s49.b;
-		m.groundDrift = s49.a;
+		m.mixScale = s49.g;
+		m.mixOffset = s49.ba;
+		m.groundPattern = int( round( s50.r ) );
+		m.groundDrift = s50.g;
 		m.transparent = bool( s14.a );
 
 		uint firstTextureTransformIdx = i + 15u;
@@ -7291,7 +7300,6 @@ const get_surface_record_function = /* glsl */`
 		vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
 		return mix( mix( wetHash( i ), wetHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( wetHash( i + vec2( 0.0, 1.0 ) ), wetHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
 	}
-	float gFbm( vec2 p ) { return 0.5 * wetNoise( p ) + 0.3 * wetNoise( p * 2.03 + 7.1 ) + 0.2 * wetNoise( p * 4.07 + 3.3 ); }
 	int getSurfaceRecord(
 		Material material, SurfaceHit surfaceHit, sampler2DArray attributesArray,
 		float accumulatedRoughness,
@@ -7323,9 +7331,9 @@ const get_surface_record_function = /* glsl */`
 		// relief: the ray followed down into the height map; every picture is read where it
 		// meets the surface (the triangle's dP/du, dP/dv turn moves across it into uv)
 		gPomMapA = material.pomMap; gPomDepthA = material.pomDepth;
-		gMixOrh = material.pomMap != - 1 ? material.mixOrh : - 1;
+		gMixOrh = material.pomMap != - 1 && material.groundPattern != - 1 && material.mixScale > 0.0 ? material.mixOrh : - 1;
 		gMixDepth = material.mixDepth; gMixThresh = material.mixThresh;
-		gMixN = gMixOrh != - 1 ? gFbm( surfHitPoint.xz / max( material.mixSize, 0.5 ) + material.mixSeed ) : 0.0;
+		gMixN = gMixOrh != - 1 ? texture2D( textures, vec3( surfHitPoint.xz * material.mixScale + material.mixOffset, material.groundPattern ) ).r : 0.0;
 		gMixW = 0.0;
 		if ( material.pomMap != - 1 && ptTop() > 0.0 && reliefPT.x > 0.0 ) {
 
@@ -7414,9 +7422,10 @@ const get_surface_record_function = /* glsl */`
 
 		// ground: the colour wandering over a metre or few
 		gDriftA = 0.0;
-		if ( material.groundDrift > 0.0 ) {
+		if ( material.groundDrift > 0.0 && material.groundPattern != - 1 ) {
 
-			float da = gFbm( surfHitPoint.xz / 1.7 + 11.0 ) - 0.5, db = gFbm( surfHitPoint.xz / 5.3 + 23.0 ) - 0.5;
+			float da = texture2D( textures, vec3( surfHitPoint.xz / 54.4 + vec2( 0.11, 0.23 ), material.groundPattern ) ).g - 0.5;
+			float db = texture2D( textures, vec3( surfHitPoint.xz / 169.6 + vec2( 0.71, 0.47 ), material.groundPattern ) ).b - 0.5;
 			albedo.rgb *= ( 1.0 + material.groundDrift * ( 2.0 * da + 1.6 * db ) ) * vec3( 1.0 + material.groundDrift * db, 1.0, 1.0 - material.groundDrift * db );
 			gDriftA = da;
 

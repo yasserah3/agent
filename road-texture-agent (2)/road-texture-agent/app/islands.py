@@ -16,6 +16,7 @@ The islands texture (texture()) is the counterpart of the road texture: the
 same size, the islands laid with their materials at real size and the roads
 left transparent, so the two fit together edge to edge.
 """
+import functools
 import json
 
 import numpy as np
@@ -168,6 +169,98 @@ def field_at(field, x_m, y_m, cell_m=2.0):
                                order=1, mode="nearest")
 
 
+# ------------------------------------------------------------------ the ground pattern
+# One small picture, the same in every model, that the 3D tab, the photo render, the
+# Top view and the islands texture all read for the ground's variety, so all four agree
+# on where a slot's Mix lies and how the colour drifts: three smooth random fields (red:
+# the Mix's patches; green and blue: the drift), each about normal around 0.5 with
+# spread PATTERN_SD, repeating at the picture's edges. Read at a point's world (x, z)
+# in metres (the model's: x from the map's left edge less half its width, z likewise
+# down) as uv = (x, z) * scale + offset, bilinear, wrapping; texel centres at
+# (i + 0.5) / PATTERN_PX, row 0 at v = 0 (glTF's picture order).
+PATTERN_PX, PATTERN_UNITS = 512, 32      # 32 features across before it repeats
+PATTERN_SD = 0.132
+DRIFT_READS = ((54.4, (0.11, 0.23)), (169.6, (0.71, 0.47)))   # green, blue: repeat (m), offset; 1.7 and 5.3 m features
+
+
+@functools.lru_cache(maxsize=1)
+def ground_pattern():
+    """The ground pattern: PATTERN_PX square, RGB, uint8 (always the same picture)."""
+    n, u = PATTERN_PX, PATTERN_PX / PATTERN_UNITS
+    rng = np.random.default_rng(20261008)
+    out = np.zeros((n, n, 3), np.uint8)
+    for c in range(3):
+        f = np.zeros((n, n))
+        for sigma_u, wgt in ((0.5, 0.5), (0.25, 0.3), (0.12, 0.2)):   # broad, finer, finest, as an fbm's octaves
+            z = ndi.gaussian_filter(rng.standard_normal((n, n)), sigma_u * u, mode="wrap")
+            f += wgt * z / z.std()
+        f = (f - f.mean()) / f.std()
+        out[..., c] = np.clip(np.round((0.5 + PATTERN_SD * f) * 255), 0, 255)
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def ground_pattern_png():
+    import io
+    buf = io.BytesIO()
+    Image.fromarray(ground_pattern(), "RGB").save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+@functools.lru_cache(maxsize=1)
+def _pattern_sorted():
+    """The red field as bilinear reads see it (texels and the points between), sorted: for thresholds."""
+    r = ground_pattern()[..., 0].astype(np.float64) / 255
+    rx, ry = (r + np.roll(r, -1, 1)) / 2, (r + np.roll(r, -1, 0)) / 2
+    rxy = (rx + np.roll(rx, -1, 0)) / 2
+    return np.sort(np.concatenate([a.ravel() for a in (r, rx, ry, rxy)]))
+
+
+def pattern_at(channel, x, z, scale, offset):
+    """The pattern's channel (0 red .. 2 blue) at world points (x, z) metres, as a GPU reads it."""
+    P = ground_pattern()[..., channel].astype(np.float32) / 255
+    n = P.shape[0]
+    u = (np.asarray(x, np.float64) * scale + offset[0]) * n - 0.5
+    v = (np.asarray(z, np.float64) * scale + offset[1]) * n - 0.5
+    return ndi.map_coordinates(P, [v, u], order=1, mode="grid-wrap")
+
+
+def mix_params(amount, size_m, seed):
+    """
+    Where a slot's Mix lies: its patches are where the pattern's red is above
+    thresh, which a share `amount` of the ground is; patches about size_m across;
+    each slot at its own place in the pattern. {"thresh", "scale", "offset"}.
+    """
+    a = float(amount)
+    s = _pattern_sorted()
+    thresh = 2.0 if a <= 0 else float(s[min(len(s) - 1, max(0, int(round((1 - a) * len(s)))))])
+    k = int(seed)
+    return {"thresh": round(thresh, 5), "scale": 1.0 / (PATTERN_UNITS * max(0.5, float(size_m))),
+            "offset": [round((0.618034 * k + 0.13) % 1.0, 5), round((0.381966 * k + 0.57) % 1.0, 5)]}
+
+
+def mix_weight(n, thresh, hA, depth_a, hB, depth_b):
+    """
+    How much of the second material (0..1) where the pattern is n: across the
+    patch edge, the higher stones of either show (heights 0..1 of their depths, m).
+    The 3D tab's and the photo's mixWeight.
+    """
+    s = (n - thresh) / 0.035 + 2.5 * (hB * depth_b - hA * depth_a) / max(depth_a, depth_b, 1e-4)
+    t = np.clip(0.5 + s, 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def drift_at(x, z):
+    """The drift's two fields at world points, about -0.5..0.5 (the 3D tab's gDriftA, gDriftB)."""
+    return tuple(pattern_at(1 + i, x, z, 1.0 / rep, off) - 0.5 for i, (rep, off) in enumerate(DRIFT_READS))
+
+
+def drift_colour(rgb_lin, amount, da, db):
+    """Linear colours (N, 3) drifted as the 3D tab drifts them."""
+    k = (1.0 + amount * (2.0 * da + 1.6 * db))[:, None]
+    return rgb_lin * k * np.stack([1.0 + amount * db, np.ones_like(db), 1.0 - amount * db], -1)
+
+
 # ------------------------------------------------------------------ the islands texture
 def _main_direction(rings, W, H):
     """An island's main kerb direction (radians): its edges' directions averaged four-fold, the image border left out."""
@@ -183,27 +276,45 @@ def _main_direction(rings, W, H):
 
 
 class _Tile:
-    """A material tile ready to sample at the texture's scale: blurred to its pixel footprint (wrapping), or its mean."""
+    """
+    A material tile (a file or a picture; grey: a height map) ready to sample at
+    the texture's scale: blurred to its pixel footprint (wrapping), or its mean.
+    """
 
-    def __init__(self, path, tile_m, mpp_out):
+    def __init__(self, src, tile_m, mpp_out, grey=False):
         from scipy.ndimage import fourier_gaussian
-        img = np.asarray(Image.open(path).convert("RGB"), np.float32)
+        im = src if isinstance(src, Image.Image) else Image.open(src)
+        img = np.asarray(im.convert("L" if grey else "RGB"), np.float32)
+        if grey:
+            img = img[..., None]
+        self.nc = img.shape[2]
         self.px = img.shape[1]
         self.k = self.px / tile_m                       # tile pixels per metre
         foot = mpp_out * self.k                         # tile pixels under one texture pixel
-        self.mean = img.reshape(-1, 3).mean(axis=0)
+        self.mean = img.reshape(-1, self.nc).mean(axis=0)
         self.flat = foot > self.px / 3                  # finer than the picture can show: its mean colour
         if not self.flat and foot > 1.0:
             sigma = 0.5 * foot
             img = np.stack([np.fft.ifft2(fourier_gaussian(np.fft.fft2(img[..., c]), sigma)).real
-                            for c in range(3)], -1).astype(np.float32)
+                            for c in range(self.nc)], -1).astype(np.float32)
         self.img = img
 
     def sample(self, u_m, v_m):
         if self.flat:
-            return np.broadcast_to(self.mean, (len(u_m), 3)).copy()
+            return np.broadcast_to(self.mean, (len(u_m), self.nc)).copy()
         at = [np.asarray(v_m) * self.k, np.asarray(u_m) * self.k]
-        return np.stack([ndi.map_coordinates(self.img[..., c], at, order=1, mode="grid-wrap") for c in range(3)], -1)
+        return np.stack([ndi.map_coordinates(self.img[..., c], at, order=1, mode="grid-wrap") for c in range(self.nc)], -1)
+
+
+def _lin(c):
+    """sRGB 0..255 to linear 0..1 (the GPU's reading of a colour picture)."""
+    c = np.clip(c / 255.0, 0.0, 1.0)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _srgb(c):
+    c = np.clip(c, 0.0, 1.0)
+    return 255.0 * np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
 
 
 def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, default, seed, out_path,
@@ -216,7 +327,13 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
     gravel, earth) is mixed from its tile variants and given broad light and
     dark, so it shows no repeat; paving keeps its joints on one grid.
 
-    slot_of: {island id: slot}; looks: {slot: {"tiles": [paths], "tile_m", "ground": bool}};
+    Ground also has the 3D model's variety, read from the same ground pattern at
+    the same world points: a slot's Mix (its second material in patches, the
+    higher stones of either at their edges) and the colour's drift.
+
+    slot_of: {island id: slot}; looks: {slot: {"tiles": [paths], "tile_m", "ground": bool,
+    and for ground: "heights": [height pictures, as tiles], "depth_m", "drift",
+    "mix": {"tile": path, "height": picture, "depth_m", "thresh", "scale", "offset"}}};
     default: the same for islands in no slot. With result_path and full_path,
     also writes the road texture with the islands under it.
     Returns {"size", "islands", "by_slot": {slot: count}}.
@@ -252,10 +369,19 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
     def tiles_of(key):
         if key not in tiles:
             L = default if key == -1 else looks[key]
-            tiles[key] = ([_Tile(p, L["tile_m"], mpp_out) for p in L["tiles"]], bool(L.get("ground")))
+            tm = L["tile_m"]
+            T = {"tiles": [_Tile(p, tm, mpp_out) for p in L["tiles"]], "ground": bool(L.get("ground")),
+                 "drift": float(L.get("drift") or 0.0), "mix": None}
+            mx = L.get("mix")
+            if mx and L.get("heights"):
+                T["heights"] = [_Tile(h, tm, mpp_out, grey=True) for h in L["heights"]]
+                T["mix"] = dict(mx, tile=_Tile(mx["tile"], tm, mpp_out), height=_Tile(mx["height"], tm, mpp_out, grey=True),
+                                depth_a=float(L.get("depth_m") or 0.0), shift=(0.37 * tm, 0.61 * tm))
+            tiles[key] = T
         return tiles[key]
 
     field = ground_field(Wo * mpp_out, Ho * mpp_out, seed)
+    half_w, half_h = Wo * mpp_out / 2, Ho * mpp_out / 2           # the 3D model's x = 0, z = 0
     mix = ground_field(Wo * mpp_out, Ho * mpp_out, int(seed) + 1)
     out = np.zeros((Ho, Wo, 4), np.uint8)
     full = None
@@ -282,23 +408,47 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
         keys = look_of[ids]
         for key in np.unique(keys):
             sel = keys == key
-            tl, ground = tiles_of(int(key))
+            T = tiles_of(int(key))
+            tl, ground, mx = T["tiles"], T["ground"], T["mix"]
             i = ids[sel]
             c, sn = np.cos(theta[i]), np.sin(theta[i])
             u = c * X[sel] + sn * Y[sel] + off[i, 0]
             v = -sn * X[sel] + c * Y[sel] + off[i, 1]
+            hA = None
             if ground and len(tl) > 1:
                 # two of its variants, mixed by a smooth random field: no repeat to see
                 va, vb = tl[0].sample(u, v), tl[1].sample(u + 37.0, v + 11.0)
                 w = np.clip(0.5 + 1.2 * field_at(mix, X[sel], Y[sel]), 0, 1)[:, None]
                 col = va * (1 - w) + vb * w
+                if mx:
+                    hs = T["heights"]
+                    hA = (hs[0].sample(u, v) * (1 - w) + hs[1 % len(hs)].sample(u + 37.0, v + 11.0) * w)[:, 0] / 255
             else:
                 # one variant per island, as the 3D model lays them
                 var = pick[i] % len(tl)
                 col = np.zeros((len(i), 3), np.float32)
+                hA = np.zeros(len(i), np.float32) if mx else None
                 for vk in np.unique(var):
                     m = var == vk
                     col[m] = tl[int(vk)].sample(u[m], v[m])
+                    if mx:
+                        hA[m] = T["heights"][int(vk) % len(T["heights"])].sample(u[m], v[m])[:, 0] / 255
+            if mx or T["drift"] > 0:
+                # the ground pattern at these points' world positions (the 3D model's x, z)
+                xw, zw = X[sel] - half_w, Y[sel] - half_h
+                lin = _lin(col)
+                if mx:
+                    pn = pattern_at(0, xw, zw, mx["scale"], mx["offset"])
+                    inpatch = pn >= mx["thresh"] - 0.12
+                    if inpatch.any():
+                        ub, vb_ = u[inpatch] + mx["shift"][0], v[inpatch] + mx["shift"][1]
+                        hB = mx["height"].sample(ub, vb_)[:, 0] / 255
+                        wm = mix_weight(pn[inpatch], mx["thresh"], hA[inpatch], mx["depth_a"], hB, mx["depth_m"])[:, None]
+                        lin[inpatch] = lin[inpatch] * (1 - wm) + _lin(mx["tile"].sample(ub, vb_)) * wm
+                if T["drift"] > 0:
+                    da, db = drift_at(xw, zw)
+                    lin = drift_colour(lin, T["drift"], da, db)
+                col = _srgb(lin).astype(np.float32)
             amp = GROUND_AMP if ground else PAVED_AMP
             col *= (1.0 + amp * field_at(field, X[sel], Y[sel]))[:, None]
             rgb[sel] = col

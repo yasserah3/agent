@@ -397,10 +397,13 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
     mix (ground): a second ground material in patches through this one,
     {"tile": its tile record, "amount": 0-0.9, "size_m": patch size, "seed"}:
     its colour, normal and occlusion-roughness-height pictures in the extras
-    ("mix": textures, depth_m, amount, size_m, seed), blended by the 3D tab and
-    the photo render through a broad noise pattern of the ground, the higher
-    stones of either showing at the edges. drift: how much colour and shine
-    drift over a metre or few (ground). Other programs see this material alone.
+    ("mix": textures, depth_m, amount, size_m, seed, and where it lies: thresh,
+    scale, offset), blended by the 3D tab and the photo render where the ground
+    pattern (app/islands.py; extras "pattern": its texture, red) is above
+    thresh, the higher stones of either showing at the edges. drift: how much
+    colour and shine drift over a metre or few (ground; the pattern's green and
+    blue). The islands texture reads the same pattern, so they agree. Other
+    programs see this material alone.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=92)
@@ -421,9 +424,12 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
                                     "orh": _image_index(images, SF.pack_orh(br, ba, bh), "image/jpeg"),
                                     "depth_m": brel, "amount": round(float(mix["amount"]), 3),
                                     "size_m": round(float(mix["size_m"]), 2), "seed": int(mix.get("seed", 0)),
-                                    "name": mix.get("name", "")}
+                                    "name": mix.get("name", ""),
+                                    **ISL.mix_params(mix["amount"], mix["size_m"], mix.get("seed", 0))}
         if drift > 0:
             mat["extras"]["drift"] = round(float(drift), 3)
+        if drift > 0 or "mix" in mat["extras"]:
+            mat["extras"]["pattern"] = _image_index(images, ISL.ground_pattern_png(), "image/png")
         mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
         mat["occlusionTexture"] = {"index": orh}
         pbr["metallicRoughnessTexture"] = {"index": orh}
@@ -1110,6 +1116,12 @@ class PavedFrames:
 
 
 GROUND_DRIFT = 0.07     # ground: how far colour and shine drift over a metre or few (0.07: about 7%)
+
+
+def tile_relief(tile, tile_m, kind):
+    """A tile's height map (grey picture) and relief (m), as its material in the model has them."""
+    _, _, hgt, _, _, relief = SF.maps(Image.open(tile["path"]), (tile_m, tile_m), kind, own=LIB.own_maps(tile))
+    return Image.open(io.BytesIO(hgt)).convert("L"), float(relief)
 
 
 def _slot_mix(frames, s, vk):

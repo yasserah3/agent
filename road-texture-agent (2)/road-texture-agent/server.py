@@ -60,7 +60,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.08-mix1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.08-pat1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1818,15 +1818,28 @@ def islands_texture(payload: dict):
     except ValueError as e:
         raise HTTPException(400, str(e))
     tile_m = float(tileset["settings"]["tile_m"])
-    looks = {s: {"tiles": [t["path"] for t in v["tiles"]], "tile_m": tile_m, "ground": v["kind"] == "ground"}
-             for s, v in islands["looks"].items()}
+
+    def look(recs, kind, mix=None):
+        # ground: the 3D model's variety too (its drift, and the slot's Mix with both height maps,
+        # placed by the same ground pattern), so the islands texture matches the model
+        out = {"tiles": [t["path"] for t in recs], "tile_m": tile_m, "ground": kind == "ground"}
+        if kind == "ground":
+            out["drift"] = M3.GROUND_DRIFT
+            if mix and mix.get("tiles"):
+                hs = [M3.tile_relief(t, tile_m, kind) for t in recs[:2]]
+                bh, bd = M3.tile_relief(mix["tiles"][0], tile_m, "ground")
+                out.update(heights=[h for h, _ in hs], depth_m=hs[0][1],
+                           mix={"tile": mix["tiles"][0]["path"], "height": bh, "depth_m": bd,
+                                **ISL.mix_params(mix["amount"], mix["size_m"], mix.get("seed", 0))})
+        return out
+    looks = {s: look(v["tiles"], v["kind"], v.get("mix")) for s, v in islands["looks"].items()}
     base = tileset["tiles"].get("block") or tileset["tiles"].get("sidewalk")
     if not base:
         if len(islands["slot_of"]) < len(json.loads(Path(isl_art["path"]).read_text())["islands"]):
             raise HTTPException(400, "no sidewalk tiles yet for the islands without a material: build them in the "
                                      "Memory tab, choose a Squares material, or give every island a material")
         base = next(iter(islands["looks"].values()))["tiles"]
-    default = {"tiles": [t["path"] for t in base], "tile_m": tile_m, "ground": M3._sidewalk_kind(base[0]) == "ground"}
+    default = look(base, M3._sidewalk_kind(base[0]))
     data = json.loads(Path(isl_art["path"]).read_text())
     out, full = ARTIFACTS / f"gen_{gid}_islandtex.png", ARTIFACTS / f"gen_{gid}_full.png"
     info = ISL.texture(np.array(Image.open(rec["path"]).convert("L")), islands["labels"], data["islands"],
