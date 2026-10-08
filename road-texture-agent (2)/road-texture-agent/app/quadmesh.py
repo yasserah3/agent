@@ -25,6 +25,7 @@ import numpy as np
 from scipy import ndimage as ndi
 
 from app import junctions as J
+from app import lanes as LN
 from app import progress as prog
 from app.generation import _ordered_path
 
@@ -130,6 +131,9 @@ class Mesh:
         self.sw_rows = {}    # road edge vertex -> the sidewalk row beside it, for corners
         self.sw_cfg = None
         self.dash_owner = []   # per dash: the street or connector it lies on
+        self.dash_solid = []   # per dash: a solid line (a highway's edge lines), never painted
+        self.lane_islands = []  # per highway: its raised island's two edges, in texture pixels
+        self.island_owner = []  # per island: its street
         self.kerb_owner = []   # per kerb face: its street, junction or connector
         self.streets = {}      # street id -> centreline, rows and sidewalk rows, for bridges
         self.jinfo = {}        # junction id -> centre and the street ends that meet there
@@ -348,10 +352,11 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             ix = np.clip(pts[:, 0].astype(int), 0, nomark.shape[1] - 1)
             unmarked = nomark[iy, ix].mean() > 0.5
         if dashes and not narrow_ramp and not unmarked:
-            n0 = len(mesh.dashes)
+            n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
             cfg_d = dict(dashes, min_cycles=2) if grp is not None else dashes
             layout = _dash_strips(mesh, pts, side, arc, hw_final, mpp, scale, cfg_d)
             mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
+            mesh.island_owner.extend([sid] * (len(mesh.lane_islands) - i0))
 
         # which rows to build: all of them, or in the optimised mesh only where
         # the road needs them
@@ -476,12 +481,13 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             tg = np.gradient(pts, axis=0)
             tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
             side = np.column_stack([-tg[:, 1], tg[:, 0]])
-            n0 = len(mesh.dashes)
+            n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
             layout = _dash_strips(mesh, pts, side, arc, np.full(len(pts), float(hw)), mpp, scale, dashes)
             if layout is None:
                 continue
             sid = INNER_OWNER + len(mesh.streets) + 1
             mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
+            mesh.island_owner.extend([sid] * (len(mesh.lane_islands) - i0))
             _inner_band(mesh, sid, pts, side, arc, float(hw), layout, road, mpp, scale)
     if mesh.sw_cfg and mesh.sw_mode == "kerb_line":
         _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_)
@@ -650,8 +656,7 @@ def _inner_band(mesh, sid, pts, side, arc, hw, layout, road, mpp, scale, max_gap
     """
     L = arc[-1] * mpp
     at = set(np.round(arc * mpp, 6))
-    start = layout["setback_m"] - (1 - layout["share"]) * layout["step_m"] + 0.05
-    stop = layout["setback_m"] + layout["n"] * layout["step_m"] - 0.05
+    start, stop = layout["run_m"][0] + 0.05, layout["run_m"][1] - 0.05
     at |= {a for a in (start, stop) if 0 < a < L}
     a_sorted = sorted(at)
     extra = []
@@ -680,13 +685,32 @@ def _inner_band(mesh, sid, pts, side, arc, hw, layout, road, mpp, scale, max_gap
                          "length_m": float(L), "dash": layout, "half_width_m": float(hw * mpp), "inner": True}
 
 
-def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg):
+def _line_strip(pts, side, arc, a, b, off, halfw, scale):
+    """A line's quads from arc a to b (mask pixels along), off to the side, halfw each way of it."""
+    inside = (arc > a) & (arc < b)
+    ts = np.concatenate([[a], arc[inside], [b]])
+    cx = np.interp(ts, arc, pts[:, 0]); cy = np.interp(ts, arc, pts[:, 1])
+    sx = np.interp(ts, arc, side[:, 0]); sy = np.interp(ts, arc, side[:, 1])
+    nrm = np.hypot(sx, sy); nrm[nrm == 0] = 1; sx, sy = sx / nrm, sy / nrm
+    hw = np.broadcast_to(halfw, ts.shape)
+    return [((cx[k] + sx[k] * (off + hw[k])) * scale, (cy[k] + sy[k] * (off + hw[k])) * scale,
+             (cx[k] + sx[k] * (off - hw[k])) * scale, (cy[k] + sy[k] * (off - hw[k])) * scale)
+            for k in range(len(ts))]
+
+
+def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True):
     """
-    Dashes as their own thin quads, following the street's smoothed centreline.
+    A street's lane lines as their own thin quads, following its smoothed
+    centreline: as many as its width calls for, where app/lanes.py puts them,
+    dashed or solid; and on a highway (island True) its raised island's edges
+    (mesh.lane_islands).
 
     Same rules as the texture: a setback from each end so no dash is cut at a
-    junction, a whole number of cycles with the gaps stretched to fit, and a
-    width that is either the learned share of the street's width or fixed.
+    junction, a whole number of cycles with the gaps stretched to fit, every
+    lane's dashes side by side, a width that is either the learned share of the
+    street's width or fixed, and the street read the canonical way. Returns the
+    layout ("run_m": where the dashes run, in metres along the street as built),
+    or None for a street with no lines.
     """
     L = arc[-1] * mpp
     setback, cycle = cfg.get("setback_m", 2.0), cfg.get("cycle_m", 9.0)
@@ -697,26 +721,37 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg):
     n = max(1, int(round(usable / cycle)))
     if n < cfg.get("min_cycles", 1):
         return None
+    k = len(hw)
+    inner = np.asarray(hw)[int(k * 0.15): max(int(k * 0.85), int(k * 0.15) + 1)]
+    street_m = 2 * float(np.median(inner)) * mpp            # its width, away from the flared ends
+    lay = LN.layout(street_m)
+    if not lay["lines"]:
+        return None
     step = usable / n
-    ratio, fixed = cfg.get("width_ratio"), cfg.get("width_m", 0.15)
-    width_m = (float(np.median(hw)) * 2 * mpp * ratio) if ratio else fixed
-    layout = {"setback_m": setback, "step_m": step, "n": n, "share": share, "width_m": width_m}
-    for c in range(n):
-        a = (setback + c * step) / mpp
-        b = a + step * share / mpp
-        inside = (arc > a) & (arc < b)
-        ts = np.concatenate([[a], arc[inside], [b]])
-        cx = np.interp(ts, arc, pts[:, 0]); cy = np.interp(ts, arc, pts[:, 1])
-        sx = np.interp(ts, arc, side[:, 0]); sy = np.interp(ts, arc, side[:, 1])
-        nrm = np.hypot(sx, sy); nrm[nrm == 0] = 1; sx, sy = sx / nrm, sy / nrm
-        halfw = np.interp(ts, arc, hw) * ratio if ratio else np.full_like(ts, fixed / 2 / mpp)
-        strip = []
-        for k in range(len(ts)):
-            strip.append(((cx[k] + sx[k] * halfw[k]) * scale, (cy[k] + sy[k] * halfw[k]) * scale,
-                          (cx[k] - sx[k] * halfw[k]) * scale, (cy[k] - sy[k] * halfw[k]) * scale))
-        mesh.dashes.append(strip)
+    width_m = LN.line_width(street_m, cfg.get("width_ratio"), cfg.get("width_m", 0.15))
+    canon = LN.canonical(pts[0], pts[-1])
+    sgn = 1.0 if canon else -1.0                             # across, as the street was built
+    to_arc = (lambda a: a) if canon else (lambda a: L - a)
+    gap = (1 - share) * step
+    run = (setback - gap, setback + n * step) if canon else (setback, L - setback + gap)
+    layout = {"setback_m": setback, "step_m": step, "n": n, "share": share, "width_m": width_m,
+              "street_m": street_m, "kind": lay["kind"], "lines": lay["lines"], "island": lay["island"],
+              "canon": canon, "length_m": L, "run_m": run}
+    halfw = width_m / 2 / mpp
+    for x_m, kind in lay["lines"]:
+        off = sgn * x_m / mpp
+        pieces = ([(setback, L - setback)] if kind == "solid"
+                  else [(setback + c * step, setback + c * step + step * share) for c in range(n)])
+        for a_m, b_m in pieces:
+            a, b = sorted((to_arc(a_m) / mpp, to_arc(b_m) / mpp))
+            mesh.dashes.append(_line_strip(pts, side, arc, a, b, off, halfw, scale))
+            mesh.dash_solid.append(kind == "solid")
+    if island and lay["island"]:
+        a, b = setback / mpp, (L - setback) / mpp
+        edges = [_line_strip(pts, side, arc, a, b, sgn * x / mpp, 0.0, scale) for x in lay["island"]]
+        mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
+                                  "height_m": LN.ISLAND_H_M})
     return layout
-
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +990,7 @@ def _connector(mesh, A, B, spacing, owner, is_bridge, bi, dashes, mpp, scale):
         arc = np.linspace(0.0, L / scale, len(pts))
         hw = np.full(len(pts), float(np.linalg.norm(np.array(V[ra[-1]]) - np.array(V[ra[0]]))) / 2 / scale)
         n0 = len(mesh.dashes)
-        _dash_strips(mesh, pts, side, arc, hw, mpp, scale, dashes)
+        _dash_strips(mesh, pts, side, arc, hw, mpp, scale, dashes, island=False)
         mesh.dash_owner.extend([owner] * (len(mesh.dashes) - n0))
     # sidewalks carried across, joining the two mouths' sidewalks
     if mesh.sw_cfg:
@@ -2066,8 +2101,7 @@ def _row_keep(pts, tang, arc_m, hw, layout, max_gap_m=20.0, turn_deg=2.0, width_
     n = len(pts)
     must = {0, n - 1}
     if layout:
-        start = layout["setback_m"] - (1 - layout["share"]) * layout["step_m"] + 0.05
-        stop = layout["setback_m"] + layout["n"] * layout["step_m"] - 0.05
+        start, stop = layout["run_m"][0] + 0.05, layout["run_m"][1] - 0.05
         i0 = int(np.searchsorted(arc_m, start))
         i1 = int(np.searchsorted(arc_m, stop, side="right")) - 1
         for i in (i0, i1):

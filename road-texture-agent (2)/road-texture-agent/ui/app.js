@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.08-pat1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.08-lane1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -872,6 +872,10 @@ const UI_VERSION = '2026.10.08-pat1';   // must match VERSION in server.py
       log(`  ${s.markings.dashes} dashes placed, cycle ${s.markings.cycle_px} px, lines ${s.markings.width_px} px wide${
         s.markings.width_mode === 'learned' ? ` (${(s.markings.width_ratio*100).toFixed(1)}% of each street's width, learned)`
           : ' (fixed width)'}${s.markings.faint ? ': narrower than a pixel, so drawn faint, as a photo from this height shows them' : ''}.`);
+      if(s.markings.lanes && Object.keys(s.markings.lanes).length)
+        log('  Lane lines by road width: ' + Object.entries(s.markings.lanes).sort()
+          .map(([k, n]) => `${n} street${n === 1 ? '' : 's'} ${k === 'highway' ? 'as highways (lanes, solid edges, a raised island)' : `with ${k}${k.startsWith('1 ') ? '' : 's'}`}`)
+          .join(', ') + '; under 6 m none.');
       if(s.markings.warning) log(`  Markings: ${s.markings.warning}.`, 'bad');
       if($('#lineMode').value === 'learned' && s.markings.width_mode !== 'learned')
         log('  No line width has been learned yet: train on pairs whose photos show painted lines. Using the fixed width.', 'bad');
@@ -1023,9 +1027,11 @@ const UI_VERSION = '2026.10.08-pat1';   // must match VERSION in server.py
             + (res.blocks.kerb_faces ? `, with their own kerb faces (${res.blocks.kerb_faces.toLocaleString()})` : ', edges under the sidewalks') + '.');
         if(res.markings === 'painted')
           log(`  Markings painted into the road: ${res.painted_dashes} dashes on ${res.marked_quads.toLocaleString()} quads, `
-            + `${res.marked_textures.length} marked texture(s) (${res.marked_textures.map(m => m.width_cm + ' cm lines').join(', ')}).`
-            + (res.strip_dashes ? ` ${res.strip_dashes} dashes on bridge crossings stay as strips.` : ''));
-        else log(`  Markings: ${res.dashes} dashes as separate strips.`);
+            + `${res.marked_textures.length} marked texture(s) (${res.marked_textures.map(m => `${m.lines} line${m.lines === 1 ? '' : 's'} of ${m.width_cm} cm`).join(', ')}).`
+            + (res.strip_dashes ? ` ${res.strip_dashes} stay as strips (highways' solid lines, bridge crossings).` : ''));
+        else log(`  Markings: ${res.dashes} dashes and lines as separate strips.`);
+        if(res.lane_islands)
+          log(`  Highways: ${res.lane_islands.count} raised island(s), ${res.lane_islands.length_m} m in all (Median islands).`);
         if(res.materials_used && Object.keys(res.materials_used).length)
           log('  Scanned materials: ' + Object.entries(res.materials_used).map(([p, n]) => `${p} ${n}`).join(', ') + '.', 'ok');
         if(res.surface && res.surface.length)

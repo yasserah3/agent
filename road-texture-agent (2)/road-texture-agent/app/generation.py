@@ -12,10 +12,13 @@ A new mask comes in, a finished road texture goes out, in three layers:
   2. wear      - the isolated noise, laid over the surface at the strength you
                  choose. Drawn from the wear library, so it varies everywhere.
 
-  3. markings  - dashes along each street's centreline. Position and direction
-                 come from the skeleton, not from the agent: dashes stop a set
-                 distance before every junction and each street restarts its
-                 pattern, so no dash is ever cut in half at a junction.
+  3. markings  - lane lines along each street, as many as its width calls for
+                 (app/lanes.py: none under 6 m, one centre line from 6 m, up to
+                 four, and from 22 m a highway with a raised island). Position
+                 and direction come from the skeleton, not from the agent:
+                 dashes stop a set distance before every junction and each
+                 street restarts its pattern, so no dash is ever cut in half at
+                 a junction.
 
 The agent decides what things look like. The geometry decides where they go.
 """
@@ -27,9 +30,12 @@ from PIL import Image
 from scipy import ndimage as ndi
 
 from app import junctions as J
+from app import lanes as LN
 from app import progress as prog
 
 EDGE_METRES = 1.5
+ISLAND_RGB = (178, 175, 168)          # a highway island's concrete top, from above
+ISLAND_RIM_RGB = (112, 110, 106)      # and its kerb's face and shadow round it
 
 
 def load_patches(npz_path, with_masks=False):
@@ -234,31 +240,54 @@ def _stroke(cover, line, half_w, strength=1.0):
     np.maximum(cover[y0:y1, x0:x1], cov, out=cover[y0:y1, x0:x1])
 
 
+def _strokes(cover, line, half_w, strength, piece_px):
+    """A long line drawn as pieces of about piece_px, so each stroke's box stays small."""
+    if len(line) < 2:
+        return
+    d = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(line, axis=0).T))])
+    total = float(d[-1])
+    k = max(1, int(math.ceil(total / max(piece_px, 1.0))))
+    for i in range(k):
+        a, b = total * i / k, total * (i + 1) / k
+        inner = line[(d > a) & (d < b)]
+        ends = [np.array([np.interp(v, d, line[:, 0]), np.interp(v, d, line[:, 1])], np.float32) for v in (a, b)]
+        _stroke(cover, np.vstack([ends[0][None], inner, ends[1][None]]) if len(inner) else np.vstack(ends),
+                half_w, strength)
+
+
 def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m, rng,
                  align=False, width_ratio=None, nomark=None):
     """
-    Lay dashes along every street, stopping short of each junction.
+    Lay each street's lane lines (app/lanes.py: how many its width calls for,
+    where across it, dashed or solid), stopping short of each junction, and on
+    highways its raised island.
 
     The number of cycles per street is rounded to a whole number and the gaps
     stretched slightly to fit, so each street starts and ends on a full dash.
+    Every lane's dashes are side by side, measured along the centreline. A
+    street is read the canonical way (lanes.canonical), so its first side is
+    the one the 3D model picks too.
 
     A line narrower than a pixel (15 cm paint on a map at 1 m a pixel) is drawn
     one pixel wide but only as strong as the share of the pixel it covers, the
     way a photo from that height shows it, not widened to a whole pixel.
+
+    Returns the paint's coverage, a report, and the islands' (coverage, top's
+    coverage): the top a little narrower, so its rim can be shaded as a kerb.
     """
     road = det["road"]
     H, W = road.shape
     cover = np.zeros((H, W), np.float32)
+    isl = np.zeros((H, W), np.float32)
+    isl_top = np.zeros((H, W), np.float32)
     seg_lab = det["segments"]
     n = int(seg_lab.max())
     px = max(metres_per_pixel, 1e-6)
     cycle_px = cycle_m / px
     setback_px = setback_m / px
     width_px = width_m / px
-    half_w, strength = max(0.5, width_px / 2), min(1.0, width_px)
     placed = 0
-
-    widths_used = []
+    widths_used, street_m = [], []
     seg_px = det.get("segment_pixels") or J.label_coords(seg_lab, n)
     for s in range(1, n + 1):
         if s % 50 == 0:
@@ -268,20 +297,26 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
             continue
         if nomark is not None and nomark[coords[:, 0], coords[:, 1]].mean() > 0.5:
             continue                       # an inner street drawn without markings
-        if width_ratio:
-            # this street's own width, measured along its centreline, so the line
-            # keeps the learned proportion on wide and narrow roads alike, and at
-            # any output size
-            street_w = 2 * float(np.median(det["dt"][coords[:, 0], coords[:, 1]]))
-            width_px = width_ratio * street_w
-            half_w, strength = max(0.5, width_px / 2), min(1.0, width_px)
-            widths_used.append(width_px)
         path = _ordered_path(coords)
         if len(path) < 4:
             continue
+        # its width, measured along the middle of its centreline (its ends flare into
+        # the junctions); the distance field reads half a pixel more than the half width
+        pa = np.array(path)
+        mid = pa[int(len(pa) * 0.15): max(int(len(pa) * 0.85), int(len(pa) * 0.15) + 1)]
+        w_m = 2 * max(0.0, float(np.median(det["dt"][mid[:, 0], mid[:, 1]])) - 0.5) * px
+        lay = LN.layout(w_m)
+        if not lay["lines"]:
+            continue                       # too narrow for a line
+        street_m.append(w_m)
+        line_w = LN.line_width(w_m, width_ratio, width_m) / px
+        half_w, strength = max(0.5, line_w / 2), min(1.0, line_w)
+        widths_used.append(line_w)
         # always smooth a little so dashes follow the road axis, not the
         # skeleton's pixel steps; "lines not aligned" smooths more
         path = _smooth(path, window=15 if align else 7)
+        if not LN.canonical(path[0][::-1], path[-1][::-1]):
+            path = path[::-1]
         # arc length along the street
         d = [0.0]
         for a, b in zip(path, path[1:]):
@@ -294,20 +329,42 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
         step = usable / cycles             # gaps stretch a little to fit
         dash_len = step * dash_share
 
-        pts = np.array(path, np.float32)
+        pts = np.array(path, np.float32)                    # (y, x)
         dist = np.array(d, np.float32)
-        for c in range(cycles):
-            a = setback_px + c * step
-            b = a + dash_len
-            # the dash's own centreline, cut exactly at its start and end
-            inner = pts[(dist > a) & (dist < b)]
-            ends = [np.array([np.interp(v, dist, pts[:, 0]), np.interp(v, dist, pts[:, 1])], np.float32)
-                    for v in (a, b)]
-            line = np.vstack([ends[0][None], inner, ends[1][None]]) if len(inner) else np.vstack(ends)
-            _stroke(cover, line, half_w, strength)
-            placed += 1
+        # the sideways direction: (-ty, tx) in x, y, from a steadier copy of the line
+        tg = np.gradient(np.array(_smooth(path, window=min(31, len(path) // 2 * 2 - 1)) if len(path) > 8 else path,
+                                  np.float64), axis=0)
+        tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
+        nrm = np.column_stack([tg[:, 1], -tg[:, 0]]).astype(np.float32)   # (y, x) of (-ty, tx)
+        run = (dist >= setback_px) & (dist <= total - setback_px)
 
-    cover *= road_cov if (road_cov := det.get("coverage")) is not None else road
+        def along(off_px, a, b):
+            """The line off_px to the side, from a to b along the centreline."""
+            q = pts + nrm * off_px
+            inner = q[(dist > a) & (dist < b)]
+            ends = [np.array([np.interp(v, dist, q[:, 0]), np.interp(v, dist, q[:, 1])], np.float32) for v in (a, b)]
+            return np.vstack([ends[0][None], inner, ends[1][None]]) if len(inner) else np.vstack(ends)
+
+        for x_m, kind in lay["lines"]:
+            off = x_m / px
+            if kind == "solid":
+                _strokes(cover, along(off, setback_px, total - setback_px), half_w, strength, cycle_px)
+                continue
+            for c in range(cycles):
+                a = setback_px + c * step
+                _stroke(cover, along(off, a, a + dash_len), half_w, strength)
+                placed += 1
+        if lay["island"] and run.any():
+            x0, x1 = lay["island"]
+            spine = along((x0 + x1) / 2 / px, setback_px, total - setback_px)
+            hw_isl = (x1 - x0) / 2 / px
+            _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), cycle_px)
+            _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), cycle_px)
+
+    rc = road_cov if (road_cov := det.get("coverage")) is not None else road
+    cover *= rc
+    isl *= rc
+    isl_top = np.minimum(isl_top, isl)
     width_shown = float(np.median(widths_used)) if widths_used else width_px
     warning = None
     if cycle_px < 6:
@@ -318,7 +375,8 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
     return cover, {"dashes": placed, "cycle_px": round(cycle_px, 1),
                    "width_px": round(width_shown, 2),
                    "width_mode": "learned" if width_ratio else "fixed",
-                   "width_ratio": width_ratio, "faint": width_shown < 1.0, "warning": warning}
+                   "width_ratio": width_ratio, "faint": width_shown < 1.0, "warning": warning,
+                   "lanes": LN.summary(street_m)}, (isl, isl_top)
 
 
 def group_map(det, groups):
@@ -560,7 +618,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     # ---- 3. markings ----
     prog.stage("markings", "markings")
     paint_rgb = np.array(params.get("paint_colour", [235, 232, 222]), np.float32)
-    paint, dash_info = place_dashes(
+    paint, dash_info, (island, island_top) = place_dashes(
         det, mpp_out,
         cycle_m=float(params.get("cycle_m", 9.0)),
         dash_share=float(params.get("dash_share", 0.6)),
@@ -577,6 +635,15 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         a = paint[:, :, None]
         painted = paint_rgb[None, None, :] * (1.0 - 0.25 * wear_strength * wear_map)[:, :, None]
         result = result * (1 - a) + painted * a
+    if island.any():
+        # the highways' raised island: a concrete top with its grain, ringed by its
+        # kerb's darker face and shadow, as it looks from above
+        lum = worn.mean(axis=2, keepdims=True)
+        grain = 0.9 + 0.1 * lum / max(float(lum[road].mean()) if road.any() else 1.0, 1e-6)
+        top = np.array(ISLAND_RGB, np.float32)[None, None, :] * grain
+        rim = np.array(ISLAND_RIM_RGB, np.float32)[None, None, :] * grain
+        a_top, a_rim = island_top[:, :, None], np.clip(island - island_top, 0, 1)[:, :, None]
+        result = result * (1 - a_top - a_rim) + top * a_top + rim * a_rim
 
     background = np.array([18, 18, 20], np.float32)
     # the edge ring just outside the road has partial coverage but no texture:
@@ -602,6 +669,10 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     save(material, out_paths["material"])
     save(np.dstack([wear_map * 255] * 3), out_paths["wear"], soft=False)
     mark = paint[:, :, None] * paint_rgb[None, None, :]
+    if island.any():
+        # the islands with the markings: neither is asphalt, so the 3D model's
+        # tone (variation_factor) leaves both out
+        mark = np.maximum(mark, island[:, :, None] * np.array(ISLAND_RGB, np.float32)[None, None, :])
     save(mark, out_paths["markings"], soft=False)
 
     if map_path is not None:

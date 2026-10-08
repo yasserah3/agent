@@ -58,8 +58,9 @@ Settings > Apps > Advanced app settings > App execution aliases.
   1. *material*, built from the patch library for each part of the road, placed
      with random orientation and feathered where patches meet;
   2. *wear*, laid over it at the strength you choose;
-  3. *markings*, dashes along each street's centreline, stopping 2 m before
-     every junction so each street starts and ends on a whole dash.
+  3. *markings*, each street's lane lines (as many as its width calls for, see
+     **Lane lines by road width**), stopping 2 m before every junction so each
+     street starts and ends on a whole dash.
 
   Each layer is saved on its own, so you can look at them separately. The dash
   to gap ratio comes from the line image measured in priming; the cycle length
@@ -361,6 +362,55 @@ The viewer scales smoothly when zoomed in, and only shows hard pixel squares
 beyond 800%, for inspecting individual pixels. Zooming past 100% still enlarges
 the image rather than adding detail: for close-up work, generate at 2× or 4×.
 
+## Lane lines by road width
+
+How many lines a street gets, and where, follows its width (`app/lanes.py`,
+the same rules for the road texture and the 3D model):
+
+| Road width | Lines |
+| --- | --- |
+| under 6 m | none |
+| 6 to 9 m | one, in the centre |
+| 9 to 12 m | two |
+| 12 to 15 m | three |
+| 15 to 22 m | four |
+| 22 m and up | a two-way highway (below) |
+
+- The lines split the road into **equal lanes** (9 m: lines 3 m and 6 m from
+  the kerb; 10.5 m: 3.5 m and 7 m), all dashed. A road keeps the count of the
+  last width it reached: an 18 m road has four lines and 3.6 m lanes.
+- **Highways (22 m and up)**: lanes of 3 m (stretched a little to fill the
+  width exactly) and a **raised island** 1 m wide down the road. Five lanes on
+  the first side (lines 1 to 4 between them), the island, then the other
+  direction's lanes (lines 5, 6 ...): 22 m = 7 lanes x 3 m + 1 m (5 lines),
+  25 m 6 lines, 28 m 7, 31 to 33 m 8 (five lanes each way). Wider still, each
+  further lane goes to the direction with fewer, so both stay equal (34 m: 6
+  and 5 lanes, 9 lines; 37 m: 6 and 6, 10 lines).
+  - The lane lines are dashed. A **solid line** runs along both kerbs (30 cm
+    in) and along both sides of the island (30 cm from it).
+  - **The island** is a concrete strip 15 cm high with kerb faces, in the kerb
+    stone's material, from the first dash to the last (it stops short of the
+    junctions, as the lines do). In the 3D model it is a mesh of its own,
+    *Median islands*; in the road texture, a concrete strip with its kerb's
+    darker rim (it is also in the *Markings* layer, so the 3D model's tone
+    leaves it out).
+- Every lane's dashes lie side by side, measured along the centreline.
+- **Which side is first** (where the five lanes go) is the left of the
+  street's canonical direction (along its main axis, towards the right or
+  down the picture), the same in the texture and the 3D model, whichever end
+  the street was traced from.
+- A width read from the mask is a little short or long, so each width counts
+  from 40 cm below it: a road measured at 5.7 m gets the 6 m line.
+- A learned line width (a share of the road's width, below) is taken of at
+  most 9 m of it, so wide roads keep 15 cm-like lines instead of thick ones.
+- Single-lane ramps and slip roads inside junction groups still get no lines,
+  as before.
+- **Painted into the road texture** (3D model, Markings): one marked texture
+  per kind of street (its line width, and how many lines and where; streets
+  less than 60 cm apart in width share one), holding all its lanes' dashes.
+  The solid lines stay thin strips 1 cm above the road, so they run exactly
+  as far as the island.
+
 ## Line width
 
 By default, lines are drawn as a **share of each street's width**, learned from
@@ -599,8 +649,8 @@ thin quads 1 cm above the road) or *Painted into the road texture* (no extra
 geometry).
 
 Painted markings use a **marked road texture** holding exactly one dash cycle
-along the street, a dash then a gap, with the dash along its centre and the
-road's own grain. On each street, the quads where the dashes run get this
+along the street, a dash then a gap, with a dash on each of the street's lane
+lines (Lane lines by road width) and the road's own grain. On each street, the quads where the dashes run get this
 texture, laid along the street so each repeat is exactly one cycle, starting at
 the setback: the dashes land exactly where the strips would be. Near junctions,
 where there are no dashes, the ordinary road texture continues.
@@ -608,7 +658,7 @@ where there are no dashes, the ordinary road texture continues.
 - The grain joins itself where the texture repeats: the cycle is rarely a whole
   number of tiles, so the tiles are stretched slightly along the street to fit
   (two 4 m tiles stretched 12% make 9 m, invisible in grain).
-- One texture per line width, rounded to 5 cm, so learned widths still apply.
+- One texture per kind of street: its line width (rounded to 5 cm, so learned widths still apply) and its lane lines.
 - The texture is capped at 2048 pixels on its longer side, about 8 mm per pixel,
   so dashed streets are slightly softer close up than the 4 mm road tile.
 - Dashes on bridge crossings stay as strips.
@@ -633,7 +683,8 @@ road is no longer one traced fill. The centreline is re-read at full detail:
   runs afterwards.
 - **No centre dashes on narrow pieces** (under 80% of the typical road width:
   single-lane slip roads and ramps), and inside groups a piece needs room for
-  at least two dashes.
+  at least two dashes. Other pieces get their lane lines by width, as every
+  street does (Lane lines by road width).
 - **Sidewalks**: none inside highway interchanges; along roads in urban groups,
   with scraps shorter than 8 m dropped.
 - **Painted markings** use at most three line widths, so many short pieces do
