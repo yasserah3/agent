@@ -1818,16 +1818,22 @@ void pomMarch( vec3 N ){
   if( pomD <= 0.0 || En <= 0.05 || abs( pomDet ) < 1e-30 ){ pomD = 0.0; return; }
   // down the view ray to the full depth: this far across the surface, in uv
   vec2 duv = pomUv( ( N * En - E ) / max( En, 0.2 ) ) * pomD;
-  float n = floor( mix( 24.0, 8.0, En ) ), dl = 1.0 / n, layer = 0.0;
+  float n = floor( mix( 32.0, 8.0, En ) ), dl = 1.0 / n, layer = 0.0;
   float h = pomHeight( vPomUv ), prevH = h, prevL = 0.0;
-  for( int i = 0; i < 24; i ++ ){
+  for( int i = 0; i < 32; i ++ ){
     if( float( i ) >= n || 1.0 - h <= layer ) break;
     prevH = h; prevL = layer; layer += dl;
     h = pomHeight( vPomUv + duv * layer );
   }
-  // between the last two steps, where the ray met the surface
-  float a = ( 1.0 - h ) - layer, b = ( 1.0 - prevH ) - prevL;
-  layer = mix( prevL, layer, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
+  // between the last two steps, where the ray met the surface: halved a few times, then
+  // the last interval cut where the two heights say (no steps showing at a grazing view)
+  float lo = prevL, hi = layer, hLo = prevH, hHi = h;
+  for( int k = 0; k < 5; k ++ ){
+    float mid = 0.5 * ( lo + hi ), hm = pomHeight( vPomUv + duv * mid );
+    if( 1.0 - hm <= mid ){ hi = mid; hHi = hm; } else { lo = mid; hLo = hm; }
+  }
+  float a = ( 1.0 - hHi ) - hi, b = ( 1.0 - hLo ) - lo;
+  layer = mix( lo, hi, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
   pomOff = duv * layer;
   pomH = 1.0 - layer;
 }

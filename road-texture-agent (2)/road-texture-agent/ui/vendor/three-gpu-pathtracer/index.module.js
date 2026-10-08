@@ -7317,8 +7317,16 @@ const get_surface_record_function = /* glsl */`
 					h = texture2D( textures, vec3( uv + duv * layer, material.pomMap ) ).b;
 
 				}
-				float a = ( 1.0 - h ) - layer, b = ( 1.0 - prevH ) - prevL;
-				layer = mix( prevL, layer, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
+				// halved a few times around the crossing, then cut where the two heights say
+				float lo = prevL, hi = layer, hLo = prevH, hHi = h;
+				for ( int k = 0; k < 4; k ++ ) {
+
+					float mid = 0.5 * ( lo + hi ), hm = texture2D( textures, vec3( uv + duv * mid, material.pomMap ) ).b;
+					if ( 1.0 - hm <= mid ) { hi = mid; hHi = hm; } else { lo = mid; hLo = hm; }
+
+				}
+				float a = ( 1.0 - hHi ) - hi, b = ( 1.0 - hLo ) - lo;
+				layer = mix( lo, hi, clamp( b / max( b - a, 1e-5 ), 0.0, 1.0 ) );
 				uv += duv * layer;
 				pomHg = 1.0 - layer;
 				pomUvg = uv;
