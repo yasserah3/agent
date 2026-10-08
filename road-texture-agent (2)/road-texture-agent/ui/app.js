@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.08-mix1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -195,7 +195,19 @@ const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
     ISLS.changed(true);
   }
   function closeMatPop(){ $('#matPop').hidden = true; MAT.open = null; }
+  // a slot's mix: the second ground material in patches through its islands ('auto': the
+  // library's partner for its material, 'none'), how much of it and how big its patches
+  const MIX_DEFAULT = { material: 'auto', amount: 0.3, size_m: 10 };
+  const slotMix = i => Object.assign({}, MIX_DEFAULT, (ISLS.slots[i] || {}).mix || {});
+  function mixPartner(i){
+    const mix = slotMix(i), cur = slotMaterial(i);
+    if(!cur.m || cur.m.kind !== 'ground') return null;
+    const id = mix.material === 'auto' ? cur.m.mix_with : mix.material;
+    const m = id && id !== 'none' && MAT.lib ? MAT.lib.materials.find(x => x.id === id) : null;
+    return { mix, m, auto: mix.material === 'auto' };
+  }
   function openMatPop(chip){
+    if(chip.dataset.mix != null){ openMixPop(chip, +chip.dataset.slot); return; }
     const part = chip.dataset.part, slot = chip.dataset.slot != null ? +chip.dataset.slot : null;
     const key = slot != null ? 'island:' + slot : part;
     if(MAT.open === key){ closeMatPop(); return; }
@@ -248,6 +260,43 @@ const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
     if(left + pw > innerWidth - 12) left = Math.max(12, r.left);
     if(left + pw > innerWidth - 12) left = Math.max(12, innerWidth - pw - 12);
     if(left < r.right && left + pw > r.left) top = r.bottom + 8;          // no room beside it: below
+    top = Math.max(12, Math.min(top, innerHeight - ph - 12));
+    pop.style.left = left + 'px'; pop.style.top = top + 'px';
+  }
+  // the picker for a slot's mix partner: the library's suggestion, none, or any ground material
+  function openMixPop(chip, slot){
+    const key = 'mix:' + slot;
+    if(MAT.open === key){ closeMatPop(); return; }
+    MAT.open = key;
+    const pop = $('#matPop'), grid = $('#matPopGrid'), mix = slotMix(slot), own = slotMaterial(slot);
+    $('#matPopTitle').textContent = `Mixed into slot ${slot + 1} (${own.name}), in patches`;
+    grid.innerHTML = '';
+    const card = (value, name, sub, ball, title) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'mp-card'; b.setAttribute('aria-pressed', value === mix.material); b.title = title || name;
+      b.innerHTML = (ball ? `<img loading="lazy" alt="">` : '<div class="mp-none">none</div>') + '<span></span><small></small>';
+      if(ball) $('img', b).src = ball;
+      $('span', b).textContent = name; $('small', b).textContent = sub;
+      b.addEventListener('click', () => {
+        if(ISLS.slots[slot]) ISLS.slots[slot].mix = Object.assign(slotMix(slot), { material: value });
+        closeMatPop(); log(`Slot ${slot + 1}: mixed with ${name}.`); ISLS.changed();
+      });
+      grid.appendChild(b);
+    };
+    const group = text => { const g = document.createElement('div'); g.className = 'mp-group'; g.textContent = text; grid.appendChild(g); };
+    const sug = own.m && MAT.lib ? MAT.lib.materials.find(x => x.id === own.m.mix_with) : null;
+    group('Mix');
+    card('auto', sug ? `Suggested: ${sug.name}` : 'Suggested', 'a coarser ground of a like colour', sug ? API + `/api/materials/${sug.id}/ball` : null,
+         'The library\'s partner for this material: a coarser (or finer) ground of about its colour');
+    card('none', 'None', 'this material alone', null, 'No patches: this material alone');
+    group('Scanned desert and ground');
+    for(const m of (MAT.lib ? MAT.lib.materials : []).filter(m => m.kind === 'ground' && (!own.m || m.id !== own.m.id)))
+      card(m.id, m.name, `${m.size_m[0]} m across`, API + `/api/materials/${m.id}/ball`, `${m.title} by ${(m.authors || []).join(', ')}, Poly Haven, ${m.licence}`);
+    pop.hidden = false;
+    const r = chip.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let left = r.right + 10, top = r.top - 8;
+    if(left + pw > innerWidth - 12) left = Math.max(12, Math.min(r.left, innerWidth - pw - 12));
+    if(left < r.right && left + pw > r.left) top = r.bottom + 8;
     top = Math.max(12, Math.min(top, innerHeight - ph - 12));
     pop.style.left = left + 'px'; pop.style.top = top + 'px';
   }
@@ -1438,7 +1487,12 @@ const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
         <button type="button" class="matChip" data-part="island" data-slot="${i}"><img alt=""><span class="mc-t"><small></small><b></b></span></button>
         <button type="button" class="isl-pick" aria-pressed="${ISLS.pick === i}">Pick</button>
         <button type="button" class="isl-x" title="Remove this slot (its islands go back to the Squares material)">×</button>
-        <input class="isl-ids" spellcheck="false" placeholder="${ISLS.data ? 'no islands: Pick, or type numbers' : 'Generate texture to number the islands'}">`;
+        <input class="isl-ids" spellcheck="false" placeholder="${ISLS.data ? 'no islands: Pick, or type numbers' : 'Generate texture to number the islands'}">
+        <div class="isl-mix" hidden>
+          <button type="button" class="matChip isl-mixchip" data-part="island" data-slot="${i}" data-mix="1"><img alt=""><span class="mc-t"><small>In patches through it</small><b></b></span></button>
+          <label title="How much of the ground the second material covers, in patches">Amount <output></output><input type="range" class="isl-amt" min="0" max="80" step="5"></label>
+          <label title="How big its patches are, about">Patches <select class="isl-size"><option value="4">4 m</option><option value="8">8 m</option><option value="10">10 m</option><option value="16">16 m</option><option value="25">25 m</option><option value="40">40 m</option></select></label>
+        </div>`;
       const chip = $('.matChip', row);
       $('small', chip).textContent = `Slot ${i + 1} · ${n} island${n === 1 ? '' : 's'}`;
       $('b', chip).textContent = cur.name;
@@ -1455,6 +1509,24 @@ const UI_VERSION = '2026.10.08-rel1';   // must match VERSION in server.py
         if(ISLS.pick === i) ISLS.pick = -1; else if(ISLS.pick > i) ISLS.pick--;
         log(`Island material slot ${i + 1} removed.`); ISLS.changed();
       });
+      // ground: a second material in patches (gravel through sand), the colour and shine drifting
+      const mp = mixPartner(i), mixBox = $('.isl-mix', row);
+      if(mp){
+        mixBox.hidden = false;
+        const mchip = $('.isl-mixchip', row);
+        $('b', mchip).textContent = mp.m ? (mp.auto ? `${mp.m.name} (suggested)` : mp.m.name) : 'None';
+        if(mp.m) $('img', mchip).src = API + `/api/materials/${mp.m.id}/ball`; else $('img', mchip).style.visibility = 'hidden';
+        mchip.title = 'A second ground material in patches through these islands, the higher stones of either showing at the edges (3D tab and Render photo). Click to change';
+        mchip.addEventListener('click', e => { e.stopPropagation(); window.openMatPop(mchip); });
+        const amt = $('.isl-amt', row), out = $('output', amt.parentNode), size = $('.isl-size', row);
+        amt.value = Math.round(mp.mix.amount * 100); out.textContent = amt.value + '%';
+        amt.disabled = size.disabled = !mp.m;
+        size.value = String(mp.mix.size_m);
+        if(size.value !== String(mp.mix.size_m)) size.add(new Option(`${mp.mix.size_m} m`, String(mp.mix.size_m), true, true));
+        amt.addEventListener('input', () => { out.textContent = amt.value + '%'; });
+        amt.addEventListener('change', () => { ISLS.slots[i].mix = Object.assign(slotMix(i), { amount: +amt.value / 100 }); ISLS.changed(); });
+        size.addEventListener('change', () => { ISLS.slots[i].mix = Object.assign(slotMix(i), { size_m: +size.value }); ISLS.changed(); });
+      }
       const ids = $('.isl-ids', row);
       ids.value = idText(lists[i]); ids.disabled = !ISLS.data;
       ids.title = 'The islands in this slot, by number: type them (such as 3, 7, 12-15) and press Enter';

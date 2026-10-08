@@ -1007,6 +1007,29 @@ their own, island by island:
   light and dark over it (drifts and damper patches, features about 3, 10
   and 35 m across, ±10%) so a large sandy block shows no tile repeat from
   above.
+- **Mix: a second ground in patches.** Under each desert and ground slot is
+  a second ball, **In patches through it**: another ground material laid in
+  patches through the slot's islands, such as sandy gravel through pale sand,
+  with **Amount** (the share of the ground it covers, 0 to 80%, 30% by default)
+  and **Patches** (about how big, 4 to 40 m, 10 m by default). By default it is
+  the library's partner for the material (*suggested*: a coarser or finer
+  ground of about its colour, `mix_with` in `library.json`); *None* lays the
+  material alone. Its colour is moved halfway to the slot material's, so the
+  patches differ in grain more than in hue.
+  - Where the patches lie is a broad random pattern of the ground (the world
+    position, never repeating); at their edges whichever material's stones
+    stand higher shows (each one's height map, in metres), so the gravel pokes
+    through the sand instead of a soft fade. Every picture (colour, bump,
+    roughness, occlusion) is read from both and blended, and the relief is
+    that of the blend: no extra faces.
+  - The 3D tab and Render photo show it (the same pattern in both, and in the
+    denoiser's pass). In the GLB the second material's three pictures are in
+    the material's extras (`mix`); Blender, Unreal, FBX and OBJ see the slot's
+    material alone. Generate islands texture (2D) does not mix them.
+- **Drift.** Every desert and ground material's colour and shine wander a
+  little (about ±7%, a warmer or cooler tint, slightly glossier or duller)
+  over a metre or few, never repeating: on top of the broad light and dark,
+  so a large sandy island has no two metres alike.
 - **Generate islands texture** makes a texture of only the islands: the same
   size as the road texture, each island laid with its material at real size
   along its main kerb direction, the roads transparent (PNG with alpha). Its

@@ -60,7 +60,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.08-rel1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.08-mix1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -792,6 +792,20 @@ def _island_tiles(tileset, slots, match_tone):
                     if match_tone and own is not None else None)
             recs = [LIB.tile_for(mid, tile_m, px, ARTIFACTS / "library", tone)]
         out[s] = {"tiles": recs, "name": e["name"], "kind": e["kind"]}
+        # ground: a second ground material in patches through it (the slot's mix, or the
+        # library's partner), its tone halfway to this one's so patches differ in grain more than hue
+        mix = slot.get("mix") or {}
+        bid = e.get("mix_with") if mix.get("material", "auto") == "auto" else mix.get("material")
+        be = LIB.entry(bid) if bid and bid != "none" and bid != mid else None
+        if e["kind"] == "ground" and be and be["kind"] == "ground" and mix.get("amount", ISL.MIX_AMOUNT) > 0:
+            a_mean = np.asarray(Image.open(recs[0]["path"]).convert("RGB")).reshape(-1, 3).mean(axis=0)
+            b_mean = np.asarray(Image.open(LIB.DIR / be["colour"]).convert("RGB")).reshape(-1, 3).mean(axis=0)
+            tone = np.sqrt(np.maximum(a_mean, 1.0) * np.maximum(b_mean, 1.0)).tolist()
+            # one tile of it: its patches never repeat in step anyway, and every variant then shares
+            # the same three pictures (the GLB and the photo render hold them once)
+            out[s]["mix"] = {"tiles": [LIB.tile_for(bid, tile_m, px, ARTIFACTS / "library", tone, variant=1)],
+                             "name": be["name"], "amount": float(mix.get("amount", ISL.MIX_AMOUNT)),
+                             "size_m": float(mix.get("size_m", ISL.MIX_SIZE_M)), "seed": s}
     return out
 
 
@@ -851,7 +865,7 @@ def list_materials():
         yours[part] = t["tileset"] if t else None
     return {"parts": {p: list(k) for p, k in LIB.KINDS_FOR_PART.items()},
             "yours": yours,
-            "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence", "pattern")}
+            "materials": [{k: e.get(k) for k in ("id", "name", "kind", "size_m", "source", "title", "authors", "licence", "pattern", "mix_with")}
                           for e in LIB.materials()]}
 
 

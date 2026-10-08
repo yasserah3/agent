@@ -17,6 +17,10 @@
 // little (the gaps the flat surface cannot trace). Height (blue: Road Texture Agent packs it
 // with occlusion in red and roughness in green) and occlusion use the uv as it is.
 // One more pixel per material (47) holds them.
+// Ground mix and drift (pixels 48, 49): a second material (mixMap, mixNormal, mixOrh, mixDepth) in
+// patches where a broad pattern of the world position (gFbm, as the live view's) is above mixThresh
+// (mixSize metres, mixSeed); at the patch edges the higher stones of either show; every picture is
+// read from both and blended, the relief too. groundDrift: colour and shine wander over metres.
 // A see-through material with an alpha test too (a decal in the photo): what is under the
 // test is skipped every time, and the rest is still see-through as much as its alpha says.
 import { BufferAttribute, BufferGeometry, Matrix4, Vector3, Vector4, Matrix3, MeshBasicMaterial, Mesh, ShaderMaterial, NoBlending, Vector2, WebGLRenderTarget, FloatType, RGBAFormat, NearestFilter, PerspectiveCamera, DataUtils, HalfFloatType, Source, DataTexture, LinearFilter, RepeatWrapping, RedFormat, ClampToEdgeWrapping, Quaternion, DataArrayTexture, DoubleSide, BackSide, FrontSide, Color, WebGLArrayRenderTarget, UnsignedByteType, NoToneMapping, RGFormat, NormalBlending, Spherical, EquirectangularReflectionMapping, LinearMipMapLinearFilter, Clock, Scene, AdditiveBlending, Camera, SpotLight, RectAreaLight, PMREMGenerator, MeshStandardMaterial, TangentSpaceNormalMap } from 'three';
@@ -3068,7 +3072,7 @@ function getLights( scene ) {
 
 }
 
-const MATERIAL_PIXELS = 48;
+const MATERIAL_PIXELS = 50;
 const MATERIAL_STRIDE = MATERIAL_PIXELS * 4;
 
 class MaterialFeatures {
@@ -3501,6 +3505,16 @@ class MaterialsTexture extends DataTexture {
 			floatArray[ index ++ ] = getField( m, 'pomDepth', 0.0 );
 			floatArray[ index ++ ] = getTexture( m, 'aoMap' );
 			floatArray[ index ++ ] = m.aoMap ? getField( m, 'aoMapIntensity', 1.0 ) : 0.0;
+
+			// samples 48, 49: the ground's mix (a second material) and its drift
+			floatArray[ index ++ ] = getTexture( m, 'mixMap' );
+			floatArray[ index ++ ] = getTexture( m, 'mixNormal' );
+			floatArray[ index ++ ] = getTexture( m, 'mixOrh' );
+			floatArray[ index ++ ] = getField( m, 'mixDepth', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'mixThresh', 2.0 );
+			floatArray[ index ++ ] = getField( m, 'mixSize', 10.0 );
+			floatArray[ index ++ ] = getField( m, 'mixSeed', 0.0 );
+			floatArray[ index ++ ] = getField( m, 'groundDrift', 0.0 );
 
 		}
 
@@ -4582,6 +4596,14 @@ const material_struct = /* glsl */ `
 		float pomDepth;
 		int aoMap;
 		float aoIntensity;
+		int mixMap;
+		int mixNormal;
+		int mixOrh;
+		float mixDepth;
+		float mixThresh;
+		float mixSize;
+		float mixSeed;
+		float groundDrift;
 
 		mat3 mapTransform;
 		mat3 metalnessMapTransform;
@@ -4637,6 +4659,8 @@ const material_struct = /* glsl */ `
 		vec4 s13 = texelFetch1D( tex, i + 13u );
 		vec4 s14 = texelFetch1D( tex, i + 14u );
 		vec4 s47 = texelFetch1D( tex, i + 47u );
+		vec4 s48 = texelFetch1D( tex, i + 48u );
+		vec4 s49 = texelFetch1D( tex, i + 49u );
 
 		Material m;
 		m.color = s0.rgb;
@@ -4704,6 +4728,14 @@ const material_struct = /* glsl */ `
 		m.pomDepth = s47.g;
 		m.aoMap = int( round( s47.b ) );
 		m.aoIntensity = s47.a;
+		m.mixMap = int( round( s48.r ) );
+		m.mixNormal = int( round( s48.g ) );
+		m.mixOrh = int( round( s48.b ) );
+		m.mixDepth = s48.a;
+		m.mixThresh = s49.r;
+		m.mixSize = s49.g;
+		m.mixSeed = s49.b;
+		m.groundDrift = s49.a;
 		m.transparent = bool( s14.a );
 
 		uint firstTextureTransformIdx = i + 15u;
@@ -7259,6 +7291,7 @@ const get_surface_record_function = /* glsl */`
 		vec2 i = floor( p ), f = fract( p ); f = f * f * ( 3.0 - 2.0 * f );
 		return mix( mix( wetHash( i ), wetHash( i + vec2( 1.0, 0.0 ) ), f.x ), mix( wetHash( i + vec2( 0.0, 1.0 ) ), wetHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
 	}
+	float gFbm( vec2 p ) { return 0.5 * wetNoise( p ) + 0.3 * wetNoise( p * 2.03 + 7.1 ) + 0.2 * wetNoise( p * 4.07 + 3.3 ); }
 	int getSurfaceRecord(
 		Material material, SurfaceHit surfaceHit, sampler2DArray attributesArray,
 		float accumulatedRoughness,
@@ -7289,7 +7322,12 @@ const get_surface_record_function = /* glsl */`
 
 		// relief: the ray followed down into the height map; every picture is read where it
 		// meets the surface (the triangle's dP/du, dP/dv turn moves across it into uv)
-		if ( material.pomMap != - 1 && material.pomDepth > 0.0 && reliefPT.x > 0.0 ) {
+		gPomMapA = material.pomMap; gPomDepthA = material.pomDepth;
+		gMixOrh = material.pomMap != - 1 ? material.mixOrh : - 1;
+		gMixDepth = material.mixDepth; gMixThresh = material.mixThresh;
+		gMixN = gMixOrh != - 1 ? gFbm( surfHitPoint.xz / max( material.mixSize, 0.5 ) + material.mixSeed ) : 0.0;
+		gMixW = 0.0;
+		if ( material.pomMap != - 1 && ptTop() > 0.0 && reliefPT.x > 0.0 ) {
 
 			uvec3 fi = surfaceHit.faceIndices.xyz;
 			vec3 p0 = texelFetch1D( bvh.position, fi.x ).xyz;
@@ -7308,22 +7346,22 @@ const get_surface_record_function = /* glsl */`
 				pomMapg = material.pomMap;
 				// faded out with the distance from the camera, as the live view does (reliefPT.y: where it ends)
 				float camD = distance( surfHitPoint, cameraWorldMatrix[ 3 ].xyz );
-				pomDg = material.pomDepth * reliefPT.x * ( 1.0 - smoothstep( 0.5 * reliefPT.y, reliefPT.y, camD ) );
+				pomDg = ptTop() * reliefPT.x * ( 1.0 - smoothstep( 0.5 * reliefPT.y, reliefPT.y, camD ) );
 				vec2 duv = pomToUv( ( N * En - E ) / max( En, 0.2 ) ) * pomDg;
 				float n = pomDg > 0.0 ? floor( mix( 16.0, 6.0, En ) ) : 0.0, dl = 1.0 / max( n, 1.0 ), layer = 0.0;
-				float h = texture2D( textures, vec3( uv, material.pomMap ) ).b, prevH = h, prevL = 0.0;
+				float h = ptHeight( uv ), prevH = h, prevL = 0.0;
 				for ( int i = 0; i < 16; i ++ ) {
 
 					if ( float( i ) >= n || 1.0 - h <= layer ) break;
 					prevH = h; prevL = layer; layer += dl;
-					h = texture2D( textures, vec3( uv + duv * layer, material.pomMap ) ).b;
+					h = ptHeight( uv + duv * layer );
 
 				}
 				// halved a few times around the crossing, then cut where the two heights say
 				float lo = prevL, hi = layer, hLo = prevH, hHi = h;
 				for ( int k = 0; k < 4; k ++ ) {
 
-					float mid = 0.5 * ( lo + hi ), hm = texture2D( textures, vec3( uv + duv * mid, material.pomMap ) ).b;
+					float mid = 0.5 * ( lo + hi ), hm = ptHeight( uv + duv * mid );
 					if ( 1.0 - hm <= mid ) { hi = mid; hHi = hm; } else { lo = mid; hLo = hm; }
 
 				}
@@ -7336,13 +7374,19 @@ const get_surface_record_function = /* glsl */`
 			}
 
 		}
+		// the share of the second material at the point found
+		if ( gMixOrh != - 1 && gMixN >= gMixThresh - 0.12 ) {
+
+			gMixW = ptMixWeight( texture2D( textures, vec3( uv, gPomMapA ) ).b, texture2D( textures, vec3( uv + vec2( 0.37, 0.61 ), gMixOrh ) ).b );
+
+		}
 
 		// albedo
 		vec4 albedo = vec4( material.color, material.opacity );
 		if ( material.map != - 1 ) {
 
 			vec3 uvPrime = material.mapTransform * vec3( uv, 1 );
-			albedo *= texture2D( textures, vec3( uvPrime.xy, material.map ) );
+			albedo *= ptTex( material.map, material.mixMap, uvPrime.xy );
 
 		}
 
@@ -7363,8 +7407,18 @@ const get_surface_record_function = /* glsl */`
 		// ambient occlusion: the gaps and pores the flat surface cannot trace, a little darker
 		if ( material.aoMap != - 1 ) {
 
-			float ao = texture2D( textures, vec3( uv, material.aoMap ) ).r;
+			float ao = ptTex( material.aoMap, material.mixOrh, uv ).r;
 			albedo.rgb *= mix( 1.0, ao, 0.6 * clamp( material.aoIntensity, 0.0, 1.0 ) );
+
+		}
+
+		// ground: the colour wandering over a metre or few
+		gDriftA = 0.0;
+		if ( material.groundDrift > 0.0 ) {
+
+			float da = gFbm( surfHitPoint.xz / 1.7 + 11.0 ) - 0.5, db = gFbm( surfHitPoint.xz / 5.3 + 23.0 ) - 0.5;
+			albedo.rgb *= ( 1.0 + material.groundDrift * ( 2.0 * da + 1.6 * db ) ) * vec3( 1.0 + material.groundDrift * db, 1.0, 1.0 - material.groundDrift * db );
+			gDriftA = da;
 
 		}
 
@@ -7404,9 +7458,10 @@ const get_surface_record_function = /* glsl */`
 		if ( material.roughnessMap != - 1 ) {
 
 			vec3 uvPrime = material.roughnessMapTransform * vec3( uv, 1 );
-			roughness *= texture2D( textures, vec3( uvPrime.xy, material.roughnessMap ) ).g;
+			roughness *= ptTex( material.roughnessMap, material.mixOrh, uvPrime.xy ).g;
 
 		}
+		roughness = clamp( roughness + material.groundDrift * 1.2 * gDriftA, 0.0, 1.0 );
 
 		// metalness
 		float metalness = material.metalness;
@@ -7464,7 +7519,7 @@ const get_surface_record_function = /* glsl */`
 				mat3 vTBN = mat3( tangent, bitangent, normal );
 
 				vec3 uvPrime = material.normalMapTransform * vec3( uv, 1 );
-				vec3 texNormal = texture2D( textures, vec3( uvPrime.xy, material.normalMap ) ).xyz * 2.0 - 1.0;
+				vec3 texNormal = ptTex( material.normalMap, material.mixNormal, uvPrime.xy ).xyz * 2.0 - 1.0;
 				texNormal.xy *= material.normalScale;
 				normal = vTBN * texNormal;
 
@@ -8051,6 +8106,38 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 
 				}
 
+				// the ground's mix at the surface being read: its pattern here, the share of the second
+				// material, both height maps and depths, and the drift
+				float gMixN = 0.0, gMixW = 0.0, gMixDepth = 0.0, gMixThresh = 2.0, gPomDepthA = 0.0, gDriftA = 0.0;
+				int gMixOrh = - 1, gPomMapA = - 1;
+				float ptMixWeight( float hA, float hB ) {
+
+					float s = ( gMixN - gMixThresh ) / 0.035 + 2.5 * ( hB * gMixDepth - hA * gPomDepthA ) / max( max( gPomDepthA, gMixDepth ), 1e-4 );
+					return smoothstep( 0.0, 1.0, clamp( 0.5 + s, 0.0, 1.0 ) );
+
+				}
+				float ptTop() {
+
+					return gMixOrh != - 1 ? max( gPomDepthA, gMixDepth ) : gPomDepthA;
+
+				}
+				// the relief's height (0..1 of ptTop) at uv: the blend's where the second material lies
+				float ptHeight( vec2 uv ) {
+
+					float hA = texture2D( textures, vec3( uv, gPomMapA ) ).b;
+					if ( gMixOrh == - 1 || gMixN < gMixThresh - 0.12 ) return hA * gPomDepthA / max( ptTop(), 1e-5 );
+					float hB = texture2D( textures, vec3( uv + vec2( 0.37, 0.61 ), gMixOrh ) ).b;
+					return mix( hA * gPomDepthA, hB * gMixDepth, ptMixWeight( hA, hB ) ) / max( ptTop(), 1e-5 );
+
+				}
+				// a picture, blended with the second material's where it lies
+				vec4 ptTex( int a, int b, vec2 uv ) {
+
+					vec4 ta = texture2D( textures, vec3( uv, a ) );
+					return ( b != - 1 && gMixW > 0.0 ) ? mix( ta, texture2D( textures, vec3( uv + vec2( 0.37, 0.61 ), b ) ), gMixW ) : ta;
+
+				}
+
 				// light arriving from L at the point found in the relief: in the shade of the stones
 				// between it and the light, softer the farther off they are
 				float pomShadowTrace( vec3 L ) {
@@ -8062,7 +8149,7 @@ class PhysicalPathTracingMaterial extends MaterialBase {
 					for ( int i = 1; i <= 8; i ++ ) {
 
 						float f = float( i ) / 8.0;
-						float h = texture2D( textures, vec3( pomUvg + duv * f, pomMapg ) ).b;
+						float h = ptHeight( pomUvg + duv * f );
 						sh = max( sh, ( h - ( 1.0 - d0 * ( 1.0 - f ) ) ) * ( 1.0 - 0.5 * f ) );
 
 					}

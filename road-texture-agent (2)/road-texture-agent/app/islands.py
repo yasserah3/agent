@@ -116,8 +116,17 @@ def resolve(slots, lab):
     return out
 
 
+MIX_AMOUNT, MIX_SIZE_M = 0.3, 10.0     # a ground slot's mix when the page leaves it to us ("auto")
+
+
 def slot_list(raw):
-    """Material slots as sent by the page, checked: [{"material": id, "picks": [[x, y], ...]}]."""
+    """
+    Material slots as sent by the page, checked: [{"material": id, "picks":
+    [[x, y], ...], "mix": {"material": id, "auto" or "none", "amount": 0-0.9,
+    "size_m": 2-60}}]. The mix: a second material in patches through a ground
+    slot's islands (coarse gravel through fine sand); "auto" is the library's
+    partner for the material (mix_with), "none" no mix.
+    """
     out = []
     for s in (raw or [])[:64]:
         if not isinstance(s, dict):
@@ -128,7 +137,11 @@ def slot_list(raw):
                 picks.append([round(float(p[0]), 1), round(float(p[1]), 1)])
             except (TypeError, ValueError, IndexError):
                 continue
-        out.append({"material": str(s.get("material") or "same")[:80], "picks": picks})
+        mix = s.get("mix") if isinstance(s.get("mix"), dict) else {}
+        num = lambda k, d, lo, hi: min(hi, max(lo, float(mix.get(k, d)) if isinstance(mix.get(k, d), (int, float)) else d))
+        out.append({"material": str(s.get("material") or "same")[:80], "picks": picks,
+                    "mix": {"material": str(mix.get("material") or "auto")[:80], "amount": num("amount", MIX_AMOUNT, 0.0, 0.9),
+                            "size_m": num("size_m", MIX_SIZE_M, 2.0, 60.0)}})
     return out
 
 

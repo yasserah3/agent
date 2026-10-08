@@ -258,7 +258,8 @@
       "licence": "CC0 1.0",
       "height": "dense_sand_height.jpg",
       "ao": "dense_sand_ao.jpg",
-      "relief_m": 0.012
+      "relief_m": 0.012,
+      "mix_with": "sandy_gravel_02"
     },
     {
       "id": "sand_01",
@@ -279,7 +280,8 @@
       "licence": "CC0 1.0",
       "height": "sand_01_height.jpg",
       "ao": "sand_01_ao.jpg",
-      "relief_m": 0.015
+      "relief_m": 0.015,
+      "mix_with": "dense_sand"
     },
     {
       "id": "gravelly_sand",
@@ -300,7 +302,8 @@
       "licence": "CC0 1.0",
       "height": "gravelly_sand_height.jpg",
       "ao": "gravelly_sand_ao.jpg",
-      "relief_m": 0.02
+      "relief_m": 0.02,
+      "mix_with": "dry_ground_rocks"
     },
     {
       "id": "sandy_gravel_02",
@@ -321,7 +324,8 @@
       "licence": "CC0 1.0",
       "height": "sandy_gravel_02_height.jpg",
       "ao": "sandy_gravel_02_ao.jpg",
-      "relief_m": 0.025
+      "relief_m": 0.025,
+      "mix_with": "dense_sand"
     },
     {
       "id": "sandy_gravel",
@@ -342,7 +346,8 @@
       "licence": "CC0 1.0",
       "height": "sandy_gravel_height.jpg",
       "ao": "sandy_gravel_ao.jpg",
-      "relief_m": 0.03
+      "relief_m": 0.03,
+      "mix_with": "sand_01"
     },
     {
       "id": "dry_ground_rocks",
@@ -363,7 +368,8 @@
       "licence": "CC0 1.0",
       "height": "dry_ground_rocks_height.jpg",
       "ao": "dry_ground_rocks_ao.jpg",
-      "relief_m": 0.06
+      "relief_m": 0.06,
+      "mix_with": "gravelly_sand"
     },
     {
       "id": "brown_mud_dry",
@@ -384,7 +390,8 @@
       "licence": "CC0 1.0",
       "height": "brown_mud_dry_height.jpg",
       "ao": "brown_mud_dry_ao.jpg",
-      "relief_m": 0.02
+      "relief_m": 0.02,
+      "mix_with": "red_sand"
     },
     {
       "id": "mud_cracked_dry_03",
@@ -406,7 +413,8 @@
       "licence": "CC0 1.0",
       "height": "mud_cracked_dry_03_height.jpg",
       "ao": "mud_cracked_dry_03_ao.jpg",
-      "relief_m": 0.02
+      "relief_m": 0.02,
+      "mix_with": "sand_01"
     },
     {
       "id": "red_sand",
@@ -427,7 +435,8 @@
       "licence": "CC0 1.0",
       "height": "red_sand_height.jpg",
       "ao": "red_sand_ao.jpg",
-      "relief_m": 0.015
+      "relief_m": 0.015,
+      "mix_with": "brown_mud_dry"
     }
   ]
 }

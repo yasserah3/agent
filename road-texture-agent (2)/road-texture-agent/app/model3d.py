@@ -375,7 +375,7 @@ def _sidewalk_kind(tile):
     return "concrete" if tile.get("method") == "placeholder concrete" else "paving"
 
 
-def tile_material(name, img, images, materials, size_m, kind, roughness, surface="scan", own=None):
+def tile_material(name, img, images, materials, size_m, kind, roughness, surface="scan", own=None, mix=None, drift=0.0):
     """
     A material for a repeating tile: its colour, and with surface, the bump
     (normal map) and roughness (app/surface.py): "scan" from a bundled scan of
@@ -393,6 +393,14 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
     extras say so: "relief": {"index": the texture, "channel": 2, "depth_m":
     metres from its 0 to its 1}. The 3D tab and the photo render use it for
     parallax (no extra faces); other programs ignore it.
+
+    mix (ground): a second ground material in patches through this one,
+    {"tile": its tile record, "amount": 0-0.9, "size_m": patch size, "seed"}:
+    its colour, normal and occlusion-roughness-height pictures in the extras
+    ("mix": textures, depth_m, amount, size_m, seed), blended by the 3D tab and
+    the photo render through a broad noise pattern of the ground, the higher
+    stones of either showing at the edges. drift: how much colour and shine
+    drift over a metre or few (ground). Other programs see this material alone.
     """
     buf = io.BytesIO()
     img.convert("RGB").save(buf, "JPEG", quality=92)
@@ -403,6 +411,19 @@ def tile_material(name, img, images, materials, size_m, kind, roughness, surface
         nrm, rgh, hgt, ao, used, relief = SF.maps(img, size_m, kind, source="grain" if surface == "grain" else "scan", own=own)
         orh = _image_index(images, SF.pack_orh(rgh, ao, hgt), "image/jpeg")
         mat["extras"] = {"surface": used, "relief": {"index": orh, "channel": 2, "depth_m": relief}}
+        if mix and mix.get("tile"):
+            bimg = Image.open(mix["tile"]["path"])
+            bn, br, bh, ba, _, brel = SF.maps(bimg, size_m, "ground", own=LIB.own_maps(mix["tile"]))
+            bbuf = io.BytesIO()
+            bimg.convert("RGB").save(bbuf, "JPEG", quality=92)
+            mat["extras"]["mix"] = {"map": _image_index(images, bbuf.getvalue(), "image/jpeg"),
+                                    "normal": _image_index(images, bn, "image/jpeg"),
+                                    "orh": _image_index(images, SF.pack_orh(br, ba, bh), "image/jpeg"),
+                                    "depth_m": brel, "amount": round(float(mix["amount"]), 3),
+                                    "size_m": round(float(mix["size_m"]), 2), "seed": int(mix.get("seed", 0)),
+                                    "name": mix.get("name", "")}
+        if drift > 0:
+            mat["extras"]["drift"] = round(float(drift), 3)
         mat["normalTexture"] = {"index": _image_index(images, nrm, "image/jpeg")}
         mat["occlusionTexture"] = {"index": orh}
         pbr["metallicRoughnessTexture"] = {"index": orh}
@@ -1088,6 +1109,19 @@ class PavedFrames:
         return 1.0 + (f - 1.0) * 0.33
 
 
+GROUND_DRIFT = 0.07     # ground: how far colour and shine drift over a metre or few (0.07: about 7%)
+
+
+def _slot_mix(frames, s, vk):
+    """An island slot's mix (its second ground material's tile for this variant, amount, patch size), or None."""
+    look = frames.looks.get(s) if frames is not None and s >= 0 else None
+    mix = look.get("mix") if look else None
+    if not mix or not mix.get("tiles"):
+        return None
+    return {"tile": mix["tiles"][vk % len(mix["tiles"])], "amount": mix["amount"], "size_m": mix["size_m"],
+            "seed": mix.get("seed", s), "name": mix.get("name", "")}
+
+
 def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan", frames=None):
     """
     The sidewalk top (paving, with a kerb stone along its edge) and the vertical
@@ -1126,9 +1160,9 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             u, v = v, -u
         return (-u if L["flip"] else u), v
 
-    def add_tile_material(name, tile, kind="paving"):
+    def add_tile_material(name, tile, kind="paving", mix=None):
         return tile_material(name, Image.open(tile["path"]), images, materials, (tile_m, tile_m), kind, 0.85, surface,
-                             own=LIB.own_maps(tile))
+                             own=LIB.own_maps(tile), mix=mix, drift=GROUND_DRIFT if kind == "ground" else 0.0)
 
     # top surface: the paving and the small paved islands laid by their area's
     # layout (frames: one grid, variant and weathering per paved area, shared with
@@ -1170,7 +1204,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             tile = (frames.looks[s]["tiles"] if s >= 0 else tiles["block"])[vk]
             ground = _sidewalk_kind(tile) == "ground"
             mat = add_tile_material(f"Island_{s + 1}_{vk + 1}" if s >= 0 else f"Block_paving_{vk + 1}", tile,
-                                    _sidewalk_kind(tile))
+                                    _sidewalk_kind(tile), mix=_slot_mix(frames, s, vk))
         else:
             mat = add_tile_material("Kerb_stone", (tiles.get("kerbstone") or tiles["sidewalk"])[0], "concrete")
         remap, pos, uvs, col, idx = {}, [], [], [], []
@@ -1517,7 +1551,8 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
             used_slots[s] = used_slots.get(s, 0) + int(sel.sum())
         tile_material(f"Island_{s + 1}_{vk + 1}" if s >= 0 else f"Block_paving_{vk + 1}", Image.open(tile["path"]),
                       images, materials, (tile_m, tile_m), kind, 0.92 if kind == "ground" else 0.85, surface,
-                      own=LIB.own_maps(tile))
+                      own=LIB.own_maps(tile), mix=_slot_mix(frames, s, vk),
+                      drift=GROUND_DRIFT if kind == "ground" else 0.0)
         prims.append({"positions": pos, "normals": np.tile([0, 1, 0], (len(pos), 1)), "uv0": np.array(uvs),
                       "colors": np.column_stack([f, f, f, np.ones_like(f)]),
                       "indices": np.array(idx), "material": len(materials) - 1})
