@@ -255,46 +255,17 @@ def _strokes(cover, line, half_w, strength, piece_px):
                 half_w, strength)
 
 
-def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m, rng,
-                 align=False, width_ratio=None, nomark=None, lane_picks=None):
+def street_paths(det, metres_per_pixel, nomark=None):
     """
-    Lay each street's lane lines (app/lanes.py: its lanes on each side, even
-    or as picked, where across it, dashed or solid), stopping short of each
-    junction, and on highways its raised island. lane_picks: the Lanes tool's
-    choices, [{"pt": [x, y] in this picture's pixels, "sides": [a, b]}], each
-    for the street nearest its point.
-
-    The number of cycles per street is rounded to a whole number and the gaps
-    stretched slightly to fit, so each street starts and ends on a full dash.
-    Every lane's dashes are side by side, measured along the centreline. A
-    street is read the canonical way (lanes.canonical), so its first side is
-    the one the 3D model picks too.
-
-    A line narrower than a pixel (15 cm paint on a map at 1 m a pixel) is drawn
-    one pixel wide but only as strong as the share of the pixel it covers, the
-    way a photo from that height shows it, not widened to a whole pixel.
-
-    Returns the paint's coverage, a report, the islands' (coverage, top's
-    coverage): the top a little narrower, so its rim can be shaded as a kerb,
-    and the streets for the Lanes tool: [{"id", "line": centreline (x, y) the
-    canonical way, "width_m", "limit", "sides", "even", "cut"}].
+    Every street's ordered centreline and width, {label: (path, width_m)}:
+    path its skeleton pixels (y, x) from one end to the other, the width
+    measured along the middle of it (its ends flare into the junctions). Streets
+    under nomark (inner streets drawn without markings) are left out.
     """
-    road = det["road"]
-    H, W = road.shape
-    cover = np.zeros((H, W), np.float32)
-    isl = np.zeros((H, W), np.float32)
-    isl_top = np.zeros((H, W), np.float32)
     seg_lab = det["segments"]
     n = int(seg_lab.max())
     px = max(metres_per_pixel, 1e-6)
-    cycle_px = cycle_m / px
-    setback_px = setback_m / px
-    width_px = width_m / px
-    placed = 0
-    widths_used, layouts, streets = [], [], []
     seg_px = det.get("segment_pixels") or J.label_coords(seg_lab, n)
-    # every street's ordered centreline and width first, so the Lanes tool's
-    # choices can be matched to the street they were made on
     found = {}
     for s in range(1, n + 1):
         coords = seg_px[s]
@@ -305,19 +276,47 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
         path = _ordered_path(coords)
         if len(path) < 4:
             continue
-        # its width, measured along the middle of its centreline (its ends flare into
-        # the junctions); the distance field reads half a pixel more than the half width
+        # the distance field reads half a pixel more than the half width
         pa = np.array(path)
         mid = pa[int(len(pa) * 0.15): max(int(len(pa) * 0.85), int(len(pa) * 0.15) + 1)]
         found[s] = (path, 2 * max(0.0, float(np.median(det["dt"][mid[:, 0], mid[:, 1]])) - 0.5) * px)
-    chosen = {}
-    if lane_picks and found:
-        labs = np.concatenate([np.full(len(v[0]), k) for k, v in found.items()])
-        pts = np.concatenate([np.array(v[0], float)[:, ::-1] for v in found.values()])
-        chosen = LN.match_picks(lane_picks, pts, labs, lambda k, d: d <= found[k][1] / 2 / px + 1.0 / px)
+    return found
+
+
+def lane_choices(found, lane_picks, metres_per_pixel):
+    """The Lanes tool's choices ([{"pt": [x, y] in this picture's pixels, "sides"}]) by street: {label: (a, b)}."""
+    if not lane_picks or not found:
+        return {}
+    px = max(metres_per_pixel, 1e-6)
+    labs = np.concatenate([np.full(len(v[0]), k) for k, v in found.items()])
+    pts = np.concatenate([np.array(v[0], float)[:, ::-1] for v in found.values()])
+    return LN.match_picks(lane_picks, pts, labs, lambda k, d: d <= found[k][1] / 2 / px + 1.0 / px)
+
+
+def lay_lanes(shape, found, chosen, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
+              align=False, width_ratio=None, origin=(0, 0)):
+    """
+    Draw the lane lines and islands of the streets in found ({label: (path,
+    width_m)}), each with the lanes chosen for it (chosen: {label: (a, b)}, else
+    even), on canvases of shape whose top left corner is origin (y, x) in the
+    whole picture: a window, when only a few streets are laid again (the Lanes
+    tool's quick update). Returns the paint's coverage, the islands' coverage
+    and their tops', and {"placed", "widths", "layouts", "streets"}.
+    """
+    H, W = shape
+    cover = np.zeros((H, W), np.float32)
+    isl = np.zeros((H, W), np.float32)
+    isl_top = np.zeros((H, W), np.float32)
+    px = max(metres_per_pixel, 1e-6)
+    cycle_px = cycle_m / px
+    setback_px = setback_m / px
+    oy, ox = float(origin[0]), float(origin[1])
+    placed = 0
+    widths_used, layouts, streets = [], [], []
+    last = max(found) if found else 1
     for s, (path, w_m) in found.items():
         if s % 50 == 0:
-            prog.part(s / n)
+            prog.part(s / last)
         lay = LN.layout(w_m, chosen.get(s))
         layouts.append(lay)
         line = np.array(path[::-1] if not LN.canonical(path[0][::-1], path[-1][::-1]) else path, float)[:, ::-1]
@@ -345,7 +344,7 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
         step = usable / cycles             # gaps stretch a little to fit
         dash_len = step * dash_share
 
-        pts = np.array(path, np.float32)                    # (y, x)
+        pts = np.array(path, np.float32) - np.array([oy, ox], np.float32)    # (y, x) on the canvas
         dist = np.array(d, np.float32)
         # the sideways direction: (-ty, tx) in x, y, from a steadier copy of the line
         tg = np.gradient(np.array(_smooth(path, window=min(31, len(path) // 2 * 2 - 1)) if len(path) > 8 else path,
@@ -376,24 +375,261 @@ def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m,
             hw_isl = (x1 - x0) / 2 / px
             _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), cycle_px)
             _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), cycle_px)
+    return cover, isl, isl_top, {"placed": placed, "widths": widths_used, "layouts": layouts, "streets": streets}
 
+
+def place_dashes(det, metres_per_pixel, cycle_m, dash_share, width_m, setback_m, rng,
+                 align=False, width_ratio=None, nomark=None, lane_picks=None):
+    """
+    Lay each street's lane lines (app/lanes.py: its lanes on each side, even
+    or as picked, where across it, dashed or solid), stopping short of each
+    junction, and on highways its raised island. lane_picks: the Lanes tool's
+    choices, [{"pt": [x, y] in this picture's pixels, "sides": [a, b]}], each
+    for the street nearest its point.
+
+    The number of cycles per street is rounded to a whole number and the gaps
+    stretched slightly to fit, so each street starts and ends on a full dash.
+    Every lane's dashes are side by side, measured along the centreline. A
+    street is read the canonical way (lanes.canonical), so its first side is
+    the one the 3D model picks too.
+
+    A line narrower than a pixel (15 cm paint on a map at 1 m a pixel) is drawn
+    one pixel wide but only as strong as the share of the pixel it covers, the
+    way a photo from that height shows it, not widened to a whole pixel.
+
+    Returns the paint's coverage, a report, the islands' (coverage, top's
+    coverage): the top a little narrower, so its rim can be shaded as a kerb,
+    the streets for the Lanes tool: [{"id", "line": centreline (x, y) the
+    canonical way, "width_m", "limit", "sides", "even", "cut"}], and every
+    street's centreline and width (street_paths), kept so a street's lanes can
+    be laid again on their own (repaint_lanes).
+    """
+    road = det["road"]
+    px = max(metres_per_pixel, 1e-6)
+    cycle_px = cycle_m / px
+    # every street's ordered centreline and width first, so the Lanes tool's
+    # choices can be matched to the street they were made on
+    found = street_paths(det, metres_per_pixel, nomark)
+    chosen = lane_choices(found, lane_picks, metres_per_pixel)
+    cover, isl, isl_top, laid = lay_lanes(road.shape, found, chosen, metres_per_pixel, cycle_m, dash_share,
+                                          width_m, setback_m, align, width_ratio)
     rc = road_cov if (road_cov := det.get("coverage")) is not None else road
     cover *= rc
     isl *= rc
     isl_top = np.minimum(isl_top, isl)
-    width_shown = float(np.median(widths_used)) if widths_used else width_px
+    widths_used, streets = laid["widths"], laid["streets"]
+    width_shown = float(np.median(widths_used)) if widths_used else width_m / px
     warning = None
     if cycle_px < 6:
         # a dash and its gap need a few pixels each, or they merge into one line
         warning = (f"a dash cycle of {cycle_m:g} m is only {cycle_px:.1f} px at {metres_per_pixel:g} m a pixel: "
                    f"the dashes run together into a solid line (and there are thousands of them, which is slow). "
                    f"Real lane lines repeat every 9 to 12 m ({9 / px:.0f} to {12 / px:.0f} px here)")
-    return cover, {"dashes": placed, "cycle_px": round(cycle_px, 1),
+    return cover, {"dashes": laid["placed"], "cycle_px": round(cycle_px, 1),
                    "width_px": round(width_shown, 2),
                    "width_mode": "learned" if width_ratio else "fixed",
                    "width_ratio": width_ratio, "faint": width_shown < 1.0, "warning": warning,
-                   "lanes": LN.summary(layouts), "picked": len(chosen),
-                   "cut": sum(1 for st in streets if st["cut"])}, (isl, isl_top), streets
+                   "lanes": LN.summary(laid["layouts"]), "picked": len(chosen),
+                   "cut": sum(1 for st in streets if st["cut"])}, (isl, isl_top), streets, found
+
+
+def with_lanes(worn, wear_map, paint, island, island_top, paint_rgb, wear_strength, lum_mean):
+    """
+    The texture with its lane lines and islands on the worn road. The paint is
+    worn too, so it is not a flat block of white; the coverage blends it into
+    the asphalt over the stroke's one-pixel edge. The highways' raised island: a
+    concrete top with the road's grain (lum_mean: the road's mean brightness),
+    ringed by its kerb's darker face and shadow, as it looks from above.
+    """
+    result = worn.astype(np.float32, copy=True)
+    if paint.any():
+        a = paint[:, :, None]
+        painted = np.asarray(paint_rgb, np.float32)[None, None, :] * (1.0 - 0.25 * wear_strength * wear_map)[:, :, None]
+        result = result * (1 - a) + painted * a
+    if island.any():
+        lum = worn.mean(axis=2, keepdims=True)
+        grain = 0.9 + 0.1 * lum / max(float(lum_mean), 1e-6)
+        top = np.array(ISLAND_RGB, np.float32)[None, None, :] * grain
+        rim = np.array(ISLAND_RIM_RGB, np.float32)[None, None, :] * grain
+        a_top, a_rim = island_top[:, :, None], np.clip(island - island_top, 0, 1)[:, :, None]
+        result = result * (1 - a_top - a_rim) + top * a_top + rim * a_rim
+    return result
+
+
+def markings_picture(paint, island, paint_rgb):
+    """The markings layer: the paint, and the islands with it (neither is asphalt, so the 3D model's tone leaves both out)."""
+    mark = paint[:, :, None] * np.asarray(paint_rgb, np.float32)[None, None, :]
+    if island.any():
+        mark = np.maximum(mark, island[:, :, None] * np.array(ISLAND_RGB, np.float32)[None, None, :])
+    return mark
+
+
+BACKGROUND = (18, 18, 20)
+
+
+def finish(arr, road, cov, soft_edges, nearest=None, mask=None, soft=True):
+    """
+    A layer as it is saved (uint8): with soft edges, the edge ring just outside
+    the road takes the colour of the nearest road pixel (nearest: its (iy, ix),
+    from the distance transform) faded into the background by the coverage;
+    else, and for layers saved hard (mask, soft False), the road (or mask) as it
+    is and the background elsewhere.
+    """
+    H, W = road.shape
+    a = (arr if arr.ndim == 3 else np.dstack([arr] * 3)).astype(np.float32)
+    background = np.array(BACKGROUND, np.float32)
+    if soft and soft_edges and mask is None:
+        if nearest is None:
+            _, nearest = ndi.distance_transform_edt(~road, return_indices=True)
+        iy, ix = nearest
+        img = a[iy, ix] * cov[:, :, None] + background * (1 - cov[:, :, None])
+    else:
+        m = road if mask is None else mask
+        img = np.empty((H, W, 3), np.float32); img[...] = background
+        img[m] = a[m]
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def save_lane_state(path, worn, wear_map, road, cov, found, meta):
+    """
+    What laying a street's lanes again needs (repaint_lanes): the worn road
+    without its markings, the wear, the road and its soft edge's coverage, every
+    street's centreline and width, and the settings the lines were laid with.
+    One zip of .npy files (np.load reads it), packed fast.
+    """
+    import io
+    import json
+    import zipfile
+    labels = np.array(sorted(found), np.int32)
+    paths = [np.asarray(found[int(k)][0], np.int32).reshape(-1, 2) for k in labels]
+    arrays = {
+        "worn": np.clip(worn + 0.5, 0, 255).astype(np.uint8),
+        "wear": np.clip(wear_map * 255 + 0.5, 0, 255).astype(np.uint8),
+        "road": np.packbits(road.astype(bool), axis=None),
+        "cov": np.clip(cov * 65535 + 0.5, 0, 65535).astype(np.uint16),
+        "labels": labels,
+        "widths": np.array([found[int(k)][1] for k in labels], np.float64),
+        "offsets": np.concatenate([[0], np.cumsum([len(p) for p in paths])]).astype(np.int64),
+        "paths": np.concatenate(paths) if paths else np.zeros((0, 2), np.int32),
+        "meta": np.array(json.dumps(meta)),
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+        for k, v in arrays.items():
+            buf = io.BytesIO()
+            np.save(buf, v, allow_pickle=False)
+            z.writestr(k + ".npy", buf.getvalue())
+
+
+def _same_lines(width_m, a, b):
+    """Whether two lane choices lay the same lines and island on a street this wide."""
+    la, lb = LN.layout(width_m, a), LN.layout(width_m, b)
+    return la["lines"] == lb["lines"] and la["island"] == lb["island"]
+
+
+def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress_level=1):
+    """
+    Lay again only the lane lines of the streets whose lanes changed (the Lanes
+    tool's Done), on the texture as it is, and leave everything else as it was.
+
+    old_picks, new_picks: the Lanes tool's choices the texture has, and the ones
+    it should have (mask pixels). Each street whose lines change gets a window
+    round it; in it, the lines of every street that reaches into the window are
+    drawn as generation draws them, onto the worn road kept from generation
+    (save_lane_state), and the pixels within the changed street's width (and
+    half a metre) where a line or an island was or is now are written back. files: the pictures to update in place,
+    {"result", "markings"} and optionally "base" (the texture before painted
+    decals: then result is base with the decals, decals = (their picture's
+    RGBA, painted) ) and "full" (roads + islands: it takes the same change).
+    Returns {"changed": [{"id", "sides", "even", "cut", "box": [x0, y0, x1, y1]
+    in mask pixels}]}.
+    """
+    z = np.load(state_path)
+    import json
+    meta = json.loads(str(z["meta"]))
+    mpp, scale = float(meta["mpp_out"]), int(meta["scale"])
+    px = max(mpp, 1e-6)
+    labels, widths, offs, P = z["labels"], z["widths"], z["offsets"], z["paths"]
+    found = {int(k): ([tuple(p) for p in P[offs[i]:offs[i + 1]]], float(widths[i])) for i, k in enumerate(labels)}
+
+    def scaled(picks):
+        return [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in picks or []]
+    old, new = lane_choices(found, scaled(old_picks), mpp), lane_choices(found, scaled(new_picks), mpp)
+    changed = [s for s, (_, w) in found.items() if not _same_lines(w, old.get(s), new.get(s))]
+    out = {"changed": []}
+    if not changed:
+        return out
+
+    H, W = int(meta["shape"][0]), int(meta["shape"][1])
+    worn, wear, cov = z["worn"], z["wear"], z["cov"]
+    road = np.unpackbits(z["road"], count=H * W).reshape(H, W).astype(bool)
+    soft = bool(meta["soft_edges"])
+    paint_rgb = np.array(meta["paint_rgb"], np.float32)
+    pics = {k: np.array(Image.open(p).convert("RGB")) for k, p in files.items() if p}
+    target = "base" if "base" in pics else "result"
+    before = pics["result"].copy() if "full" in pics else None
+    # each street's reach: its centreline's box, out by half its width and a little
+    reach = {s: (w / 2 + 0.5) / px + 3 for s, (_, w) in found.items()}
+    lo = {s: np.min(np.asarray(p), axis=0) - reach[s] for s, (p, _) in found.items()}
+    hi = {s: np.max(np.asarray(p), axis=0) + reach[s] for s, (p, _) in found.items()}
+    for s in changed:
+        pad = 6
+        y0, x0 = np.maximum(np.floor(lo[s] - pad).astype(int), 0)
+        y1, x1 = np.ceil(hi[s] + pad).astype(int) + 1
+        y1, x1 = min(int(y1), H), min(int(x1), W)
+        near = {t: found[t] for t in found
+                if lo[t][0] <= y1 and hi[t][0] >= y0 and lo[t][1] <= x1 and hi[t][1] >= x0}
+        cover, isl, isl_top, _ = lay_lanes((y1 - y0, x1 - x0), near, new, mpp, meta["cycle_m"], meta["dash_share"],
+                                           meta["width_m"], meta["setback_m"], meta["align"], meta["width_ratio"],
+                                           origin=(y0, x0))
+        rc = cov[y0:y1, x0:x1].astype(np.float32) / 65535.0
+        rw = road[y0:y1, x0:x1]
+        if not rw.any():
+            continue
+        cover *= rc
+        isl *= rc
+        isl_top = np.minimum(isl_top, isl)
+        res = with_lanes(worn[y0:y1, x0:x1], wear[y0:y1, x0:x1].astype(np.float32) / 255.0, cover, isl, isl_top,
+                         paint_rgb, float(meta["wear_strength"]), float(meta["lum_mean"]))
+        # the pixels this street's lines can reach: within its width (and half a metre) of its centreline
+        line = np.zeros(rw.shape, bool)
+        pa = np.asarray(found[s][0])
+        line[pa[:, 0] - y0, pa[:, 1] - x0] = True
+        R = ndi.distance_transform_edt(~line) <= reach[s]
+        nearest = ndi.distance_transform_edt(~rw, return_indices=True)[1] if soft and rw.any() else None
+        win = (slice(y0, y1), slice(x0, x1))
+        # and of those only where a line or an island was or is now: the road's own surface
+        # between them stays exactly as it was (a pixel of the edge ring follows the road
+        # pixel it takes its colour from)
+        lined = rw & ((pics["markings"][win] != 0).any(axis=2) | (cover > 0) | (isl > 0))
+        R &= lined[nearest[0], nearest[1]] if nearest is not None else lined
+        fc = rc if soft else rw.astype(np.float32)
+        pics[target][win][R] = finish(res, rw, fc, soft, nearest)[R]
+        pics["markings"][win][R] = finish(markings_picture(cover, isl, paint_rgb), rw, fc, soft, soft=False)[R]
+        if target == "base":
+            if decals is not None and decals[1]:
+                from app import decals as DC
+                rgba = decals[0][win].astype(np.float32) / 255.0
+                rgba[..., :3] *= rgba[..., 3:]
+                pics["result"][win][R] = DC.composite(pics["base"][win], rgba)[R]
+            else:
+                pics["result"][win][R] = pics["base"][win][R]
+        if before is not None:
+            d = pics["result"][win][R].astype(np.int16) - before[win][R].astype(np.int16)
+            pics["full"][win][R] = np.clip(pics["full"][win][R].astype(np.int16) + d, 0, 255).astype(np.uint8)
+        lay = LN.layout(found[s][1], new.get(s))
+        out["changed"].append({"id": int(s), "sides": list(lay["sides"]), "even": lay["even"], "cut": lay["cut"],
+                               "box": [round(x0 / scale, 1), round(y0 / scale, 1), round(x1 / scale, 1),
+                                       round(y1 / scale, 1)]})
+    import os
+    import uuid
+    for k, p in files.items():
+        if not p:
+            continue
+        # written under another name, then put in place whole
+        tmp = f"{p}.{uuid.uuid4().hex[:6]}.part.png"
+        Image.fromarray(pics[k]).save(tmp, compress_level=compress_level)
+        os.replace(tmp, p)
+    return out
 
 
 def group_map(det, groups):
@@ -636,7 +872,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     prog.stage("markings", "markings")
     paint_rgb = np.array(params.get("paint_colour", [235, 232, 222]), np.float32)
     picks = [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in (params.get("lane_picks") or [])]
-    paint, dash_info, (island, island_top), streets = place_dashes(
+    paint, dash_info, (island, island_top), streets, found = place_dashes(
         det, mpp_out,
         cycle_m=float(params.get("cycle_m", 9.0)),
         dash_share=float(params.get("dash_share", 0.6)),
@@ -657,52 +893,29 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
             json.dump({"mpp": mpp, "streets": streets}, fh, separators=(",", ":"))
 
     prog.stage("finishing", "blending and saving the pictures")
-    result = worn.copy()
-    if paint.any():
-        # paint is worn too, so it is not a flat block of white; the coverage
-        # blends it into the asphalt over the stroke's one-pixel edge
-        a = paint[:, :, None]
-        painted = paint_rgb[None, None, :] * (1.0 - 0.25 * wear_strength * wear_map)[:, :, None]
-        result = result * (1 - a) + painted * a
-    if island.any():
-        # the highways' raised island: a concrete top with its grain, ringed by its
-        # kerb's darker face and shadow, as it looks from above
-        lum = worn.mean(axis=2, keepdims=True)
-        grain = 0.9 + 0.1 * lum / max(float(lum[road].mean()) if road.any() else 1.0, 1e-6)
-        top = np.array(ISLAND_RGB, np.float32)[None, None, :] * grain
-        rim = np.array(ISLAND_RIM_RGB, np.float32)[None, None, :] * grain
-        a_top, a_rim = island_top[:, :, None], np.clip(island - island_top, 0, 1)[:, :, None]
-        result = result * (1 - a_top - a_rim) + top * a_top + rim * a_rim
+    lum_mean = float(worn.mean(axis=2)[road].mean()) if road.any() else 1.0
+    result = with_lanes(worn, wear_map, paint, island, island_top, paint_rgb, wear_strength, lum_mean)
 
-    background = np.array([18, 18, 20], np.float32)
     # the edge ring just outside the road has partial coverage but no texture:
     # give each of those pixels the colour of the nearest road pixel
-    if soft_edges and road.any():
-        _, (iy, ix) = ndi.distance_transform_edt(~road, return_indices=True)
+    nearest = ndi.distance_transform_edt(~road, return_indices=True)[1] if soft_edges and road.any() else None
     cov = coverage if soft_edges else road.astype(np.float32)
 
     def save(arr, path, mask=None, soft=True):
-        a = arr if arr.ndim == 3 else np.dstack([arr] * 3)
-        a = a.astype(np.float32)
-        if soft and soft_edges and mask is None:
-            filled = a[iy, ix]                      # road colour carried to the edge ring
-            alpha = cov[:, :, None]
-            img = filled * alpha + background * (1 - alpha)
-        else:
-            m = road if mask is None else mask
-            img = np.empty((H, W, 3), np.float32); img[...] = background
-            img[m] = a[m]
-        Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).save(path)
+        Image.fromarray(finish(arr, road, cov, soft_edges, nearest, mask, soft)).save(path)
 
     save(result, out_paths["result"])
     save(material, out_paths["material"])
     save(np.dstack([wear_map * 255] * 3), out_paths["wear"], soft=False)
-    mark = paint[:, :, None] * paint_rgb[None, None, :]
-    if island.any():
-        # the islands with the markings: neither is asphalt, so the 3D model's
-        # tone (variation_factor) leaves both out
-        mark = np.maximum(mark, island[:, :, None] * np.array(ISLAND_RGB, np.float32)[None, None, :])
-    save(mark, out_paths["markings"], soft=False)
+    save(markings_picture(paint, island, paint_rgb), out_paths["markings"], soft=False)
+    if out_paths.get("lanes"):
+        # what laying one street's lanes again needs, without generating the rest (repaint_lanes)
+        save_lane_state(out_paths["lanes"], worn, wear_map, road, coverage, found, {
+            "mpp_out": mpp_out, "scale": scale, "shape": [int(H), int(W)], "soft_edges": soft_edges,
+            "paint_rgb": [float(v) for v in paint_rgb], "wear_strength": wear_strength, "lum_mean": lum_mean,
+            "cycle_m": float(params.get("cycle_m", 9.0)), "dash_share": float(params.get("dash_share", 0.6)),
+            "width_m": float(params.get("width_m", 0.15)), "setback_m": float(params.get("setback_m", 2.0)),
+            "align": align_lines, "width_ratio": params.get("width_ratio")})
 
     if map_path is not None:
         np.savez_compressed(

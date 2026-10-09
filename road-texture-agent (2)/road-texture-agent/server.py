@@ -61,7 +61,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.09-move1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.09-lanes3"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1533,6 +1533,7 @@ def generate(payload: dict):
             for k in ("result", "material", "wear", "markings")}
     map_path = ARTIFACTS / f"gen_{gid}_map.npz"
     streets_path = ARTIFACTS / f"gen_{gid}_streets.json"
+    lanes_path = ARTIFACTS / f"gen_{gid}_lanes.npz"
     # the Lanes tool's choices: sent with the request, else the ones kept for this mask
     lane_picks = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base))
     res = G.generate(rec["path"], libraries, {
@@ -1554,8 +1555,11 @@ def generate(payload: dict):
         "match_tone": _priming_tone() if payload.get("match_material") else None,
         "soft_edges": bool(payload.get("soft_edges", True)),
         "street_material": _street_material(payload),
-    }, dict(outs, streets=streets_path), map_path)
+    }, dict(outs, streets=streets_path, lanes=lanes_path), map_path)
     mem.add_artifact(f"{gid}_streets", "generated_streets", streets_path, {"mask": rec["id"]})
+    # what a street's lanes need to be laid again on their own (the Lanes tool's Done), and the
+    # choices the texture has now
+    mem.add_artifact(f"{gid}_lanes", "generation_lanes", lanes_path, {"mask": rec["id"], "picks": lane_picks})
 
     prog.stage("saving", "saving")
     urls = {}
@@ -1595,7 +1599,7 @@ def generate(payload: dict):
             "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3),
             "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
-            "streets": {"url": f"/api/artifact/{gid}_streets"}}
+            "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks}
 
 
 def _street_material(payload):
@@ -1810,6 +1814,63 @@ def save_lanes(payload: dict):
     path.write_text(json.dumps(picks))
     mem.add_artifact(key, "lane_picks", path, {"mask": rec["id"], "picks": len(picks)})
     return {"ok": True, "picks": len(picks)}
+
+
+_repaint_lock = threading.Lock()
+
+
+@app.post("/api/lanes/repaint")
+def lanes_repaint(payload: dict):
+    """
+    The Lanes tool's Done: lay again only the lane lines of the streets whose
+    lanes changed, on the generated texture as it is (app/generation.py's
+    repaint_lanes), instead of generating the whole texture again. The road
+    texture, its markings layer, the texture under painted decals and the
+    roads + islands picture all take the change; nothing else is touched.
+    """
+    gid = payload.get("generation")
+    art, result, markings = mem.artifact(f"{gid}_lanes"), mem.artifact(f"{gid}_result"), mem.artifact(f"{gid}_markings")
+    if not result or not markings:
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    if not art or not Path(art["path"]).exists():
+        raise HTTPException(409, "this texture was generated before lanes could be laid on their own: "
+                                 "press Generate texture once, then lane changes are quick")
+    picks = LN.picks_list(payload.get("lane_picks"))
+    t0 = time.time()
+    with _repaint_lock:
+        art = mem.artifact(f"{gid}_lanes")
+        base = ARTIFACTS / f"gen_{gid}_result_base.png"
+        full = mem.artifact(f"{gid}_full")
+        files = {"result": result["path"], "markings": markings["path"],
+                 "base": str(base) if base.exists() else None,
+                 "full": full["path"] if full and Path(full["path"]).exists() else None}
+        decals = None
+        dec = mem.artifact(f"{gid}_decalimg")
+        if files["base"] and dec and Path(dec["path"]).exists():
+            places = mem.artifact(f"{gid}_decals")
+            decals = (np.asarray(Image.open(dec["path"]).convert("RGBA")),
+                      bool(places and (places["meta"] or {}).get("mode") == "painted"))
+        out = G.repaint_lanes(art["path"], (art["meta"] or {}).get("picks") or [], picks, files, decals)
+        meta = dict(art["meta"] or {}, picks=picks)
+        mem.add_artifact(f"{gid}_lanes", "generation_lanes", Path(art["path"]), meta)
+        st = mem.artifact(f"{gid}_streets")
+        if out["changed"] and st and Path(st["path"]).exists():
+            # the Lanes tool's streets: each with the lanes it has now
+            data = json.loads(Path(st["path"]).read_text())
+            now = {c["id"]: c for c in out["changed"]}
+            for s_ in data.get("streets", []):
+                c = now.get(s_["id"])
+                if c:
+                    s_.update(sides=c["sides"], even=c["even"], cut=c["cut"])
+            Path(st["path"]).write_text(json.dumps(data, separators=(",", ":")))
+    v = uuid.uuid4().hex[:6]
+    secs = round(time.time() - t0, 2)
+    if out["changed"]:
+        mem.record("lanes_repaint", f"lanes laid again on {len(out['changed'])} street(s) in {secs} s",
+                   {"generation": gid, "changed": out["changed"]})
+    return {"ok": True, "changed": out["changed"], "seconds": secs,
+            "urls": {"result": f"/api/artifact/{gid}_result?v={v}", "markings": f"/api/artifact/{gid}_markings?v={v}",
+                     **({"full": f"/api/artifact/{gid}_full?v={v}"} if files["full"] else {})}}
 
 
 @app.get("/api/islands")
@@ -2082,6 +2143,52 @@ def export3d(payload: dict):
         b["done"].set()
 
 
+# The last 3D models' lane parts, by everything they were built from but the Lanes
+# tool's choices: a model whose only change is its streets' lanes builds those parts
+# again on their own (app/model3d.py's relane), not the whole model
+_relanes = {}                      # key -> {"relane", "info", "lock", "at"}
+_relanes_lock = threading.Lock()
+RELANES_KEEP = 2
+
+
+def _relane_key(payload):
+    return _build_key({k: v for k, v in payload.items() if k != "lane_picks"})
+
+
+def _relane(key, picks, out, part):
+    """The model with other lane choices, from a model built before with everything else the same; None if none."""
+    with _relanes_lock:
+        e = _relanes.get(key)
+    if e is None:
+        return None
+    with e["lock"]:
+        try:
+            r = e["relane"](picks, out, part)
+        except Exception as err:                         # its state is no longer sure: build it all
+            print("lanes alone could not be laid again, building the whole model:", repr(err))
+            with _relanes_lock:
+                _relanes.pop(key, None)
+            return None
+        e["at"] = time.time()
+    if r is None:                                        # a street gained or lost all its lines: build it all
+        with _relanes_lock:
+            _relanes.pop(key, None)
+        return None
+    now, names = r
+    return dict(e["info"], **{k: v for k, v in now.items() if not k.startswith("_") and k != "layouts"}, partial=names)
+
+
+def _keep_relane(key, relane, info):
+    gid = json.loads(key)[0]
+    with _relanes_lock:
+        # a model holds its whole build in memory: only the newest few, of this texture only
+        for k in [k for k in _relanes if json.loads(k)[0] != gid]:
+            _relanes.pop(k)
+        _relanes[key] = {"relane": relane, "info": dict(info), "lock": threading.Lock(), "at": time.time()}
+        for k in sorted(_relanes, key=lambda k: _relanes[k]["at"])[:-RELANES_KEEP]:
+            _relanes.pop(k)
+
+
 def _export3d(payload):
     prog.stage("preparing", "preparing")
     gid = payload.get("generation")
@@ -2096,6 +2203,9 @@ def _export3d(payload):
     # never reads a file half written
     final = ARTIFACTS / f"gen_{gid}.glb"
     out = final.with_name(f"gen_{gid}.{uuid.uuid4().hex[:8]}.part.glb")
+    # the lane parts alone, when only the lanes changed (for a view that has the rest)
+    lanes_final = ARTIFACTS / f"gen_{gid}.lanes.glb"
+    lanes_out = lanes_final.with_name(f"gen_{gid}.lanes.{uuid.uuid4().hex[:8]}.part.glb")
     mode = payload.get("mesh", "tiled")
     dash_cfg = dict(art["meta"].get("dashes") or {})
     base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
@@ -2112,8 +2222,12 @@ def _export3d(payload):
         elif streets_now["shapes"] and base["id"] != rec["id"]:
             # the inner streets as they were drawn, laid exactly; the other roads from the mask without them
             inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
+    rkey = _relane_key(payload) if mode == "tiled" else None
     try:
-        if mode == "tiled":
+        info = _relane(rkey, dash_cfg["lane_picks"], out, lanes_out) if rkey else None
+        if info is not None:
+            pass                                          # only the lanes changed: laid again on their own
+        elif mode == "tiled":
             tileset = _tileset_with_paths()
             if tileset is None:
                 raise ValueError("no material tiles yet: build them in the Memory tab, or train, which builds them")
@@ -2152,12 +2266,15 @@ def _export3d(payload):
                 decals=decals)
             prog.stage("check", "checking the tile repeat")
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
+            relane = info["_relane"]
             info = {k: v for k, v in info.items() if not k.startswith("_") and k != "layouts"}
             info["materials_used"] = used_materials
             if islands is None and any(s.get("picks") for s in ISL.slot_list(payload.get("island_slots"))):
                 info["islands_warning"] = ("this texture was generated before the islands were numbered: "
                                            "press Generate texture again to use the island materials")
             info["repeat_check"] = {k: float(v) for k, v in check.items()} if check else None
+            if rkey:
+                _keep_relane(rkey, relane, info)
         elif mode == "traced":
             info = M3.export_road_glb(rec["path"], result["path"], float(art["meta"]["scale"]),
                                       int(art["meta"].get("output_scale", 1)), out)
@@ -2171,20 +2288,33 @@ def _export3d(payload):
                 optimise=payload.get("mesh_detail") == "optimised", inner=inner)
     except ValueError as e:
         out.unlink(missing_ok=True)
+        lanes_out.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
     except BaseException:
         out.unlink(missing_ok=True)
+        lanes_out.unlink(missing_ok=True)
         raise
     os.replace(out, final)
     out = final
     aid = f"{gid}_glb"
+    partial = None
+    if info.get("partial") is not None and lanes_out.exists():
+        os.replace(lanes_out, lanes_final)
+        mem.add_artifact(f"{gid}_glblanes", "model_glb_lanes", lanes_final, {"generation": gid})
+        partial = {"url": f"/api/artifact/{gid}_glblanes?v={uuid.uuid4().hex[:6]}", "replace": info.pop("partial"),
+                   "bytes": info.get("part_bytes")}
     mem.add_artifact(aid, "model_glb", out, {"generation": gid, **info})
     count = (f"{info['quads']:,} quads" if info.get("mesh") == "quads"
              else f"{info.get('triangles', 0):,} triangles")
     mem.record("export3d", f"exported road model: {count}, {info['size_m'][0]} x {info['size_m'][1]} m",
                {"generation": gid, **info})
     stem = Path(rec["name"]).stem
-    return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info, "streets_warning": stale}
+    import hashlib
+    # what the model was built from but its lanes: a view holding a model of the same base can
+    # take the lane parts alone (partial)
+    base_sig = hashlib.sha1(rkey.encode()).hexdigest()[:12] if rkey else None
+    return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info, "streets_warning": stale,
+            "partial": partial, "lanes_base": base_sig}
 
 
 @app.post("/api/export3d/convert")

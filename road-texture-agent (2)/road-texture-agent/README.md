@@ -440,10 +440,50 @@ lanes on each side.
   lanes; click one to select it, × to undo it.
 - The choices are kept with the mask (on the server, like the island slots),
   each by a point on its street, so they survive a new texture of the same
-  mask. **Generate texture** again to paint them into the texture; the 3D
-  model, the Top view and the 3D tab use them at once (Update view).
+  mask. **Done** lays them on the texture at once (below); the 3D model, the
+  Top view and the 3D tab use them too (Update view).
 - The console says how many streets got each split, how many were set in the
   tool, and how many were cut back.
+
+### Quick lane updates: only the lanes, never the whole texture
+
+Changing a street's lanes does not generate the texture again.
+
+- **Done** (and leaving the tool, picking another street, × or All even) lays
+  again only the lines of the streets whose lanes changed, on the texture as
+  it is: about half a second on a texture that takes 7 to 30 s to generate.
+  The street material, the wear and every other street stay exactly as they
+  were: only the pixels where a line or an island was, or is now, are
+  written (with soft edges, the edge ring next to them too). The console
+  says which streets were laid again and how long it took.
+- What it needs is kept by Generate texture (`gen_<id>_lanes.npz`): the worn
+  road without its markings, the wear, the road and its edge, every street's
+  centreline and width, and the line settings. Around a changed street, the
+  lines of every street that reaches there are drawn as generation draws
+  them, so a crossing street's line ends stay as they were. The result
+  matches a texture generated again with the same choices to within one
+  colour level.
+- The markings layer, the texture under painted decals (the decals are laid
+  on top again where the lines changed) and the roads + islands picture take
+  the same change. The layer on screen and its zoom stay; the Top view is
+  built again from the 3D model's lane parts alone.
+- A texture generated before this version has nothing kept: the console asks
+  for Generate texture once, then lane changes are quick.
+
+In the 3D tab, **Update view** after a lane change builds only the parts the
+lanes decide and puts them in place of the scene's own: the lane lines
+(Markings), the highways' median islands and, with painted markings, the road
+surface (it carries the painted dashes). The server keeps the model it built
+last (in memory, the latest two builds of the current texture) and lays only
+the lanes again: 0.2 s instead of 20 s with lines as strips, about 3 s instead
+of 25 to 50 s with painted lines. The view loads just those objects (0.8 MB
+instead of 6.6 MB on the test map) and swaps them by name; the camera, the
+lamps, the bakes, the sidewalks, blocks and objects stay. The whole model file
+is written too, so Download 3D model and the Top view have the new lanes.
+Everything else (a material, a 3D setting, a new texture, decals) builds the
+whole scene as before, and so does a street that gains its first line or
+loses its last with painted markings (its road surface was built for the lines
+it had).
 
 ## Line width
 
@@ -1605,7 +1645,9 @@ The **3D** tab shows the whole place in 3D, to look around:
 - **Update view** builds the scene again with the current materials and 3D
   model settings, keeping the camera, the time of day and the look. When the
   materials or settings (or the texture) have changed since the scene was
-  built, the button lights up and a note says so.
+  built, the button lights up and a note says so. When only streets' lanes
+  changed (the Lanes tool), only the lane parts are built and swapped in
+  (see Quick lane updates).
 - **Generate 3D scene** builds the last generated texture (Generate it in the
   Generate tab first): streets and inner streets, sidewalks and kerbs, blocks
   and islands, markings, and your objects and plants, exactly the model the
@@ -1789,7 +1831,8 @@ overall tone; at dawn and at night (lamp pools, long shadows) it is large.
   lamps' strength and colour. Change one and the live light shows (the note
   says so) until you bake again; the last three bakes are kept, so going back
   to Day after baking Night shows the Day bake again. Generate 3D scene or
-  Update view starts without bakes (the scene changed).
+  Update view starts without bakes (the scene changed); an Update view that
+  only swaps the lanes keeps them.
 
 ### Look
 

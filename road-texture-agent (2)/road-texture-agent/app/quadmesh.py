@@ -134,6 +134,10 @@ class Mesh:
         self.dash_solid = []   # per dash: a solid line (a highway's edge lines), never painted
         self.lane_islands = []  # per highway: its raised island's two edges, in texture pixels
         self.island_owner = []  # per island: its street
+        self.lane_calls = []   # every street's lane lines as laid, to lay them again on their own (relane)
+        self.lane_match = None  # what the Lanes tool's choices are matched against: the streets' pixels
+        self.inner_lines = []   # and the inner streets' lines
+        self.lane_mpp = 1.0
         self.kerb_owner = []   # per kerb face: its street, junction or connector
         self.streets = {}      # street id -> centreline, rows and sidewalk rows, for bridges
         self.jinfo = {}        # junction id -> centre and the street ends that meet there
@@ -279,15 +283,16 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     seg_px = J.label_coords(seg_lab)                # every street's pixels, in one pass
     n_seg = int(seg_lab.max())
     # the Lanes tool's choices: each for the street whose centreline is nearest its point
-    lane_of = {}
     picks = (dashes or {}).get("lane_picks") or []
-    if picks:
+    mesh.lane_mpp = mpp
+    if dashes:
         have = [k for k in range(1, n_seg + 1) if len(seg_px[k])]
         if have:
-            med = {k: float(np.median(dt[seg_px[k][:, 0], seg_px[k][:, 1]])) for k in have}
-            lane_of = LN.match_picks(picks, np.concatenate([seg_px[k][:, ::-1] for k in have]).astype(float),
-                                     np.concatenate([np.full(len(seg_px[k]), k) for k in have]),
-                                     lambda k, d: d <= med[k] + 1.0 / mpp)
+            mesh.lane_match = {"pts": np.concatenate([seg_px[k][:, ::-1] for k in have]).astype(float),
+                               "labels": np.concatenate([np.full(len(seg_px[k]), k) for k in have]),
+                               "med": {k: float(np.median(dt[seg_px[k][:, 0], seg_px[k][:, 1]])) for k in have},
+                               "mpp": mpp}
+    lane_of = _street_lanes(mesh, picks)
     for sid in range(1, n_seg + 1):
         if sid % 20 == 0:
             prog.part(sid / n_seg)
@@ -362,11 +367,9 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             ix = np.clip(pts[:, 0].astype(int), 0, nomark.shape[1] - 1)
             unmarked = nomark[iy, ix].mean() > 0.5
         if dashes and not narrow_ramp and not unmarked:
-            n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
             cfg_d = dict(dashes, min_cycles=2) if grp is not None else dashes
-            layout = _dash_strips(mesh, pts, side, arc, hw_final, mpp, scale, cfg_d, sides=lane_of.get(sid))
-            mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
-            mesh.island_owner.extend([sid] * (len(mesh.lane_islands) - i0))
+            layout = _lanes(mesh, sid, ("street", sid), (pts, side, arc, hw_final, mpp, scale, cfg_d),
+                            sides=lane_of.get(sid))
 
         # which rows to build: all of them, or in the optimised mesh only where
         # the road needs them
@@ -472,16 +475,11 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         mesh.exact_roads = [_scale_poly(ex["road"], scale) for ex in exact if not ex["road"].is_empty]
     built = None
     # the Lanes tool's choices on inner streets: each for the nearest of their lines
-    inner_lanes = {}
-    if exact and picks:
-        from shapely.geometry import LineString, Point
-        lines = [(i, k, LineString(np.asarray(l, float)), float(hw)) for i, ex in enumerate(exact)
-                 for k, (l, hw) in enumerate(ex["lines"]) if len(l) > 1]
-        for pk in picks:
-            pt = Point(*pk["pt"])
-            best = min(((ls.distance(pt), i, k, hw) for i, k, ls, hw in lines), default=None)
-            if best and best[0] <= best[3] + 1.0 / mpp:
-                inner_lanes[(best[1], best[2])] = tuple(pk["sides"])
+    if exact and dashes:
+        from shapely.geometry import LineString
+        mesh.inner_lines = [(i, k, LineString(np.asarray(l, float)), float(hw)) for i, ex in enumerate(exact)
+                            for k, (l, hw) in enumerate(ex["lines"]) if len(l) > 1]
+    inner_lanes = _inner_lanes(mesh, picks, mpp)
     for ei, ex in enumerate(exact or []):
         road = ex["road"]
         for g in (road.geoms if hasattr(road, "geoms") else [road]):
@@ -502,14 +500,11 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             tg = np.gradient(pts, axis=0)
             tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
             side = np.column_stack([-tg[:, 1], tg[:, 0]])
-            n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
-            layout = _dash_strips(mesh, pts, side, arc, np.full(len(pts), float(hw)), mpp, scale, dashes,
-                                  sides=inner_lanes.get((ei, li)))
+            sid = INNER_OWNER + len(mesh.streets) + 1
+            layout = _lanes(mesh, sid, ("inner", ei, li), (pts, side, arc, np.full(len(pts), float(hw)), mpp, scale,
+                                                         dashes), sides=inner_lanes.get((ei, li)))
             if layout is None:
                 continue
-            sid = INNER_OWNER + len(mesh.streets) + 1
-            mesh.dash_owner.extend([sid] * (len(mesh.dashes) - n0))
-            mesh.island_owner.extend([sid] * (len(mesh.lane_islands) - i0))
             _inner_band(mesh, sid, pts, side, arc, float(hw), layout, road, mpp, scale)
     if mesh.sw_cfg and mesh.sw_mode == "kerb_line":
         _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_)
@@ -705,6 +700,76 @@ def _inner_band(mesh, sid, pts, side, arc, hw, layout, road, mpp, scale, max_gap
         mesh.quad((rows[k][0], rows[k][1], rows[k + 1][1], rows[k + 1][0]), "open", sid)
     mesh.streets[sid] = {"pts": P, "arc": t, "rows": rows, "hw": np.array(HW), "side": S, "sw": {},
                          "length_m": float(L), "dash": layout, "half_width_m": float(hw * mpp), "inner": True}
+
+
+def _street_lanes(mesh, picks):
+    """The Lanes tool's choices by street, {street: (a, b)}: each for the street whose centreline is nearest its point."""
+    m = mesh.lane_match
+    if not picks or m is None:
+        return {}
+    return LN.match_picks(picks, m["pts"], m["labels"], lambda k, d: d <= m["med"][k] + 1.0 / m["mpp"])
+
+
+def _inner_lanes(mesh, picks, mpp):
+    """The Lanes tool's choices on inner streets, {(shape, line): (a, b)}: each for the nearest of their lines."""
+    out = {}
+    if not picks or not mesh.inner_lines:
+        return out
+    from shapely.geometry import Point
+    for pk in picks:
+        pt = Point(*pk["pt"])
+        best = min(((ls.distance(pt), i, k, hw) for i, k, ls, hw in mesh.inner_lines), default=None)
+        if best and best[0] <= best[3] + 1.0 / mpp:
+            out[(best[1], best[2])] = tuple(pk["sides"])
+    return out
+
+
+def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None):
+    """
+    A street's lane lines (_dash_strips), with its owner on each line and island,
+    and the call kept (mesh.lane_calls), so relane can lay them again. owns:
+    whether mesh.streets[owner] is this street's (an inner street is one only
+    if it had lines when it was built).
+    """
+    n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
+    layout = _dash_strips(mesh, *args, island=island, sides=sides)
+    mesh.dash_owner.extend([owner] * (len(mesh.dashes) - n0))
+    mesh.island_owner.extend([owner] * (len(mesh.lane_islands) - i0))
+    if owns is None:
+        owns = key[0] == "street" or (key[0] == "inner" and layout is not None)
+    mesh.lane_calls.append({"owner": owner, "key": key, "args": args, "island": island, "layout": layout,
+                            "owns": owns})
+    return layout
+
+
+def relane(mesh, picks):
+    """
+    Lay every street's lane lines again with other Lanes tool choices (picks,
+    in mask pixels), from the calls build kept: mesh.dashes, dash_solid,
+    dash_owner, lane_islands, island_owner and each street's "dash" layout.
+    The streets' own quads stay as they are. Returns the owners whose lines
+    changed, and whether a street gained its first lines or lost all of them
+    (its road was built for the lines it had: in the optimised mesh and on an
+    inner street, the rows and the band its painted dashes need).
+    """
+    lane_of = _street_lanes(mesh, picks)
+    inner = _inner_lanes(mesh, picks, mesh.lane_mpp)
+    mesh.dashes, mesh.dash_solid, mesh.dash_owner = [], [], []
+    mesh.lane_islands, mesh.island_owner = [], []
+    calls, mesh.lane_calls = mesh.lane_calls, []
+    changed, flipped = set(), False
+    for c in calls:
+        kind = c["key"][0]
+        sides = lane_of.get(c["key"][1]) if kind == "street" else inner.get(c["key"][1:]) if kind == "inner" else None
+        old = c["layout"]
+        new = _lanes(mesh, c["owner"], c["key"], c["args"], c["island"], sides, c["owns"])
+        if (old is None) != (new is None):
+            flipped = True
+        if (old or {}).get("lines") != (new or {}).get("lines") or (old or {}).get("island") != (new or {}).get("island"):
+            changed.add(c["owner"])
+        if c["owns"] and c["owner"] in mesh.streets:
+            mesh.streets[c["owner"]]["dash"] = new
+    return changed, flipped
 
 
 def _line_strip(pts, side, arc, a, b, off, halfw, scale):
@@ -1013,9 +1078,7 @@ def _connector(mesh, A, B, spacing, owner, is_bridge, bi, dashes, mpp, scale):
         side = np.tile(lat, (len(pts), 1))
         arc = np.linspace(0.0, L / scale, len(pts))
         hw = np.full(len(pts), float(np.linalg.norm(np.array(V[ra[-1]]) - np.array(V[ra[0]]))) / 2 / scale)
-        n0 = len(mesh.dashes)
-        _dash_strips(mesh, pts, side, arc, hw, mpp, scale, dashes, island=False)
-        mesh.dash_owner.extend([owner] * (len(mesh.dashes) - n0))
+        _lanes(mesh, owner, ("connector", owner), (pts, side, arc, hw, mpp, scale, dashes), island=False)
     # sidewalks carried across, joining the two mouths' sidewalks
     if mesh.sw_cfg:
         for col, facing in ((0, lat), (len(ra) - 1, -lat)):

@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -863,6 +863,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
           line_width_mode: $('#lineMode').value,
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks }) });
       S.gen.result = res;
+      S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
       S.gen.top = null; S.gen.decals = null;
       await loadIslands(res);
       await loadStreets(res);
@@ -922,17 +923,18 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
   // with their materials. Shown once ready if the result is still on screen.
   // one at a time: asked again while one is being built (new island materials, say),
   // it is built once more when that one is done
-  async function buildTopView(gid){
-    if(S.gen.topBusy){ S.gen.topAgain = gid; return; }
+  // stay: an update of the same texture (its lanes laid again): the layer on screen stays
+  async function buildTopView(gid, stay = false){
+    if(S.gen.topBusy){ S.gen.topAgain = gid; S.gen.topStay = stay && S.gen.topStay !== false; return; }
     S.gen.topBusy = true;
-    try{ await buildTopViewNow(gid); }
+    try{ await buildTopViewNow(gid, stay); }
     finally{
       S.gen.topBusy = false;
-      const again = S.gen.topAgain; S.gen.topAgain = null;
-      if(again && S.gen.result && S.gen.result.id === again) buildTopView(again);
+      const again = S.gen.topAgain, st = !!S.gen.topStay; S.gen.topAgain = null; S.gen.topStay = null;
+      if(again && S.gen.result && S.gen.result.id === again) buildTopView(again, st);
     }
   }
-  async function buildTopViewNow(gid){
+  async function buildTopViewNow(gid, stay){
     $('#lp-top').innerHTML = '<div class="ph">building…</div>';
     log('Top view: building the 3D model to show the streets, sidewalks and kerbs with their materials…');
     const built = JSON.stringify(exportSettings());
@@ -950,7 +952,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
         + `streets ${m.street || 'your tiles'}, sidewalks ${m.sidewalk || 'your tiles'}, kerbs ${m.kerb || 'your tiles'}`
         + (isl.length ? `, islands ${isl.join(', ')}` : '') + '. Zoom in to see the materials.', 'ok');
       if(res.islands_warning) log('  Islands: ' + res.islands_warning + '.', 'bad');
-      if(S.gen.layer === 'result' || S.gen.layer === 'top') showLayer('top');
+      if(S.gen.layer === 'top' || (S.gen.layer === 'result' && !stay)) showLayer('top', S.gen.layer === 'top');
     }catch(e){
       $('#lp-top').innerHTML = '<div class="ph">—</div>';
       log('Top view not available: ' + e.message, 'bad');
@@ -1084,7 +1086,8 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
     status('Ready.'); $('#btn3d').disabled = false; renderMemory();
   }
 
-  async function showLayer(name){
+  // keep: the same layer drawn again (its lanes laid again, say): the zoom and place stay
+  async function showLayer(name, keep){
     const res = S.gen.result;
     if(!res) return;
     if(name === 'top' && !(S.gen.top && S.gen.top.gid === res.id)) return;
@@ -1098,7 +1101,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
       : name === 'islands' ? `Islands texture, ${img.width} × ${img.height} (the roads transparent)`
       : name === 'full' ? `Roads + islands, ${img.width} × ${img.height}`
       : name === 'decals' ? `Decals, ${img.width} × ${img.height}` : `${name}, ${img.width} × ${img.height}`,
-      ['islands', 'full', 'decals'].includes(name));
+      keep || ['islands', 'full', 'decals'].includes(name));
     drawBridges();
     $$('.layer').forEach(b => b.setAttribute('aria-pressed', b.dataset.layer === name));
   }
@@ -1724,10 +1727,44 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
     lanesTimer = setTimeout(() => api('/api/lanes', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ mask, picks }) }).catch(e => log('Lane choices not saved: ' + e.message, 'bad')), 300);
   }
+  // Done: only the lines of the streets whose lanes changed are laid again, on the texture as
+  // it is (the server keeps what that needs from Generate texture): a second or so, not a new
+  // texture. One at a time; asked again meanwhile, it runs once more when that one is done
+  async function paintLanes(){
+    const res = S.gen.result;
+    if(!res || !LANES.streets) return;
+    const want = JSON.stringify(LANES.picks);
+    if(want === S.gen.lanesPainted) return;
+    if(LANES.painting){ LANES.paintAgain = true; return; }
+    LANES.painting = true;
+    status('Laying the changed lanes…');
+    try{
+      const r = await api('/api/lanes/repaint', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ generation: res.id, lane_picks: JSON.parse(want) }) });
+      if(S.gen.result === res){
+        S.gen.lanesPainted = want;
+        if(r.changed.length){
+          res.urls.result = r.urls.result; res.urls.markings = r.urls.markings;
+          if(r.urls.full && S.gen.islandTex) S.gen.islandTex.urls.full = r.urls.full;
+          log(`Lanes laid again on ${r.changed.map(c => `street ${c.id} (${c.sides.join(' + ')}${c.even ? ', even' : ''})`).join(', ')}`
+            + ` in ${r.seconds.toFixed(1)} s: only their lines, the rest of the texture as it was.`, 'ok');
+          if(['result', 'markings', 'full'].includes(S.gen.layer)) await showLayer(S.gen.layer, true);
+          renderLayerThumbs();
+          if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) buildTopView(res.id, true);
+        }
+      }
+    }catch(e){
+      log('Lanes not laid on the texture: ' + e.message, 'bad');
+      if(e.status === 409 && S.gen.result === res) S.gen.lanesPainted = want;      // said once
+    }
+    status('Ready.');
+    LANES.painting = false;
+    if(LANES.paintAgain){ LANES.paintAgain = false; paintLanes(); }
+  }
   function lanesMode(on){
     LANES.on = on && !!LANES.streets;
     if(LANES.on && ISLS.pick >= 0) setPick(-1);
-    if(!LANES.on) LANES.sel = -1;
+    if(!LANES.on){ LANES.sel = -1; paintLanes(); }
     else log('Set lanes: click a street to choose how many lanes each side has (the two sides show in blue and orange). Esc or Set lanes to finish.');
     renderLanes(); drawBridges();
   }
@@ -1769,13 +1806,13 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
         </div>
         <div class="le-out">${k == null ? 'Even split: ' : 'Your choice: '}${what}.${full && L.limit ? ' That is its limit.' : ''}</div>
         ${L.cut ? '<div class="le-cut">More than this street can hold: cut back to its limit.</div>' : ''}
-        <div style="margin-top:6px;display:flex;gap:6px"><button type="button" class="le-even" ${k == null ? 'disabled' : ''}>Even</button><button type="button" class="le-done">Done</button></div>`;
+        <div style="margin-top:6px;display:flex;gap:6px"><button type="button" class="le-even" ${k == null ? 'disabled' : ''}>Even</button><button type="button" class="le-done" title="Lay this street's lines on the texture: only its lines, in a second or so">Done</button></div>`;
       ed.querySelectorAll('.le-step button').forEach(btn => btn.addEventListener('click', () => {
         const sd = [a, b]; sd[+btn.dataset.s] += +btn.dataset.d;
         setSides(i, sd[0], sd[1]);
       }));
       $('.le-even', ed).addEventListener('click', () => setEven(i));
-      $('.le-done', ed).addEventListener('click', () => { LANES.sel = -1; renderLanes(); drawBridges(); });
+      $('.le-done', ed).addEventListener('click', () => { LANES.sel = -1; renderLanes(); drawBridges(); paintLanes(); });
     }
     // the streets given their own lanes
     const list = $('#lanesList'); list.innerHTML = '';
@@ -1788,7 +1825,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
         ? `Street ${LANES.streets[i].id} (${LANES.streets[i].width_m.toFixed(1)} m): ${laneSides(LANES.streets[i].width_m, p.sides).slice(0, 2).join(' + ')} lanes`
         : `${p.sides.join(' + ')} lanes at (${Math.round(p.pt[0])}, ${Math.round(p.pt[1])})${LANES.streets ? ': on no street now' : ''}`;
       row.addEventListener('click', () => { if(i != null){ LANES.sel = i; if(!LANES.on) lanesMode(true); else { renderLanes(); drawBridges(); } } });
-      $('.ll-x', row).addEventListener('click', e => { e.stopPropagation(); LANES.picks.splice(k, 1); LANES.sel = -1; lanesChanged(); });
+      $('.ll-x', row).addEventListener('click', e => { e.stopPropagation(); LANES.picks.splice(k, 1); LANES.sel = -1; lanesChanged(); paintLanes(); });
       list.appendChild(row);
     });
   }
@@ -1835,6 +1872,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
       hit.addEventListener('click', e => {
         if(genVp.wasDrag && genVp.wasDrag()) return;
         e.stopPropagation();
+        if(LANES.sel >= 0 && LANES.sel !== i) paintLanes();                 // the street left: its lanes laid
         LANES.sel = i; renderLanes(); drawBridges();
       });
     });
@@ -1864,7 +1902,7 @@ const UI_VERSION = '2026.10.09-move1';   // must match VERSION in server.py
   $('#btnLanesEven').addEventListener('click', () => {
     if(!LANES.picks.length) return;
     log(`All ${LANES.picks.length} street choice(s) cleared: every street splits its lanes evenly.`);
-    LANES.picks = []; LANES.sel = -1; lanesChanged();
+    LANES.picks = []; LANES.sel = -1; lanesChanged(); paintLanes();
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && LANES.on && !MAT.open) lanesMode(false); });
   $('#btnAddSlot').addEventListener('click', () => {

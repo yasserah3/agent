@@ -50,6 +50,7 @@ SCAN_KINDS = ("asphalt", "concrete")   # kinds a scan may stand in for (no patte
 
 _cache = {}
 _scans = {}
+_layers = {}       # a scan laid over a tile's size: the last few, as many materials share a size
 
 
 def scan_for(kind):
@@ -96,8 +97,12 @@ def _scan_layer(scan, size_m, w_px, h_px):
     A scan laid over a tile of size_m: repeated a whole number of times each way
     (so the tile still joins itself), stretched by the little it takes to fit, and
     resampled to the tile's pixels. Returns the slopes (dh/dx, dh/d-row-down),
-    the roughness, the height (metres) and the ambient occlusion.
+    the roughness, the height (metres) and the ambient occlusion. Kept for the
+    next tile of the same size (the painted lane textures all share one).
     """
+    key = (scan["name"], scan["stamp"], tuple(round(float(v), 4) for v in size_m), int(w_px), int(h_px))
+    if key in _layers:
+        return _layers[key]
     sw, sh = scan["size_m"]
     nx, ny = max(1, int(round(size_m[0] / sw))), max(1, int(round(size_m[1] / sh)))
     n = _resize(np.tile(scan["normal"], (ny, nx, 1)), w_px, h_px)
@@ -107,7 +112,13 @@ def _scan_layer(scan, size_m, w_px, h_px):
     nz = np.maximum(n[..., 2], 0.05)
     # a stretched surface has gentler slopes
     fx, fy = (nx * sw) / size_m[0], (ny * sh) / size_m[1]
-    return -n[..., 0] / nz * fx, n[..., 1] / nz * fy, np.clip(r, 0.02, 1.0), hgt, np.clip(ao, 0.0, 1.0)
+    out = (-n[..., 0] / nz * fx, n[..., 1] / nz * fy, np.clip(r, 0.02, 1.0), hgt, np.clip(ao, 0.0, 1.0))
+    for arr in out:
+        arr.flags.writeable = False                     # shared: read only
+    _layers[key] = out
+    if len(_layers) > 4:
+        _layers.pop(next(iter(_layers)))
+    return out
 
 
 def maps(img, size_m, kind="asphalt", quality=90, source="scan", own=None):

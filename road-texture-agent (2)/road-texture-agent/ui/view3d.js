@@ -892,6 +892,9 @@ function assignPool(){
 // what the scene was built from (the texture and the 3D model settings, materials
 // included), to tell when it is out of date
 let builtFrom = null;
+// what the model in the view was built from but its streets' lanes (the server's lanes_base):
+// a model of the same base can take new lanes as its lane parts alone
+let worldBase = null;
 const buildKey = () => JSON.stringify([window.lastGeneration && window.lastGeneration(), window.exportSettings ? window.exportSettings() : null]);
 
 // keep: Update view, the same camera (and time of day and look); else the whole place framed
@@ -911,6 +914,19 @@ async function generate(keep = false){
       body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined }) });
     const res = await r.json();
     if(!r.ok) throw new Error(res.detail || 'the 3D model could not be built');
+    if(keep && world && res.partial && res.lanes_base && res.lanes_base === worldBase){
+      // only the streets' lanes changed: their parts alone, in place of the ones in the view
+      await swapLaneParts(res, job);
+      builtFrom = key;
+      staleCheck();
+      const n = res.lanes_changed ? res.lanes_changed.length : 0;
+      note(`Lanes updated${n ? ` on ${n} street${n === 1 ? '' : 's'}` : ''}: only the lane lines, islands`
+        + `${res.markings === 'painted' ? ' and painted road surfaces' : ''} were built again; the rest of the scene is as it was.`);
+      if(job) job.done(true, `lanes only${n ? `, ${n} street${n === 1 ? '' : 's'}` : ''}`);
+      window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: lamps ? lamps.items.length : 0, lanesOnly: true } }));
+      busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
+      return;
+    }
     note('Loading the model into the view…');
     const t0 = performance.now(), mb = (res.file_bytes || 0) / 1048576;
     if(job) job.set(`loading the model into the view${mb ? ` (${mb.toFixed(0)} MB)` : ''}`, 0);
@@ -924,6 +940,7 @@ async function generate(keep = false){
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
     dropBakes();
     world = gltf.scene;
+    worldBase = res.lanes_base || null;
     await loadRelief(gltf);
     prepare(world);
     scene.add(world);
@@ -951,6 +968,24 @@ async function generate(keep = false){
     note('Could not build the 3D scene: ' + e.message, true);
   }
   busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
+}
+
+// the lane parts (the server's partial model: with painted markings the road, the
+// median islands, the lane lines) in place of the view's own, by their names; the
+// rest of the scene, its lamps and its bakes stay
+async function swapLaneParts(res, job){
+  if(job) job.set(`loading the lanes into the view${res.partial.bytes ? ` (${(res.partial.bytes / 1048576).toFixed(1)} MB)` : ''}`, null);
+  const gltf = await new GLTFLoader().loadAsync(res.partial.url);
+  const names = new Set(res.partial.replace.map(n => THREE.PropertyBinding.sanitizeNodeName(n)));
+  for(const o of [...world.children]){
+    if(!names.has(o.name)) continue;
+    world.remove(o);
+    o.traverse(c => { if(c.geometry) c.geometry.dispose(); });
+  }
+  await loadRelief(gltf);
+  prepare(gltf.scene);
+  for(const o of [...gltf.scene.children]) world.add(o);
+  applyBake();
 }
 
 // a scene built from other settings (materials, the 3D model settings, a newer

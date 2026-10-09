@@ -553,6 +553,45 @@ def write_glb_scene(path, meshes, materials, images):
     return total
 
 
+def _subset_scene(meshes, materials, images, names):
+    """
+    The meshes named (glTF names) of a scene on their own, with only the
+    materials and pictures they use, renumbered: (meshes, materials, images)
+    for write_glb_scene.
+    """
+    import copy
+    mats, imgs, mat_of = [], [], {}
+
+    def pic(i):
+        return _image_index(imgs, *images[i])
+
+    def material(i):
+        if i not in mat_of:
+            m = copy.deepcopy(materials[i])
+            pbr = m.get("pbrMetallicRoughness") or {}
+            for holder, key in ((pbr, "baseColorTexture"), (pbr, "metallicRoughnessTexture"), (m, "normalTexture"),
+                                (m, "occlusionTexture"), (m, "emissiveTexture")):
+                if key in holder:
+                    holder[key]["index"] = pic(holder[key]["index"])
+            ex = m.get("extras") or {}
+            if "relief" in ex:
+                ex["relief"]["index"] = pic(ex["relief"]["index"])
+            if "pattern" in ex:
+                ex["pattern"] = pic(ex["pattern"])
+            for key in ("map", "normal", "orh"):
+                if key in (ex.get("mix") or {}):
+                    ex["mix"][key] = pic(ex["mix"][key])
+            mats.append(m)
+            mat_of[i] = len(mats) - 1
+        return mat_of[i]
+
+    out = []
+    for m in meshes:
+        if m["name"] in names:
+            out.append(dict(m, primitives=[dict(p, material=material(p["material"])) for p in m["primitives"]]))
+    return out, mats, imgs
+
+
 def variation_factor(result_path, markings_path, coverage, mpp_out, strength=1.0, sigma_m=3.0):
     """
     The large variation layer: where the generated road is lighter or darker
@@ -666,140 +705,152 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         A, B, C = pl[a], pl[b], pl[c]
         return (B[2] - A[2]) * (C[0] - A[0]) - (B[0] - A[0]) * (C[2] - A[2])
 
-    # painted markings: one texture per kind of street (its line width, and its lane
-    # lines: how many and where across), each holding exactly one dash cycle
-    # along the street with all its lanes' dashes, on the road's own grain. Solid
-    # lines (a highway's edges) stay strips, so they run exactly as far as the
-    # texture's lines and the islands do
     painted = markings == "painted"
-    mark_of = {}                 # street -> its marked texture's class
-    marked = {}                  # class -> index into the marked textures
-    mark_tex = []                # (class info, picture)
-    mark_own = {}                # class -> the marked texture's own maps (library street material)
-    E = None
-    mark_size = None
-    if painted:
-        dashed = {sid: st for sid, st in mesh.streets.items()
-                  if st.get("dash") and any(k == "dash" for _, k in st["dash"]["lines"])}
-        if dashed:
-            cycle = float((dash_cfg or {}).get("cycle_m", 9.0))
-            share = float((dash_cfg or {}).get("dash_share", 0.6))
-            E = math.ceil(2 * max(st["half_width_m"] for st in dashed.values()) * 1.15 / tile_m) * tile_m
-            mark_size = (cycle, E)                         # what a marked texture covers, along and across
-            # at most three line widths, each a group of streets with similar
-            # widths: many short pieces would otherwise each want a texture
-            ws = np.sort([st["dash"]["width_m"] * 100 for st in dashed.values()])
-            groups_w = np.array_split(ws, min(3, len(ws)))
-            centres = sorted({max(5, int(round(float(np.median(g)) / 5)) * 5) for g in groups_w if len(g)})
-            # then streets of the same line width and number of lines, whose widths are
-            # close enough that their lines lie within a few centimetres of each other's
-            by = {}
-            for sid, st in dashed.items():
-                d = st["dash"]
-                wc = min(centres, key=lambda c: abs(c - d["width_m"] * 100))
-                by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k == "dash"),
-                               tuple(d["sides"]) if d.get("sides") else None), []).append((d["street_m"], sid))
-            tol = 0.6
-            while True:
-                classes = []
-                for (wc, kind, nd, sides), items in sorted(by.items(), key=lambda kv: str(kv[0])):
-                    items = sorted(items)
-                    run = []
-                    for w, sid in items + [(math.inf, None)]:
-                        if run and (sid is None or (nd > 1 and w - run[0][0] > tol)):
-                            classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run], sides))
-                            run = []
-                        if sid is not None:
-                            run.append((w, sid))
-                # many kinds of street: one more try with streets up to 1.2 m apart sharing
-                # (their lines then lie within about 30 cm of where they belong), never wider
-                if len(classes) <= 8 or tol >= 1.2:
-                    break
-                tol = 1.2
-            for ci, (wc, w_m, sids, sides) in enumerate(classes):
-                xs = [x for x, k in LN.layout(w_m, sides)["lines"] if k == "dash"]
-                img = marked_texture(tiles["open"][0]["path"], tile_m, cycle, share, E, wc / 100.0, paint_rgb, xs)
-                marked[ci] = len(mark_tex)
-                mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids)},
-                                 img))
-                mark_own[ci] = marked_maps(tiles["open"][0], tile_m, cycle, E)
-                for sid in sids:
-                    mark_of[sid] = ci
 
-    def mark_class(owner):
-        return mark_of.get(owner) if painted and owner is not None and 0 < owner else None
+    def road_prims():
+        """
+        The streets' and junctions' surfaces: their quads grouped into
+        primitives by tile variant, each with its material. Painted markings:
+        one texture per kind of street (its line width, and its lane lines: how
+        many and where across), each holding exactly one dash cycle along the
+        street with all its lanes' dashes, on the road's own grain, laid on the
+        street's dashed run. Solid lines (a highway's edges) stay strips, so they
+        run exactly as far as the texture's lines and the islands do. Returns the
+        primitives and what the dashes need to know: which streets are painted.
+        """
+        mark_of = {}                 # street -> its marked texture's class
+        marked = {}                  # class -> index into the marked textures
+        mark_tex = []                # (class info, picture)
+        mark_own = {}                # class -> the marked texture's own maps (library street material)
+        E = None
+        mark_size = None
+        if painted:
+            dashed = {sid: st for sid, st in mesh.streets.items()
+                      if st.get("dash") and any(k == "dash" for _, k in st["dash"]["lines"])}
+            if dashed:
+                cycle = float((dash_cfg or {}).get("cycle_m", 9.0))
+                share = float((dash_cfg or {}).get("dash_share", 0.6))
+                E = math.ceil(2 * max(st["half_width_m"] for st in dashed.values()) * 1.15 / tile_m) * tile_m
+                mark_size = (cycle, E)                         # what a marked texture covers, along and across
+                # at most three line widths, each a group of streets with similar
+                # widths: many short pieces would otherwise each want a texture
+                ws = np.sort([st["dash"]["width_m"] * 100 for st in dashed.values()])
+                groups_w = np.array_split(ws, min(3, len(ws)))
+                centres = sorted({max(5, int(round(float(np.median(g)) / 5)) * 5) for g in groups_w if len(g)})
+                # then streets of the same line width and number of lines, whose widths are
+                # close enough that their lines lie within a few centimetres of each other's
+                by = {}
+                for sid, st in dashed.items():
+                    d = st["dash"]
+                    wc = min(centres, key=lambda c: abs(c - d["width_m"] * 100))
+                    by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k == "dash"),
+                                   tuple(d["sides"]) if d.get("sides") else None), []).append((d["street_m"], sid))
+                tol = 0.6
+                while True:
+                    classes = []
+                    for (wc, kind, nd, sides), items in sorted(by.items(), key=lambda kv: str(kv[0])):
+                        items = sorted(items)
+                        run = []
+                        for w, sid in items + [(math.inf, None)]:
+                            if run and (sid is None or (nd > 1 and w - run[0][0] > tol)):
+                                classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run], sides))
+                                run = []
+                            if sid is not None:
+                                run.append((w, sid))
+                    # many kinds of street: one more try with streets up to 1.2 m apart sharing
+                    # (their lines then lie within about 30 cm of where they belong), never wider
+                    if len(classes) <= 8 or tol >= 1.2:
+                        break
+                    tol = 1.2
+                for ci, (wc, w_m, sids, sides) in enumerate(classes):
+                    xs = [x for x, k in LN.layout(w_m, sides)["lines"] if k == "dash"]
+                    img = marked_texture(tiles["open"][0]["path"], tile_m, cycle, share, E, wc / 100.0, paint_rgb, xs)
+                    marked[ci] = len(mark_tex)
+                    mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids)},
+                                     img))
+                    mark_own[ci] = marked_maps(tiles["open"][0], tile_m, cycle, E)
+                    for sid in sids:
+                        mark_of[sid] = ci
 
-    def canon_along(vi, owner):
-        """Metres along the street the canonical way (app/lanes.py), and its across sign."""
-        st = mesh.streets[owner]["dash"]
-        along, across = mesh.st[vi]
-        return (along, across) if st["canon"] else (st["length_m"] - along, -across)
+        def mark_class(owner):
+            return mark_of.get(owner) if painted and owner is not None and 0 < owner else None
 
-    def in_dashed_run(q, owner):
-        """Whether a quad lies where the street's dashes run, so the texture repeats line up."""
-        st = mesh.streets[owner]["dash"]
-        us = []
-        for vi in q:
-            if mesh.st[vi] is None:
-                return False
-            us.append((canon_along(vi, owner)[0] - st["setback_m"]) / st["step_m"])
-        return min(us) >= -(1 - st["share"]) + 1e-6 and max(us) <= st["n"] + 1e-6
+        def canon_along(vi, owner):
+            """Metres along the street the canonical way (app/lanes.py), and its across sign."""
+            st = mesh.streets[owner]["dash"]
+            along, across = mesh.st[vi]
+            return (along, across) if st["canon"] else (st["length_m"] - along, -across)
 
-    def marked_uv(vi, owner):
-        st = mesh.streets[owner]["dash"]
-        along, across = canon_along(vi, owner)
-        # across: a vertex at -across metres from the centreline lies at x = -across in
-        # the lanes' coordinate (app/lanes.py), which the texture's rows follow
-        return (along - st["setback_m"]) / st["step_m"], 0.5 - across / E
+        def in_dashed_run(q, owner):
+            """Whether a quad lies where the street's dashes run, so the texture repeats line up."""
+            st = mesh.streets[owner]["dash"]
+            us = []
+            for vi in q:
+                if mesh.st[vi] is None:
+                    return False
+                us.append((canon_along(vi, owner)[0] - st["setback_m"]) / st["step_m"])
+            return min(us) >= -(1 - st["share"]) + 1e-6 and max(us) <= st["n"] + 1e-6
 
-    # group quads into primitives by part and tile variant
-    groups = {}
-    for qi, q in enumerate(mesh.quads):
-        part, owner = mesh.part[qi], mesh.owner[qi]
-        L = layouts.setdefault(owner, layout(owner))
-        tile_part = "junction" if part == "junction" and tiles.get("junction") else "open"
-        wc = mark_class(owner) if part != "junction" else None
-        if wc is not None and wc in marked and in_dashed_run(q, owner):
-            groups.setdefault(("marked", wc), []).append((q, owner, part))
-            continue
-        vk = L["variant"] % len(tiles[tile_part])
-        groups.setdefault((tile_part, vk), []).append((q, owner, part))
+        def marked_uv(vi, owner):
+            st = mesh.streets[owner]["dash"]
+            along, across = canon_along(vi, owner)
+            # across: a vertex at -across metres from the centreline lies at x = -across in
+            # the lanes' coordinate (app/lanes.py), which the texture's rows follow
+            return (along - st["setback_m"]) / st["step_m"], 0.5 - across / E
 
-    images, materials, primitives, key_to_mat = [], [], [], {}
-    for (part, vk), quads in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
-        if part == "marked":
-            info_m = mark_tex[marked[vk]][0]
-            tile_material(f"Road_marked_{info_m['lines']}x{info_m['width_cm']}cm_{vk + 1}", mark_tex[marked[vk]][1],
-                          images, materials,
-                          mark_size, "asphalt", 0.9, surface, own=mark_own.get(vk))
-        else:
-            tile_material(f"Road_{'street' if part == 'open' else part}_{vk + 1}",
-                          Image.open(tiles[part][vk]["path"]), images, materials,
-                          (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles[part][vk]))
-        remap, pos, uv, col, idx = {}, [], [], [], []
+        # group quads into primitives by part and tile variant
+        groups = {}
+        for qi, q in enumerate(mesh.quads):
+            part, owner = mesh.part[qi], mesh.owner[qi]
+            L = layouts.setdefault(owner, layout(owner))
+            tile_part = "junction" if part == "junction" and tiles.get("junction") else "open"
+            wc = mark_class(owner) if part != "junction" else None
+            if wc is not None and wc in marked and in_dashed_run(q, owner):
+                groups.setdefault(("marked", wc), []).append((q, owner, part))
+                continue
+            vk = L["variant"] % len(tiles[tile_part])
+            groups.setdefault((tile_part, vk), []).append((q, owner, part))
 
-        def vid(vi, owner, qpart, _marked=(part == "marked")):
-            key = (vi, owner)
-            if key not in remap:
-                remap[key] = len(pos)
-                pos.append(world[vi])
-                uv.append(marked_uv(vi, owner) if _marked else uv_for(vi, owner, qpart))
-                c = float(vfac[vi]); col.append((c, c, c, 1.0))
-            return remap[key]
+        prims = []
+        for (part, vk), quads in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+            if part == "marked":
+                info_m = mark_tex[marked[vk]][0]
+                tile_material(f"Road_marked_{info_m['lines']}x{info_m['width_cm']}cm_{vk + 1}", mark_tex[marked[vk]][1],
+                              images, materials,
+                              mark_size, "asphalt", 0.9, surface, own=mark_own.get(vk))
+            else:
+                tile_material(f"Road_{'street' if part == 'open' else part}_{vk + 1}",
+                              Image.open(tiles[part][vk]["path"]), images, materials,
+                              (tile_m, tile_m), "asphalt", 0.9, surface, own=LIB.own_maps(tiles[part][vk]))
+            remap, pos, uv, col, idx = {}, [], [], [], []
 
-        for q, owner, qpart in quads:
-            a, b, c, d = q
-            if up(a, b, c) + up(a, c, d) < 0:
-                a, b, c, d = a, d, c, b
-            for t in _split_quad(up, a, b, c, d, 2e-4):
-                idx.append([vid(i, owner, qpart) for i in t])
-        if not idx:
-            continue
-        primitives.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
-                           "uv0": np.array(uv), "colors": np.array(col),
-                           "indices": np.array(idx), "material": len(materials) - 1})
+            def vid(vi, owner, qpart, _marked=(part == "marked")):
+                key = (vi, owner)
+                if key not in remap:
+                    remap[key] = len(pos)
+                    pos.append(world[vi])
+                    uv.append(marked_uv(vi, owner) if _marked else uv_for(vi, owner, qpart))
+                    c = float(vfac[vi]); col.append((c, c, c, 1.0))
+                return remap[key]
 
-    road_quads = sum(len(p["indices"]) for p in primitives) // 2   # streets and junctions only
+            for q, owner, qpart in quads:
+                a, b, c, d = q
+                if up(a, b, c) + up(a, c, d) < 0:
+                    a, b, c, d = a, d, c, b
+                for t in _split_quad(up, a, b, c, d, 2e-4):
+                    idx.append([vid(i, owner, qpart) for i in t])
+            if not idx:
+                continue
+            prims.append({"positions": np.array(pos), "normals": np.tile([0, 1, 0], (len(pos), 1)),
+                          "uv0": np.array(uv), "colors": np.array(col),
+                          "indices": np.array(idx), "material": len(materials) - 1})
+        return prims, {"mark_class": mark_class, "marked": marked, "mark_tex": mark_tex,
+                       "road_quads": sum(len(p["indices"]) for p in prims) // 2,   # streets and junctions only
+                       "marked_quads": sum(len(v) for k, v in groups.items() if k[0] == "marked")}
+
+    images, materials = [], []
+    # the streets' surfaces: here, unless painted markings decide them (lane_parts)
+    primitives, road_rep = ([], None) if painted else road_prims()
 
     # tight groups of junctions, junctions at the border and any road nothing
     # else covered: the traced outline, 3 mm below the road, so strips on top
@@ -891,46 +942,6 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     prog.stage("lamps", "street lamps")
     lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
 
-    # dashes: their own mesh, a centimetre above the road so they never flicker into it
-    dpos, dcol, didx = [], [], []
-    painted_dashes = 0
-    for di, strip in enumerate(mesh.dashes):
-        base = len(dpos)
-        owner = mesh.dash_owner[di] if di < len(mesh.dash_owner) else None
-        solid = di < len(mesh.dash_solid) and mesh.dash_solid[di]
-        if painted and not solid and owner is not None and mark_class(owner) in marked:
-            painted_dashes += 1
-            continue                                        # painted into the road texture
-        pts = [(x, y) for (lx, ly, rx, ry) in strip for (x, y) in ((lx, ly), (rx, ry))]
-        dl = BR.dash_lift(mesh, plans, output_scale, owner, pts) if plans else np.zeros(len(pts))
-        for k_, (x, y) in enumerate(pts):
-            dpos.append((x * mpp_out - W * mpp_out / 2, 0.01 + float(dl[k_]), y * mpp_out - H * mpp_out / 2))
-            f = float(map_coordinates(fac, [[y], [x]], order=1, mode="nearest")[0])
-            c = 1.0 + (f - 1.0) * 0.5                       # paint wears too, but less than asphalt
-            dcol.append((c, c, c, 1.0))
-        # this dash's points at the precision the file stores (only its own: all the
-        # dashes so far, again for every dash, grew with the square of their number)
-        Pl = np.array(dpos[base:], np.float32).astype(np.float64).tolist()
-        for k in range(len(strip) - 1):
-            a, b, c, d = base + 2 * k, base + 2 * k + 1, base + 2 * k + 3, base + 2 * k + 2
-            for t in ((a, b, c), (a, c, d)):
-                # the y part of cross(B - A, C - A), as numpy works it out
-                A_, B_, C_ = Pl[t[0] - base], Pl[t[1] - base], Pl[t[2] - base]
-                n_y = (B_[2] - A_[2]) * (C_[0] - A_[0]) - (B_[0] - A_[0]) * (C_[2] - A_[2])
-                if abs(n_y) < 2e-6:
-                    continue                                # no area: a repeated point
-                didx.append(t if n_y > 0 else (t[0], t[2], t[1]))
-    dash_count = len(mesh.dashes)
-    island_info = _lane_island_mesh(mesh, plans, output_scale, mpp_out, W, H, tiles, tile_m, images, materials, meshes,
-                                    surface)
-    if didx:
-        materials.append({"name": "RoadMarkings", "doubleSided": True,
-                          "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
-                                                   "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
-        meshes.append({"name": "Markings", "primitives": [{
-            "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
-            "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
-
     decal_info = None
     if decals and decals.get("placements"):
         on_road = decals.get("mode") == "painted"
@@ -945,37 +956,126 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             decal_info = {"count": len(decals["placements"]), "mode": "painted" if on_road else "separate",
                           "pictures": len(dprims)}
 
+    def lane_parts():
+        """
+        The parts of the model the streets' lanes decide, built last so they can
+        be built again on their own (relane): with painted markings the
+        streets' surfaces (first in the road object), the highways' raised
+        islands (Median islands) and the lines laid as strips (Markings).
+        Returns their report and the names of the objects they make.
+        """
+        prog.stage("lanes", "the streets' lanes: " + ("painted surfaces, " if painted else "") + "islands and lines")
+        rr = road_rep
+        if painted:
+            prims, rr = road_prims()
+            meshes[0]["primitives"][0:0] = prims
+        # dashes: their own mesh, a centimetre above the road so they never flicker into it
+        dpos, dcol, didx = [], [], []
+        painted_dashes = 0
+        for di, strip in enumerate(mesh.dashes):
+            base = len(dpos)
+            owner = mesh.dash_owner[di] if di < len(mesh.dash_owner) else None
+            solid = di < len(mesh.dash_solid) and mesh.dash_solid[di]
+            if painted and not solid and owner is not None and rr["mark_class"](owner) in rr["marked"]:
+                painted_dashes += 1
+                continue                                        # painted into the road texture
+            pts = [(x, y) for (lx, ly, rx, ry) in strip for (x, y) in ((lx, ly), (rx, ry))]
+            dl = BR.dash_lift(mesh, plans, output_scale, owner, pts) if plans else np.zeros(len(pts))
+            P_ = np.asarray(pts, float)
+            # paint wears too, but less than asphalt
+            c_ = 1.0 + (map_coordinates(fac, [P_[:, 1], P_[:, 0]], order=1, mode="nearest") - 1.0) * 0.5
+            for k_, (x, y) in enumerate(pts):
+                dpos.append((x * mpp_out - W * mpp_out / 2, 0.01 + float(dl[k_]), y * mpp_out - H * mpp_out / 2))
+                c = float(c_[k_])
+                dcol.append((c, c, c, 1.0))
+            # this dash's points at the precision the file stores (only its own: all the
+            # dashes so far, again for every dash, grew with the square of their number)
+            Pl = np.array(dpos[base:], np.float32).astype(np.float64).tolist()
+            for k in range(len(strip) - 1):
+                a, b, c, d = base + 2 * k, base + 2 * k + 1, base + 2 * k + 3, base + 2 * k + 2
+                for t in ((a, b, c), (a, c, d)):
+                    # the y part of cross(B - A, C - A), as numpy works it out
+                    A_, B_, C_ = Pl[t[0] - base], Pl[t[1] - base], Pl[t[2] - base]
+                    n_y = (B_[2] - A_[2]) * (C_[0] - A_[0]) - (B_[0] - A_[0]) * (C_[2] - A_[2])
+                    if abs(n_y) < 2e-6:
+                        continue                                # no area: a repeated point
+                    didx.append(t if n_y > 0 else (t[0], t[2], t[1]))
+        island_info = _lane_island_mesh(mesh, plans, output_scale, mpp_out, W, H, tiles, tile_m, images, materials,
+                                        meshes, surface)
+        if didx:
+            materials.append({"name": "RoadMarkings", "doubleSided": True,
+                              "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
+                                                       "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
+            meshes.append({"name": "Markings", "primitives": [{
+                "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
+                "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
+        return {
+            "quads": int(rr["road_quads"]), "dashes": len(mesh.dashes),
+            "markings": ("painted" if painted and rr["marked"] else "strips"),
+            "painted_dashes": painted_dashes if painted else 0,
+            "marked_textures": [dict(info, px=list(im.size)) for info, im in rr["mark_tex"]],
+            "lane_islands": island_info,
+            "lanes_cut": sum(1 for st in mesh.streets.values() if (st.get("dash") or {}).get("cut")),
+            "marked_quads": rr["marked_quads"],
+            "strip_dashes": len(mesh.dashes) - (painted_dashes if painted else 0),
+        }, (["Road"] if painted else []) + ["Median islands", "Markings"]
+
+    # all but the lanes' parts, so those can be laid again on their own
+    kept = (len(materials), len(images), list(meshes), list(meshes[0]["primitives"]))
+    lane_info, lane_names = lane_parts()
+
     prog.stage("writing", "writing the 3D file")
     size = write_glb_scene(out_path, meshes, materials, images)
 
-    return {"mesh": "tiled", "quads": int(road_quads), "streets": rep["streets"],
-            "junctions": rep["junctions_patched"], "materials": len(materials),
-            "dashes": dash_count, "tile_m": tile_m, "mm_per_px": tileset.get("mm_per_px"),
-            "variation": variation, "size_m": [round(W * mpp_out, 1), round(H * mpp_out, 1)],
-            "file_bytes": int(size), "interchange_triangles": ic_tris, "sidewalk": sw_info,
-            "fill_triangles": fill_tris, "groups": rep.get("clusters"), "bare_filled": rep.get("bare_filled"),
-            "blocks": blocks_info,
-            "scatter": scatter_info,
-            "mesh_detail": "optimised" if optimise else "full",
-            "rows_full": rep.get("rows_full"), "rows_kept": rep.get("rows_kept"),
-            "markings": ("painted" if painted and marked else "strips"),
-            "surface": sorted({m["extras"]["surface"] for m in materials if (m.get("extras") or {}).get("surface")}),
-            "painted_dashes": painted_dashes if painted else 0,
-            "marked_textures": [dict(info, px=list(im.size)) for info, im in mark_tex],
-            "lane_islands": island_info,
-            "lanes_cut": sum(1 for st in mesh.streets.values() if (st.get("dash") or {}).get("cut")),
-            "marked_quads": sum(len(v) for k, v in groups.items() if k[0] == "marked"),
-            "strip_dashes": len(mesh.dashes) - (painted_dashes if painted else 0),
-            "bridges": [{k: (float(v) if isinstance(v, (np.floating, float)) else v)
-                         for k, v in pl.items() if k in ("index", "ok", "s_in", "s_out", "r_before",
-                                                           "r_after", "height", "steepest_pct",
-                                                           "warnings", "streets")}
-                        for pl in plans] if plans else None,
-            "deck": deck_info,
-            "decals": decal_info,
-            "lamps": lamps,
-            "layouts": {int(k): v for k, v in layouts.items()}, "_mesh": mesh, "_world": world,
-            "_fac": fac}
+    out = {"mesh": "tiled", "streets": rep["streets"],
+           "junctions": rep["junctions_patched"],
+           "tile_m": tile_m, "mm_per_px": tileset.get("mm_per_px"),
+           "variation": variation, "size_m": [round(W * mpp_out, 1), round(H * mpp_out, 1)],
+           "interchange_triangles": ic_tris, "sidewalk": sw_info,
+           "fill_triangles": fill_tris, "groups": rep.get("clusters"), "bare_filled": rep.get("bare_filled"),
+           "blocks": blocks_info,
+           "scatter": scatter_info,
+           "mesh_detail": "optimised" if optimise else "full",
+           "rows_full": rep.get("rows_full"), "rows_kept": rep.get("rows_kept"),
+           "bridges": [{k: (float(v) if isinstance(v, (np.floating, float)) else v)
+                        for k, v in pl.items() if k in ("index", "ok", "s_in", "s_out", "r_before",
+                                                          "r_after", "height", "steepest_pct",
+                                                          "warnings", "streets")}
+                       for pl in plans] if plans else None,
+           "deck": deck_info,
+           "decals": decal_info,
+           "lamps": lamps}
+
+    def report(lanes_now, nbytes):
+        return dict(out, **lanes_now, materials=len(materials), file_bytes=int(nbytes),
+                    surface=sorted({m["extras"]["surface"] for m in materials
+                                    if (m.get("extras") or {}).get("surface")}))
+
+    def relane(picks, glb_path, part_path):
+        """
+        The model with other Lanes tool choices, its lanes' parts alone built
+        again (everything else as built): the whole model to glb_path, and those
+        parts alone to part_path, for a view that has the rest already. None
+        when a street gains its first lines or loses all of them with painted
+        markings: its road was built for the lines it had, so build it all.
+        """
+        changed, flipped = QM.relane(mesh, picks)
+        if flipped and painted:
+            return None
+        del materials[kept[0]:]
+        del images[kept[1]:]
+        meshes[:] = kept[2]
+        meshes[0]["primitives"] = list(kept[3])
+        now, names = lane_parts()
+        prog.stage("writing", "writing the 3D file")
+        nbytes = write_glb_scene(glb_path, meshes, materials, images)
+        part = _subset_scene(meshes, materials, images, names)
+        part_bytes = write_glb_scene(part_path, *part)
+        return dict(report(now, nbytes), lanes_changed=sorted(int(c) for c in changed if c is not None),
+                    part_bytes=int(part_bytes)), names
+
+    return dict(report(lane_info, size), layouts={int(k): v for k, v in layouts.items()}, _mesh=mesh, _world=world,
+                _fac=fac, _relane=relane)
 
 
 def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
@@ -1525,6 +1625,9 @@ def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
             grey(rr), own[2], extra[0], extra[1], own[5] if extra[0] is not None else 0.0)
 
 
+_marked = {}                 # marked textures made, by what they were made from: the last few
+
+
 def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_rgb, lines=(0.0,), max_px=2048):
     """
     One dash cycle of road, with a dash painted along each lane line: lines,
@@ -1538,6 +1641,11 @@ def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_r
     street the tiles are stretched by the small amount that makes them fit
     (9 m holds two 4 m tiles stretched by 12%, which cannot be seen in grain).
     """
+    import os
+    key = (str(tile_path), os.path.getmtime(tile_path), float(tile_m), float(cycle_m), float(share), float(across_m),
+           float(width_m), tuple(float(v) for v in paint_rgb), tuple(round(float(x), 4) for x in lines), int(max_px))
+    if key in _marked:
+        return _marked[key]                                        # the same kind of street as before
     tile = np.array(Image.open(tile_path).convert("RGB")).astype(np.float32)
     tp = tile.shape[0]
     k_along = max(1, int(round(cycle_m / tile_m)))
@@ -1562,7 +1670,10 @@ def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_r
     grain = img.mean(axis=2, keepdims=True)
     paint = np.array(paint_rgb, np.float32)[None, None, :] * (0.92 + 0.08 * grain / max(float(grain.mean()), 1e-6))
     img = img * (1 - a) + paint * a
-    return Image.fromarray(img.clip(0, 255).astype(np.uint8))
+    out = _marked[key] = Image.fromarray(img.clip(0, 255).astype(np.uint8))
+    if len(_marked) > 32:
+        _marked.pop(next(iter(_marked)))
+    return out
 
 
 
