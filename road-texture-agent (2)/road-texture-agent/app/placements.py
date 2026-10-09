@@ -12,6 +12,10 @@ the placement's "turns": {id: degrees, clockwise on the map}. A turned copy
 takes its turned outline in its row, so the spaces around it stay as set.
 The ids in the placement's "empty" (Draw spaced) are left out: their spots stay
 empty and every other copy stays where it is.
+
+An automatic placement ("auto", app/autoplace.py) has no rectangle: its copies are
+the objects it laid on the islands ("items"), ids "island-number", each turned to
+face its street; turns and empties apply to them the same way.
 """
 
 import math
@@ -52,6 +56,15 @@ def copies_of(p, objects, packages, mpp_mask):
     with a random transform (foliage), the centre its random offset, the angle
     its random turn, and scale its random scale (1 without).
     """
+    if isinstance(p.get("auto"), dict):
+        # an automatic placement (app/autoplace.py): its objects as laid on the islands, each
+        # its X along its side and its front to the street, with its own extra turn; empties out
+        turns, empty = p.get("turns") or {}, set(p.get("empty") or [])
+        items = p.get("items") or []
+        out = [(it["object"], np.array([it["x"], it["y"]], float) * mpp_mask,
+                math.radians(float(it["a"]) + float(turns.get(it["id"], 0.0))), it["id"], 1.0)
+               for it in items if it["object"] in objects and it["id"] not in empty]
+        return out, {"ids": [it["id"] for it in items]}
     layout, spaces, align, jitter = {}, spaces_of(p), p.get("align"), p.get("jitter")
     if "package" in p:
         pk = packages[p["package"]]

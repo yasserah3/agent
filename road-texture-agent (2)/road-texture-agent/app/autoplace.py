@@ -293,3 +293,100 @@ def footprint(p, w, d):
     return np.array([c + fx * w / 2 + fy * d / 2, c - fx * w / 2 + fy * d / 2,
                      c - fx * w / 2 - fy * d / 2, c + fx * w / 2 - fy * d / 2])
 
+
+
+# ------------------------------------------------------------------ a placement of them
+# An automatic placement (server.py, ui/app.js): its settings, kept with the placement,
+# and the objects laid by them ("items"), worked out here from the generation's islands
+# and kept with it too, so the map and the 3D model show the same ones.
+MAX_WEIGHT = 50
+
+
+def settings(raw):
+    """An automatic placement's settings, checked: weight, the islands (None: all), setback, gap."""
+    raw = raw if isinstance(raw, dict) else {}
+    mode = raw.get("islands") if raw.get("islands") in ("all", "picked", "slot") else "all"
+    out = {"weight": max(1, min(MAX_WEIGHT, int(raw.get("weight", 1)))), "islands": mode,
+           "setback": max(0.0, min(50.0, float(raw.get("setback", SETBACK_M)))),
+           "gap": max(0.0, min(50.0, float(raw.get("gap", GAP_M))))}
+    # picked islands, by a point inside each (mask pixels), as island slots keep theirs
+    picks = [[round(float(x), 1), round(float(y), 1)] for x, y in (raw.get("picks") or [])][:20000]
+    if picks:
+        out["picks"] = picks
+    if mode == "slot":
+        out["slot"] = max(0, int(raw.get("slot", 0)))
+    if raw.get("gen") and isinstance(raw["gen"], str) and len(raw["gen"]) <= 32:
+        out["gen"] = raw["gen"]                            # the texture the items were laid on
+    return out
+
+
+def item_list(raw):
+    """Laid objects, checked: [{"id": "island-n", "x", "y" (mask pixels), "a" (degrees), "object"}]."""
+    import re
+    out = []
+    for it in (raw or [])[:500000]:
+        try:
+            iid = str(it["id"])
+            if not re.fullmatch(r"\d{1,6}-\d{1,4}", iid):
+                continue
+            out.append({"id": iid, "x": round(float(it["x"]), 3), "y": round(float(it["y"]), 3),
+                        "a": round(float(it["a"]) % 360.0, 3), "object": str(it["object"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def lay(doc, ids, kinds, weight, setback=SETBACK_M, gap=GAP_M, seed=1):
+    """
+    The objects for an automatic placement, on the islands of a generation.
+
+    doc: the generation's islands (app/islands.py: "mpp", "size", "islands"); ids: the
+    islands to lay on (None: every one); kinds: [(object id, width, depth, weight)], one
+    for a single object, a package's slots for a package (sizes in metres, after scale and
+    quarter turn). The spots are worked out for the largest width and depth, so no two
+    objects can touch whichever lands where; a package's objects are picked by their
+    weights, never the same twice in a row along a side, and each stands with its front
+    on the spot's front line (fronts in line, as a package's rows). Returns (items, a note
+    {"islands", "with", "objects"}), items in mask pixels: {"id": "island-n", "x", "y",
+    "a" (degrees: its X's direction, which is its front's turn from the top of the map),
+    "object"}.
+    """
+    mpp = float(doc["mpp"])
+    W, H = doc.get("size", (0, 0))
+    border = (0.0, 0.0, W * mpp, H * mpp) if W and H else None
+    w = max(k[1] for k in kinds)
+    d = max(k[2] for k in kinds)
+    weights = np.array([max(0.0, float(k[3])) for k in kinds], float)
+    if weights.sum() <= 0:
+        weights = np.ones(len(kinds))
+    p_kind = weights / weights.sum()
+    want = None if ids is None else set(int(i) for i in ids)
+    items, n_isl, n_with = [], 0, 0
+    for isl in doc["islands"]:
+        if want is not None and int(isl["id"]) not in want:
+            continue
+        n_isl += 1
+        poly = island_polygon(isl, mpp)
+        spots = place_on_island(poly, w, d, weight, setback, gap, kerb_tol=mpp, border=border)
+        if not spots:
+            continue
+        n_with += 1
+        rng = np.random.default_rng([int(seed) & 0xFFFFFFFF, int(isl["id"])])
+        last_side, last_kind = None, None
+        for n, sp in enumerate(spots, start=1):
+            k = 0
+            if len(kinds) > 1:
+                pk = p_kind.copy()
+                if sp["side"] == last_side and last_kind is not None and (pk > 0).sum() > 1:
+                    pk[last_kind] = 0.0                      # never the same twice in a row along a side
+                    pk /= pk.sum()
+                k = int(rng.choice(len(kinds), p=pk))
+            last_side, last_kind = sp["side"], k
+            oid, _, dk, _ = kinds[k]
+            # its front on the spot's front line, its middle its own depth behind
+            a = math.radians(sp["angle"])
+            face = np.array([math.sin(a), -math.cos(a)])
+            c = np.array(sp["front"]) - face * (dk / 2)
+            items.append({"id": f"{isl['id']}-{n}", "x": round(float(c[0]) / mpp, 3), "y": round(float(c[1]) / mpp, 3),
+                          "a": round(float(sp["angle"]), 3), "object": oid})
+    return items, {"islands": n_isl, "with": n_with, "objects": len(items)}

@@ -46,6 +46,8 @@ from app import junctions as J
 from app import model3d as M3
 from app import library as LIB
 from app import looks as LK
+from app import autoplace as AP
+from app import placements as PL
 from app import tiles as TL
 from app import objects as OB
 from app import quadmesh as QMB
@@ -1302,12 +1304,12 @@ def _placement_list(raw):
                                "seed": int(sp.get("seed", 1)) & 0xFFFFFFFF}
             # single objects turned on their own, by id ("row-column"): degrees, clockwise
             turns = {str(k): float(v) % 360.0 for k, v in (p.get("turns") or {}).items()
-                     if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))}
+                     if re.fullmatch(r"\d{1,6}-\d{1,4}", str(k))}
             if turns:
                 q["turns"] = {k: v for k, v in turns.items() if v}
             # Draw spaced: single objects made empty spots, by id ("row-column"); the
             # rest of the grid stays where it is
-            empty = sorted({str(k) for k in (p.get("empty") or []) if re.fullmatch(r"\d{1,4}-\d{1,4}", str(k))})
+            empty = sorted({str(k) for k in (p.get("empty") or []) if re.fullmatch(r"\d{1,6}-\d{1,4}", str(k))})
             if empty:
                 q["empty"] = empty[:100000]
             # foliage: a placement of plants, each with its own random scale, turn (degrees)
@@ -1353,6 +1355,11 @@ def _placement_list(raw):
                     q["lines"] = lines
             elif p.get("mirror"):
                 q["mirror"] = True              # a rectangle laid out from its other end: its mirror image
+            # an automatic placement (app/autoplace.py): objects laid by rule on the islands,
+            # its settings and the objects it laid, kept as laid
+            if isinstance(p.get("auto"), dict):
+                q["auto"] = AP.settings(p["auto"])
+                q["items"] = AP.item_list(p.get("items"))
             out.append(q)
         except (KeyError, TypeError, ValueError):
             continue
@@ -1370,6 +1377,43 @@ def save_scatter(payload: dict):
     _write_json(path, pl)
     mem.add_artifact(f"scatter_{rec['id']}", "scatter", path, {"mask": rec["id"], "count": len(pl)})
     return {"ok": True, "count": len(pl)}
+
+
+@app.post("/api/autoplace")
+def autoplace(payload: dict):
+    """
+    An automatic placement's objects (app/autoplace.py): the selected object, or a
+    package's mix, laid by rule on the islands of a generation: every island, or the
+    ones given (the page knows which islands were picked, or are in a material slot).
+    Returns the objects laid ("items", mask pixels) and how many islands got some.
+    """
+    t0 = time.time()
+    gid = str(payload.get("generation") or "")
+    art = mem.artifact(f"{gid}_islands")
+    if not art or not Path(art["path"]).exists():
+        raise HTTPException(400, "no islands for this texture: run Generate texture first")
+    doc = json.loads(Path(art["path"]).read_text())
+    kinds = []
+    if payload.get("package"):
+        pk = _package(payload["package"])
+        if pk is None:
+            raise HTTPException(400, "unknown package")
+        for sl in pk["slots"]:
+            meta = _object_meta(sl["object"])
+            if meta:
+                _, _, w, d = PL.sized(meta)
+                kinds.append((sl["object"], w, d, float(sl.get("weight", 1.0))))
+    else:
+        meta = _object_meta(str(payload.get("object") or ""))
+        if meta:
+            _, _, w, d = PL.sized(meta)
+            kinds.append((str(payload["object"]), w, d, 1.0))
+    if not kinds:
+        raise HTTPException(400, "no object to lay: import one, or put one in the package")
+    au = AP.settings(payload.get("auto"))
+    ids = None if au["islands"] == "all" else [int(i) for i in (payload.get("island_ids") or [])]
+    items, note = AP.lay(doc, ids, kinds, au["weight"], au["setback"], au["gap"], int(payload.get("seed", 1)))
+    return {"items": items, "note": note, "generation": gid, "seconds": round(time.time() - t0, 2)}
 
 
 @app.get("/api/scatter")
