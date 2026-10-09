@@ -174,6 +174,10 @@ def place_on_island(poly, w, d, weight, setback=SETBACK_M, gap=GAP_M, step=None,
     if inside.is_empty:
         return []
     shapely.prepare(inside)
+
+    def wholly(boxes):
+        # footprints wholly S from every kerb: the prepared island tests them all at once
+        return shapely.contains(inside, boxes)
     step0 = step
     ring = sides(poly, min_len=0.0, kerb_tol=kerb_tol)    # in order round the island: the neighbours
     # a side along the edge of the map is not a street: nothing faces it, it is nobody's neighbour
@@ -193,19 +197,34 @@ def place_on_island(poly, w, d, weight, setback=SETBACK_M, gap=GAP_M, step=None,
             u = np.append(u, L - w / 2)
         # the front S in from the straight side, or further in where the kerb dips in from it
         # (a side straightened over a notch): the least of a few steps back that fits
-        backs = setback + near * np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-        fits = np.stack([shapely.within(_boxes(a[None, :] + t[None, :] * u[:, None] - n[None, :] * s_, t, n, w, d),
-                                        inside) for s_ in backs])
-        ok = fits.any(axis=0)
+        backs = np.unique(setback + near * np.array([0.0, 0.25, 0.5, 0.75, 1.0]))     # the same five on a straight kerb
+
+        def fits_many(us):
+            # for each place along the side (us): the least step back at which the footprint fits
+            # there (True in that row), each step tried only where the ones before it did not fit
+            us = np.asarray(us, float).reshape(-1)
+            if len(us) * len(backs) <= 256:
+                # a few places (a stretch's end, one object): every step at once, the first that fits
+                fr = a[None, None, :] + t[None, None, :] * us[None, :, None] - n[None, None, :] * backs[:, None, None]
+                ok = wholly(_boxes(fr.reshape(-1, 2), t, n, w, d)).reshape(len(backs), len(us))
+                return ok & (np.cumsum(ok, axis=0) == 1)
+            out = np.zeros((len(backs), len(us)), bool)
+            todo = np.arange(len(us))
+            for k, s_ in enumerate(backs):
+                if not len(todo):
+                    break
+                ok_k = wholly(_boxes(a[None, :] + t[None, :] * us[todo, None] - n[None, :] * s_, t, n, w, d))
+                out[k, todo] = ok_k
+                todo = todo[~ok_k]
+            return out
+        ok = fits_many(u).any(axis=0)
         if not ok.any():
             continue
 
         def front_at(uc):
-            for s_ in backs:
-                f = a + t * uc - n * s_
-                if shapely.within(_boxes(f, t, n, w, d)[0], inside):
-                    return f
-            return a + t * uc - n * setback
+            # the least step back that fits
+            k = np.flatnonzero(fits_many([uc])[:, 0])
+            return a + t * uc - n * (backs[k[0]] if len(k) else setback)
         idx = np.flatnonzero(ok)
         runs = np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1)
         mid = L / 2
@@ -213,20 +232,21 @@ def place_on_island(poly, w, d, weight, setback=SETBACK_M, gap=GAP_M, step=None,
                                        min(abs(u[r[0]] - mid), abs(u[r[-1]] - mid)), -len(r)))
         lo, hi = float(u[run[0]]), float(u[run[-1]])
 
-        def fits_at(uc):
-            return any(shapely.within(_boxes(a + t * uc - n * s_, t, n, w, d)[0], inside) for s_ in backs)
+        def edge(good, bad):
+            # where fitting ends between a place that fits and one that does not, to a centimetre:
+            # eight places between them at a time, each round a ninth of the last
+            while abs(bad - good) > 0.01:
+                xs = np.linspace(good, bad, 10)[1:-1]
+                fit = fits_many(xs).any(axis=0)
+                k = int(np.argmin(fit)) if not fit.all() else len(xs)
+                good, bad = (xs[k - 1] if k > 0 else good), (xs[k] if k < len(xs) else bad)
+            return float(good)
 
         # the stretch's ends exactly (to a centimetre), not at the samples: the middle is the middle
         if run[0] > 0:
-            bad_u = float(u[run[0] - 1])
-            while lo - bad_u > 0.01:
-                m = (lo + bad_u) / 2
-                lo, bad_u = (m, bad_u) if fits_at(m) else (lo, m)
+            lo = edge(lo, float(u[run[0] - 1]))
         if run[-1] < len(u) - 1:
-            bad_u = float(u[run[-1] + 1])
-            while bad_u - hi > 0.01:
-                m = (hi + bad_u) / 2
-                hi, bad_u = (m, bad_u) if fits_at(m) else (hi, m)
+            hi = edge(hi, float(u[run[-1] + 1]))
         # the corners stay free for the neighbouring sides' objects (when a neighbour is long
         # enough for one): their depth and a gap kept clear at that end
         j = (i + 1) % len(ring)
@@ -247,7 +267,7 @@ def place_on_island(poly, w, d, weight, setback=SETBACK_M, gap=GAP_M, step=None,
         for uc in centres:
             front = front_at(uc)
             box = _boxes(front, t, n, w, d)[0]
-            if not shapely.within(box, inside):
+            if not wholly(box):
                 continue
             if taken is not None and box.buffer(gap / 2 - EPS, join_style="mitre").intersects(taken):
                 continue                       # it would touch an object laid before: left out, never moved
@@ -277,7 +297,7 @@ def place_on_island(poly, w, d, weight, setback=SETBACK_M, gap=GAP_M, step=None,
             centre = np.array([c.x, c.y])
             front = centre + n * (d / 2)
             box = _boxes(front, t, n, w, d)[0]
-            if shapely.within(box, inside):
+            if wholly(box):
                 result.append({"x": round(float(centre[0]), 3), "y": round(float(centre[1]), 3),
                                "angle": round(_facing(n), 2), "side": -1,
                                "front": [round(float(front[0]), 3), round(float(front[1]), 3)]})
@@ -336,20 +356,28 @@ def item_list(raw):
     return out
 
 
-def lay(doc, ids, kinds, weight, setback=SETBACK_M, gap=GAP_M, seed=1):
+class Superseded(Exception):
+    """Asked again with other settings before this one was done: its answer is not wanted."""
+
+
+def lay(doc, ids, kinds, weight, setback=SETBACK_M, gap=GAP_M, seed=1, cache=None, progress=None, cancel=None):
     """
     The objects for an automatic placement, on the islands of a generation.
 
     doc: the generation's islands (app/islands.py: "mpp", "size", "islands"); ids: the
     islands to lay on (None: every one); kinds: [(object id, width, depth, weight)], one
-    for a single object, a package's slots for a package (sizes in metres, after scale and
-    quarter turn). The spots are worked out for the largest width and depth, so no two
+    for a single object, a package's slots for a package (sizes in metres, after scale: the
+    width across its front, the depth front to back, whatever its quarter turn). The spots are worked out for the largest width and depth, so no two
     objects can touch whichever lands where; a package's objects are picked by their
     weights, never the same twice in a row along a side, and each stands with its front
     on the spot's front line (fronts in line, as a package's rows). Returns (items, a note
     {"islands", "with", "objects"}), items in mask pixels: {"id": "island-n", "x", "y",
-    "a" (degrees: its X's direction, which is its front's turn from the top of the map),
-    "object"}.
+    "a" (degrees: where its front, its +Y, faces, clockwise from the top of the map; the
+    direction of its X with no quarter turn), "object"}.
+
+    cache: {island id: its spots} for these sizes and settings, used and filled (the spots
+    do not depend on the islands asked for, the mix, or the seed); progress(fraction) is
+    told as it goes; cancel() true stops it (Superseded).
     """
     mpp = float(doc["mpp"])
     W, H = doc.get("size", (0, 0))
@@ -362,12 +390,19 @@ def lay(doc, ids, kinds, weight, setback=SETBACK_M, gap=GAP_M, seed=1):
     p_kind = weights / weights.sum()
     want = None if ids is None else set(int(i) for i in ids)
     items, n_isl, n_with = [], 0, 0
-    for isl in doc["islands"]:
-        if want is not None and int(isl["id"]) not in want:
-            continue
+    todo = [isl for isl in doc["islands"] if want is None or int(isl["id"]) in want]
+    for n_done, isl in enumerate(todo):
+        if n_done % 16 == 0:
+            if cancel is not None and cancel():
+                raise Superseded()
+            if progress is not None:
+                progress(n_done / len(todo))
         n_isl += 1
-        poly = island_polygon(isl, mpp)
-        spots = place_on_island(poly, w, d, weight, setback, gap, kerb_tol=mpp, border=border)
+        spots = cache.get(int(isl["id"])) if cache is not None else None
+        if spots is None:
+            spots = place_on_island(island_polygon(isl, mpp), w, d, weight, setback, gap, kerb_tol=mpp, border=border)
+            if cache is not None:
+                cache[int(isl["id"])] = spots
         if not spots:
             continue
         n_with += 1

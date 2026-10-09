@@ -25,6 +25,7 @@ import time
 import mimetypes
 import re
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -63,7 +64,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.09-big1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.09-auto1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -222,6 +223,7 @@ TRAIN_PLAN = [("pairs", 8.0), ("libraries", 2.0)]
 PRIME_PLAN = [("material", 3.0), ("line", 2.0), ("noise", 2.0), ("trees", 1.0)]
 TILES_PLAN = [("tiles", 1.0)]
 JUNCTIONS_PLAN = [("junctions", 1.0)]
+AUTOPLACE_PLAN = [("islands", 1.0)]
 
 
 def _write_json(path, obj):
@@ -1379,13 +1381,30 @@ def save_scatter(payload: dict):
     return {"ok": True, "count": len(pl)}
 
 
+def _own_size(meta):
+    # an object's width and depth (scaled) as it faces its front, its +Y (the arrow on the
+    # map), whatever its quarter turn: laid on an island its width runs along the side
+    k = float(meta.get("scale", 1.0))
+    return meta["width_m"] * k, meta["depth_m"] * k
+
+
+# automatic placement: each island's spots for the last few sizes and settings, so islands
+# picked or taken out, a slot's islands changed, or a new mix are laid at once (a city's
+# 1,300 islands take a few seconds the first time); and the latest request of each
+# placement, so one asked again before it is done stops
+_auto_cache, _auto_latest, _auto_lock = OrderedDict(), {}, threading.Lock()
+AUTO_CACHE_KEEP = 8
+
+
 @app.post("/api/autoplace")
+@tracked("Laying objects on the islands", AUTOPLACE_PLAN)
 def autoplace(payload: dict):
     """
     An automatic placement's objects (app/autoplace.py): the selected object, or a
     package's mix, laid by rule on the islands of a generation: every island, or the
     ones given (the page knows which islands were picked, or are in a material slot).
     Returns the objects laid ("items", mask pixels) and how many islands got some.
+    payload "key": the placement's own key; a newer request with it stops this one (409).
     """
     t0 = time.time()
     gid = str(payload.get("generation") or "")
@@ -1401,18 +1420,32 @@ def autoplace(payload: dict):
         for sl in pk["slots"]:
             meta = _object_meta(sl["object"])
             if meta:
-                _, _, w, d = PL.sized(meta)
-                kinds.append((sl["object"], w, d, float(sl.get("weight", 1.0))))
+                kinds.append((sl["object"],) + _own_size(meta) + (float(sl.get("weight", 1.0)),))
     else:
         meta = _object_meta(str(payload.get("object") or ""))
         if meta:
-            _, _, w, d = PL.sized(meta)
-            kinds.append((str(payload["object"]), w, d, 1.0))
+            kinds.append((str(payload["object"]),) + _own_size(meta) + (1.0,))
     if not kinds:
         raise HTTPException(400, "no object to lay: import one, or put one in the package")
     au = AP.settings(payload.get("auto"))
     ids = None if au["islands"] == "all" else [int(i) for i in (payload.get("island_ids") or [])]
-    items, note = AP.lay(doc, ids, kinds, au["weight"], au["setback"], au["gap"], int(payload.get("seed", 1)))
+    w, d = max(k[1] for k in kinds), max(k[2] for k in kinds)
+    ckey = (gid, round(w, 4), round(d, 4), au["weight"], au["setback"], au["gap"])
+    pkey = str(payload.get("key") or "")[:64]
+    with _auto_lock:
+        cache = _auto_cache.pop(ckey, None)
+        cache = {} if cache is None else cache
+        _auto_cache[ckey] = cache                            # the latest used last
+        while len(_auto_cache) > AUTO_CACHE_KEEP:
+            _auto_cache.popitem(last=False)
+        mine = _auto_latest[pkey] = _auto_latest.get(pkey, 0) + 1
+    prog.stage("islands", "laying objects on the islands")
+    try:
+        items, note = AP.lay(doc, ids, kinds, au["weight"], au["setback"], au["gap"], int(payload.get("seed", 1)),
+                             cache=cache, progress=prog.part,
+                             cancel=(lambda: _auto_latest.get(pkey) != mine) if pkey else None)
+    except AP.Superseded:
+        raise HTTPException(409, "asked again with other settings")
     return {"items": items, "note": note, "generation": gid, "seconds": round(time.time() - t0, 2)}
 
 

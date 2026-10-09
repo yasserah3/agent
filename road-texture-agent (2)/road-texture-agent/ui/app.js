@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.09-auto1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -150,6 +150,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   const LANES = { picks: [], streets: null, mpp: 1, on: false, sel: -1, mask: null };
   // the markings area (see markings area below)
   const MAREA = { area: null, on: false, mask: null, painted: 'null', busy: false, again: false, timer: null, drag: null };
+  const AUTO = { pick: -1 };          // automatic placement: the placement picking its islands (-1: none)
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
     if(kept){
@@ -1342,7 +1343,8 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     return [[-1,-1],[1,-1],[1,1],[-1,1]].map(([i, j]) => [b.cx + ux*L*i + vx*W*j, b.cy + uy*L*i + vy*W*j]);
   }
 
-  // The island outlines and numbers and the lanes' lines and labels: thousands of shapes on a city
+  // The island outlines and numbers, the lanes' lines and labels and the objects of automatic
+  // placements: thousands of shapes on a city
   // (1,500 islands, 1,000 streets), drawn on a canvas the size of the view, between the texture and
   // the handles: only what is in view, again after each move or zoom (a frame or two), crisp at any
   // zoom. As SVG the browser drew every one of them again at each zoom step: 2 s a step on a city.
@@ -1354,7 +1356,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   $('#genVp').addEventListener('vpview', scheduleOverlay);
   new ResizeObserver(scheduleOverlay).observe($('#genVp'));             // resized, or shown again (its tab)
   function drawOverlay(){
-    const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0)) || (LANES.on && LANES.streets));
+    const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0 || AUTO.pick >= 0)) || (LANES.on && LANES.streets) || hasAuto());
     ovl.hidden = !want;
     if(!want) return;
     const root = $('#genVp'), r = root.getBoundingClientRect(), { s, tx, ty } = genVp.view();
@@ -1372,6 +1374,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     const v = { k, ox, oy, x0: -ox / k, y0: -oy / k, x1: (W - ox) / k, y1: (H - oy) / k, dpr,
                 hr: Math.max(4, genVp.canvas.width / 260) * dpr * s, minFont: 7 * dpr };
     drawIslandsOn(ctx, v);
+    drawAutoOn(ctx, v);
     drawLanesOn(ctx, v);
   }
   // a line (mask pixels) as a path on the overlay, its points closer than half a pixel there left out
@@ -1677,12 +1680,16 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   }
   function setPick(i){
     if(i >= 0 && LANES.on) lanesMode(false);
+    if(i >= 0) AUTO.pick = -1;
     ISLS.pick = i;
     if(i >= 0) log(`Pick islands for slot ${i + 1} (${slotMaterial(i).name}): click an island to add it, click it again to take it out.`);
     renderSlots(); drawBridges();
   }
   ISLS.changed = quiet => {
     renderSlots(); drawBridges();
+    S.gen.placements.forEach(p => {
+      if(p.auto && autoOf(p).islands === 'slot' && autoLaidFor.has(p) && autoLaidFor.get(p) !== JSON.stringify(autoIslands(p))) relayAutoSoon(p);
+    });
     if(quiet === true) return;
     window.dispatchEvent(new Event('materials'));
     if(!S.gen.mask) return;
@@ -1718,20 +1725,25 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
       }catch(e){ log('Islands not loaded: ' + e.message, 'bad'); }
     }
     renderSlots(); drawBridges();
+    // automatic placements: laid again on these islands
+    if(ISLS.data) S.gen.placements.forEach(p => { if(p.auto && p.auto.gen !== res.id) relayAuto(p); });
   }
   // the islands' outlines (each in its slot's colour) and numbers, on the overlay (drawOverlay)
   function drawIslandsOn(ctx, v){
     const d = ISLS.data;
-    if(!d || !(ISLS.show || ISLS.pick >= 0)) return;
+    if(!d || !(ISLS.show || ISLS.pick >= 0 || AUTO.pick >= 0)) return;
     const { of } = slotIslands(), labels = [], mpp = mppMask();
+    // picking islands for an automatic placement: its islands blue, the rest plain
+    const au = AUTO.pick >= 0 && S.gen.placements[AUTO.pick] ? new Set(autoIslands(S.gen.placements[AUTO.pick]) || []) : null;
     for(const isl of d.islands){
       if(!inView(v, isl.bbox)) continue;
-      const s = of.has(isl.id) ? of.get(isl.id) : -1, mine = ISLS.pick >= 0 && s === ISLS.pick;
+      const s = au ? -1 : of.has(isl.id) ? of.get(isl.id) : -1, mine = au ? au.has(isl.id) : ISLS.pick >= 0 && s === ISLS.pick;
       ctx.beginPath();
       isl.rings.forEach(r => tracePath(ctx, v, r, true));
-      ctx.fillStyle = s >= 0 ? `rgba(${slotColour(s)},${mine ? .62 : .42})` : (ISLS.pick >= 0 ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.03)');
+      ctx.fillStyle = au ? (mine ? 'rgba(70,130,220,.5)' : 'rgba(255,255,255,.07)')
+        : s >= 0 ? `rgba(${slotColour(s)},${mine ? .62 : .42})` : (ISLS.pick >= 0 ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.03)');
       ctx.fill('evenodd');
-      ctx.strokeStyle = s >= 0 ? `rgb(${slotColour(s)})` : 'rgba(255,190,60,.9)';
+      ctx.strokeStyle = au ? (mine ? '#4682DC' : 'rgba(255,190,60,.9)') : s >= 0 ? `rgb(${slotColour(s)})` : 'rgba(255,190,60,.9)';
       ctx.lineWidth = Math.max(v.dpr, v.hr * (mine ? 0.45 : 0.25));
       ctx.stroke();
       // its number where it is widest, sized to fit; none too small to read
@@ -1868,6 +1880,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     LANES.on = on && !!LANES.streets;
     if(LANES.on && MAREA.on){ MAREA.on = false; renderMarea(); }
     if(LANES.on && ISLS.pick >= 0) setPick(-1);
+    if(LANES.on) AUTO.pick = -1;
     if(!LANES.on){ LANES.sel = -1; paintLanes(); }
     else log('Set lanes: click a street to choose how many lanes each side has (the two sides show in blue and orange). Esc or Set lanes to finish.');
     renderLanes(); drawBridges();
@@ -2000,6 +2013,10 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   $('#genVp').addEventListener('click', e => {
     if(!S.gen.mask || (genVp.wasDrag && genVp.wasDrag()) || e.target.closest('.vp-tools') || onHandle(e)) return;
     const [x, y] = toMask(e);
+    if(AUTO.pick >= 0 && ISLS.data){
+      const id = islandAt(x, y);
+      if(id){ e.stopPropagation(); autoPickIsland(id); return; }
+    }
     if(ISLS.pick >= 0 && ISLS.data){
       const id = islandAt(x, y);
       if(id){ e.stopPropagation(); pickIsland(id); return; }
@@ -2010,16 +2027,27 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         e.stopPropagation();
         if(LANES.sel >= 0 && LANES.sel !== i) paintLanes();                     // the street left: its lanes laid
         LANES.sel = i; renderLanes(); drawBridges();
+        return;
       }
+    }
+    // an automatic placement's object (on the overlay): selects its placement; in its own
+    // Turn single objects or Draw spaced the press has done it already
+    const hit = autoCopyAt(x, y);
+    if(hit){
+      e.stopPropagation();
+      if(S.gen.edit && S.gen.edit.i === hit[0]) return;
+      if(S.gen.edit) S.gen.edit = null;
+      S.gen.plSel = hit[0]; drawBridges();
     }
   }, true);
   // and a hand over what a click would pick
   $('#genVp').addEventListener('pointermove', e => {
     const stage = $('#genVp .stage');
     let hit = false;
-    if(S.gen.mask && !e.buttons && !onHandle(e) && ((ISLS.pick >= 0 && ISLS.data) || (LANES.on && LANES.streets))){
+    if(S.gen.mask && !e.buttons && !onHandle(e) && (((ISLS.pick >= 0 || AUTO.pick >= 0) && ISLS.data) || (LANES.on && LANES.streets) || hasAuto())){
       const [x, y] = toMask(e);
-      hit = (ISLS.pick >= 0 && ISLS.data && islandAt(x, y) > 0) || (LANES.on && LANES.streets && streetAt(x, y) >= 0);
+      hit = ((ISLS.pick >= 0 || AUTO.pick >= 0) && ISLS.data && islandAt(x, y) > 0) || (LANES.on && LANES.streets && streetAt(x, y) >= 0)
+        || !!autoCopyAt(x, y);
     }
     stage.style.cursor = hit ? 'pointer' : '';
   });
@@ -2149,6 +2177,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     if(MAREA.on){
       if(LANES.on) lanesMode(false);
       if(ISLS.pick >= 0) setPick(-1);
+      AUTO.pick = -1;
       if(!MAREA.area){
         // a first rectangle: the middle half of the mask
         const W = S.gen.mask.width, H = S.gen.mask.height;
@@ -3037,6 +3066,20 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         [p.cx + u[0]*sx*Lx/2 + v[0]*o, p.cy + u[1]*sx*Lx/2 + v[1]*o]) };
     };
     const front0 = lay => lay.rows[0].front / m;            // the first row's front, in mask pixels
+    if(p.auto){
+      // an automatic placement: the objects it laid on the islands, as the 3D export takes them
+      // (app/placements.py). "a" is where the front (+Y) faces: a quarter-turned object's frame
+      // is turned back by its turn, so its front still faces the street
+      const slots = p.package ? pkgSlots(pkgById(p.package)) : null, copies = [];
+      (p.items || []).forEach(it => {
+        const o = objById(it.object); if(!o) return;
+        const [w, d] = objSize(o), slot = slots ? slots.find(sl => sl.o.id === it.object) || null : null;
+        const c = copyAt(it.x, it.y, (it.a - 90 * ((o.turn || 0) % 4)) * DEG, w, d, slot, it.id);
+        c.onRoad = false;                     // on its island by the rule (a mask pixel is coarser on a city)
+        copies.push(c);
+      });
+      return { auto: true, pkg: !!p.package, slots, copies };
+    }
     if(p.package){
       // a package: its mix along a line, straight through the rectangle or curved,
       // worked out in metres exactly as the 3D export does, then back to mask pixels
@@ -3168,6 +3211,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
 
   function drawScatter(f, hr){
     S.gen.placements.forEach((p, i) => {
+      if(p.auto) return;                                     // on the overlay (drawAutoOn)
       const g0 = placementGeom(p); if(!g0) return;
       const sel = i === S.gen.plSel;
       // an edit mode for this placement: 'streets' (draw inner streets) or 'objects' (turn single objects)
@@ -3431,9 +3475,15 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     const box = $('#plBox');
     const p = S.gen.placements[S.gen.plSel];
     // duplicate and flip act on the selected placement, from its own panel
-    Object.values(KIND).forEach(K => { $(K.dup).disabled = $(K.flip).disabled = !p || kindOf(p) !== K; });
+    Object.values(KIND).forEach(K => { $(K.dup).disabled = $(K.flip).disabled = !p || kindOf(p) !== K || !!p.auto; });
+    if(AUTO.pick >= 0 && AUTO.pick !== S.gen.plSel) AUTO.pick = -1;      // picking belongs to the selected placement
     if(!p){ box.hidden = true; S.gen.edit = null; return; }
     box.hidden = false;
+    // an automatic placement: its own settings, none of a rectangle's
+    box.classList.toggle('auto', !!p.auto);
+    $('#autoBox').hidden = !p.auto;
+    $('#objEditNote').textContent = p.auto ? 'Click an object to pick it, Shift-click to pick more. Ids are island-number: the island, then its objects in order round it.'
+      : 'Click an object to pick it, Shift-click to pick more. Ids are row-column, counted from the top left.';
     // in the panel of its kind; foliage has no random spaces, curve lines, inner
     // streets, single turns or alignment, and objects have no random transform
     if(box.parentElement !== $(kindOf(p).host)) $(kindOf(p).host).appendChild(box);
@@ -3485,7 +3535,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     $('#objEditInfo').textContent = (picked.length ? `Picked: ${picked.join(', ')}. ` : (ed === 'objects' ? 'Nothing picked yet. ' : ''))
       + (turned ? `${turned} object${turned > 1 ? 's' : ''} turned on their own.` : '');
     const o = p.package ? null : objById(p.object), pk = p.package ? pkgById(p.package) : null;
-    const g0 = placementGeom(p);
+    const g0 = p.auto ? autoGeom(p) : placementGeom(p);
     // the drawn streets, and the road the narrowest of them gets
     let stNote = '';
     if(st.cells.length && g0 && g0.layout){
@@ -3504,6 +3554,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
     $('#plTitle').textContent = `${p.foliage ? 'Foliage placement' : 'Placement'} ${S.gen.plSel + 1}: `
       + (p.package ? (pk ? `package ${pk.name}` : 'missing package') : (o ? o.name : 'missing object')) + (curve ? ', curved' : '');
     $('#btnShuffle').hidden = !p.package;
+    if(p.auto){ renderAutoBox(p, g0, o, pk, onRoad); return; }
     $('#gapXLabel').textContent = curve ? 'Gap along the line (m)' : 'Gap along X (m)';
     $('#gapYLabel').textContent = curve ? 'Gap between rows (m)' : 'Gap along Y (m)';
     $('#plCurveBox').hidden = !curve; $('#btnCurve').hidden = curve;
@@ -3546,6 +3597,47 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         + road + lineNote
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
         + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '')) + spNote;
+  }
+  // an automatic placement's panel: its settings, its islands, and what it laid
+  function renderAutoBox(p, g0, o, pk, onRoad){
+    const au = autoOf(p), res = S.gen.result, note = autoNote.get(p), mine = AUTO.pick === S.gen.plSel;
+    $('#plTitle').textContent += ', automatic on islands';
+    $('#plCurveBox').hidden = true; $('#btnCurve').hidden = true;
+    [['#auWeight', au.weight], ['#auSetback', au.setback], ['#auGap', au.gap]].forEach(([id, val]) => { if(document.activeElement !== $(id)) $(id).value = val; });
+    $('#auIslands').value = au.islands;
+    // the material slots, by their material
+    const sl = $('#auSlot'), key = ISLS.slots.map((x, i) => slotMaterial(i).name).join('|');
+    if(sl.dataset.key !== key){
+      sl.dataset.key = key;
+      sl.innerHTML = ISLS.slots.length ? ISLS.slots.map((x, i) => `<option value="${i}">Slot ${i + 1}: ${esc(slotMaterial(i).name)}</option>`).join('')
+        : '<option value="0">No slots yet</option>';
+    }
+    sl.value = String(Math.min(au.slot || 0, Math.max(0, ISLS.slots.length - 1))); sl.disabled = !ISLS.slots.length;
+    $('#auSlotRow').hidden = au.islands !== 'slot';
+    $('#btnAuPick').hidden = au.islands !== 'picked';
+    $('#btnAuPick').setAttribute('aria-pressed', mine ? 'true' : 'false');
+    $('#btnAuPick').textContent = mine ? 'Done picking' : 'Pick islands';
+    $('#btnAuPick').disabled = !ISLS.data;
+    $('#btnAuLay').disabled = !res || !ISLS.data;
+    const ids = autoIslands(p) || [], k = ids.length;
+    $('#autoInfo').textContent = !ISLS.data ? 'Generate texture first: it finds and numbers the islands, and the objects are laid on them then.'
+      : au.islands === 'all' ? `Every island: ${ISLS.data.count}.`
+      : au.islands === 'slot' ? (!ISLS.slots.length ? 'No material slots yet: add one under Blocks and islands, and Pick its islands.'
+          : `Slot ${(au.slot || 0) + 1}: ` + (k ? `${k} island${k > 1 ? 's' : ''} (${idText(ids)}).` : 'no islands yet: Pick some for it under Blocks and islands.'))
+      : k ? `Picked: ${idText(ids)}.` : 'No islands picked yet: press Pick islands and click them on the map.';
+    // what it laid, and how
+    const all = g0 ? g0.copies : [], live = all.filter(c => !c.empty), per = {};
+    live.forEach(c => { const nm = c.slot ? c.slot.o.name : (o ? o.name : 'object'); per[nm] = (per[nm] || 0) + 1; });
+    const nEmpty = all.length - live.length, laid = (p.items || []).length;
+    const stale = laid && res && au.gen && au.gen !== res.id;
+    $('#plInfo').textContent = !laid
+      ? (!ISLS.data ? 'No objects yet.' : !note ? 'Laying…' : !note.islands ? 'No objects: no islands to lay them on yet.'
+          : 'No objects: none of these islands has room for one, with this setback and gap.')
+      : `${live.length} object${live.length === 1 ? '' : 's'}` + (p.package ? ': ' + Object.entries(per).map(([nm, n]) => `${n} ${nm}`).join(', ') : '')
+        + (note ? ` on ${note.with} of ${note.islands} island${note.islands === 1 ? '' : 's'}` : '')
+        + (onRoad ? `, ${onRoad} on the road (left out)` : '') + (nEmpty ? `, ${nEmpty} empty spot${nEmpty > 1 ? 's' : ''} (Draw spaced)` : '')
+        + '. ' + (stale ? 'Laid on an earlier texture: press Lay again.'
+          : `Each with its front to its street, ${au.setback} m from the kerb, at least ${au.gap} m apart; up to ${au.weight} per side.`);
   }
   // the two edit modes: drawing inner streets, and turning single objects
   S.gen.edit = null;
@@ -3603,6 +3695,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   $('#btnTurnR').addEventListener('click', () => turnPicked(t => t + 90));
   $('#btnTurnReset').addEventListener('click', () => turnPicked(() => 0));
   addEventListener('keydown', e => { if(e.key === 'Escape' && S.gen.edit){ S.gen.edit = null; drawBridges(); } });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && AUTO.pick >= 0 && !MAT.open){ AUTO.pick = -1; drawBridges(); } });
   // Foliage: random scale, rotation and offset per plant, between a min and a max
   // (app/curves.py); the random values are kept with the placement until New random set
   const jitterSet = p => ({ seed: 1, scale: [1, 1], rotate: [0, 0], offset: [0, 0], overlap: true, ...(p.jitter || {}) });
@@ -3752,7 +3845,8 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   }));
   $('#btnShuffle').addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p || !p.package) return;
-    p.seed = (Math.random() * 4294967296) >>> 0; log('New mix.'); saveScatter();
+    p.seed = (Math.random() * 4294967296) >>> 0; log('New mix.');
+    if(p.auto) relayAuto(p); else saveScatter();
   });
   $('#btnAddPt').addEventListener('click', () => {
     const p = S.gen.placements[S.gen.plSel]; if(!p || !isCurve(p)) return;
@@ -3788,8 +3882,238 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
   let gapTimer = null;
   $('#btnRemovePl').addEventListener('click', () => {
     if(S.gen.plSel < 0) return;
+    if(AUTO.pick >= 0) AUTO.pick = -1;
     S.gen.placements.splice(S.gen.plSel, 1); S.gen.plSel = -1;
     log('Placement removed.'); saveScatter();
+  });
+
+  /* ------------------------------------------------ automatic placement on the islands */
+  // An object, or a package's mix, laid by rule (app/autoplace.py) on the islands Generate
+  // texture numbered: every island, the ones picked, or a material slot's. One in the middle
+  // of each side, its front (+Y) to the street, set back from the kerb; the weight is objects
+  // per side. The server lays them; the placement keeps them ("items": centre in mask pixels,
+  // "a": where the front faces, clockwise from the top of the map), and lays them again when
+  // its settings, its islands or the texture change. Drawn on the overlay, at screen size and
+  // only what is in view: a city takes thousands of them
+  const AUTO_DEFAULT = { weight: 1, islands: 'all', setback: 3, gap: 2 };
+  const autoOf = p => ({ ...AUTO_DEFAULT, ...(p.auto || {}) });
+  const autoAsk = new WeakMap(), autoNote = new WeakMap(), autoTimer = new WeakMap(), autoLaidFor = new WeakMap(), autoKey = new WeakMap();
+  const AUTO_BIG = 200;                 // islands from which the console follows the laying (a city: a few seconds)
+  // the islands it lays on (numbers), or null for every one
+  function autoIslands(p){
+    const au = autoOf(p);
+    if(au.islands === 'all') return null;
+    if(!ISLS.data) return [];
+    if(au.islands === 'slot') return slotIslands().lists[au.slot || 0] || [];
+    return [...new Set((au.picks || []).map(q => islandAt(q[0], q[1])).filter(Boolean))].sort((a, b) => a - b);
+  }
+  const autoName = p => p.package ? (pkgById(p.package) || {}).name || 'the package' : (objById(p.object) || {}).name || 'the object';
+  async function relayAuto(p){
+    const res = S.gen.result;
+    if(!p.auto || !S.gen.placements.includes(p)) return;
+    if(!res || !ISLS.data){ renderPlacementBox(); return; }        // laid once Generate texture numbers the islands
+    const ids = autoIslands(p), n = (autoAsk.get(p) || 0) + 1;
+    autoAsk.set(p, n);
+    if(ids && !ids.length){
+      // no islands picked, or none in its slot, yet: nothing to lay
+      p.items = []; p.auto = { ...p.auto, gen: res.id };
+      autoNote.set(p, { islands: 0, with: 0, objects: 0 }); autoLaidFor.set(p, '[]');
+      saveScatter(); return;
+    }
+    if(!autoKey.has(p)) autoKey.set(p, Math.random().toString(36).slice(2, 12));
+    const body = { generation: res.id, seed: p.seed >>> 0, auto: autoOf(p), island_ids: ids || [], key: autoKey.get(p) };
+    if(p.package) body.package = p.package; else body.object = p.object;
+    const many = (ids ? ids.length : ISLS.data.count) >= AUTO_BIG;
+    status('Laying objects on the islands…');
+    try{
+      const r = await api('/api/autoplace', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body),
+                                              ...(many ? { job: 'Laying objects on the islands' } : {}) });
+      if(autoAsk.get(p) !== n || !S.gen.placements.includes(p)) return;                 // asked again since, or removed
+      p.items = r.items; p.auto = { ...p.auto, gen: r.generation };
+      autoNote.set(p, r.note); autoLaidFor.set(p, JSON.stringify(ids));
+      // single turns and empty spots stay with the ids still laid
+      const keep = new Set(r.items.map(it => it.id));
+      if(p.turns){ Object.keys(p.turns).forEach(k => { if(!keep.has(k)) delete p.turns[k]; }); if(!Object.keys(p.turns).length) delete p.turns; }
+      if(p.empty){ p.empty = p.empty.filter(k => keep.has(k)); if(!p.empty.length) delete p.empty; }
+      const nt = r.note, idx = S.gen.placements.indexOf(p) + 1, none = nt.islands - nt.with;
+      log(`Placement ${idx}: ${nt.objects} × ${autoName(p)} on ${nt.with} of ${nt.islands} island${nt.islands === 1 ? '' : 's'}`
+        + (none ? ` (${none} too small for one)` : '') + `, ${autoOf(p).weight} per side at most, in ${r.seconds.toFixed(2)} s.`, nt.objects ? 'ok' : 'warn');
+      saveScatter();
+    }catch(e){
+      if(autoAsk.get(p) === n) log('Automatic placement: ' + e.message, 'bad');
+    }
+    status('Ready.');
+  }
+  function relayAutoSoon(p){
+    clearTimeout(autoTimer.get(p));
+    autoTimer.set(p, setTimeout(() => relayAuto(p), 300));
+    drawBridges();
+  }
+  // the automatic placements an object is in (alone or in its package), laid again when it changes
+  const autoUses = (p, oid) => p.auto && (p.object === oid || (p.package && ((pkgById(p.package) || {}).slots || []).some(sl => sl.object === oid)));
+  const relayAutoUsing = oid => S.gen.placements.forEach(p => { if(autoUses(p, oid)) relayAutoSoon(p); });
+  const relayAutoPackage = pid => S.gen.placements.forEach(p => { if(p.auto && p.package === pid) relayAutoSoon(p); });
+  function addAuto(base){
+    if(!S.gen.mask) return;
+    const p = { ...base, cx: S.gen.mask.width / 2, cy: S.gen.mask.height / 2, angle: 0, nx: 1, ny: 1, gap_x: 0, gap_y: 0,
+                seed: (Math.random() * 4294967296) >>> 0, auto: { ...AUTO_DEFAULT }, items: [] };
+    S.gen.placements.push(p); S.gen.plSel = S.gen.placements.length - 1; S.gen.edit = null;
+    if(!S.gen.result || !ISLS.data) log(`${autoName(p)}: automatic placement added. Press Generate texture: it finds the islands, and the objects are laid on them then.`, 'warn');
+    saveScatter(); relayAuto(p);
+  }
+  $('#btnAutoObj').addEventListener('click', () => { if(S.gen.objSel) addAuto({ object: S.gen.objSel }); });
+
+  // its objects where they stand (mask pixels), worked out once for each change; the overlay
+  // draws them again at every move and zoom
+  const autoGeomCache = new WeakMap();
+  function autoGeom(p){
+    const objs = S.gen.objects.map(o => `${o.id}:${o.scale || 1}:${o.turn || 0}`).join(',');
+    const sig = [mppMask(), JSON.stringify(p.turns || {}), (p.empty || []).join(','), objs,
+                 p.package ? JSON.stringify((pkgById(p.package) || {}).slots || []) : '', !!maskPixels].join('|');
+    const c = autoGeomCache.get(p);
+    if(c && c.items === p.items && c.sig === sig) return c.g0;
+    const g0 = placementGeom(p);
+    autoGeomCache.set(p, { items: p.items, sig, g0 });
+    return g0;
+  }
+  // the copy of an automatic placement under a point (mask pixels): [placement, copy], the top one
+  function autoCopyAt(x, y, only){
+    for(let i = S.gen.placements.length - 1; i >= 0; i--){
+      const p = S.gen.placements[i];
+      if((only != null && i !== only) || !p.auto || !(p.items || []).length) continue;
+      const g0 = autoGeom(p); if(!g0) continue;
+      for(const c of g0.copies){
+        const dx = x - c.cx, dy = y - c.cy;
+        if(Math.abs(dx*c.u[0] + dy*c.u[1]) <= c.w/2 && Math.abs(dx*c.v[0] + dy*c.v[1]) <= c.d/2) return [i, c];
+      }
+    }
+    return null;
+  }
+  function hasAuto(){ return S.gen.placements.some(p => p.auto && (p.items || []).length); }
+  // on the overlay (drawOverlay): each object's footprint in its colour (a package's slot
+  // colour), the arrow on its front; in Turn single objects its axis and id, in Draw spaced
+  // its empty spots dashed. The selected placement's outlines drawn heavier
+  function drawAutoOn(ctx, v){
+    S.gen.placements.forEach((p, i) => {
+      if(!p.auto || !(p.items || []).length) return;
+      const g0 = autoGeom(p); if(!g0) return;
+      const sel = i === S.gen.plSel, ed = S.gen.edit && S.gen.edit.i === i ? S.gen.edit.kind : null;
+      const X = q => q[0] * v.k + v.ox, Y = q => q[1] * v.k + v.oy;
+      const ob = p.package ? null : objById(p.object), turn0 = (ob && ob.turn) || 0;
+      const lw = Math.max(v.dpr, v.hr * (sel ? 0.3 : 0.16));
+      const path = pts => { ctx.beginPath(); pts.forEach((q, k) => k ? ctx.lineTo(X(q), Y(q)) : ctx.moveTo(X(q), Y(q))); ctx.closePath(); };
+      for(const c of g0.copies){
+        const r = (c.w + c.d) / 2;
+        if(c.cx + r < v.x0 || c.cx - r > v.x1 || c.cy + r < v.y0 || c.cy - r > v.y1) continue;
+        const col = c.slot ? c.slot.colour : '216,96,76', small = Math.min(c.w, c.d) * v.k;
+        path(c.pts);
+        if(c.empty){
+          ctx.fillStyle = 'rgba(255,255,255,.06)'; ctx.fill();
+          ctx.setLineDash([v.hr * 0.5, v.hr * 0.4]); ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]);
+          continue;
+        }
+        const picked = ed === 'objects' && S.gen.edit.sel.has(c.id);
+        ctx.fillStyle = c.onRoad ? 'rgba(120,120,120,.55)' : `rgba(${col},.6)`; ctx.fill();
+        ctx.strokeStyle = picked ? '#FFD23F' : c.onRoad ? '#999' : sel ? '#fff' : `rgb(${col})`;
+        ctx.lineWidth = picked ? Math.max(2 * v.dpr, lw * 2) : lw; ctx.stroke();
+        if(c.onRoad){
+          ctx.beginPath(); ctx.moveTo(X(c.pts[0]), Y(c.pts[0])); ctx.lineTo(X(c.pts[2]), Y(c.pts[2]));
+          ctx.moveTo(X(c.pts[1]), Y(c.pts[1])); ctx.lineTo(X(c.pts[3]), Y(c.pts[3])); ctx.strokeStyle = '#ddd'; ctx.lineWidth = lw; ctx.stroke();
+        }
+        if(small < 6 * v.dpr || ed === 'spaces') continue;                  // too small on screen for its arrow
+        // its front, its +Y: the object's own turn on top of where the placement turned it
+        const th = c.a + (c.slot ? c.slot.turn : turn0) * Math.PI / 2, fd = [Math.sin(th), -Math.cos(th)], sd = [Math.cos(th), Math.sin(th)];
+        const reach = Math.abs(fd[0]*c.u[0] + fd[1]*c.u[1]) * c.w/2 + Math.abs(fd[0]*c.v[0] + fd[1]*c.v[1]) * c.d/2;
+        if(ed === 'objects'){
+          // its axis, a green arrow from its middle to its front, and its id (island-number) towards its back
+          const side = Math.min(c.w, c.d), head = Math.min(reach * 0.35, side * 0.22);
+          const tip = [c.cx + fd[0]*reach*0.92, c.cy + fd[1]*reach*0.92], base = [tip[0] - fd[0]*head, tip[1] - fd[1]*head];
+          ctx.beginPath(); ctx.moveTo(X([c.cx, c.cy]), Y([c.cx, c.cy])); ctx.lineTo(X(base), Y(base));
+          ctx.strokeStyle = '#3DBE5C'; ctx.lineWidth = Math.max(1.5 * v.dpr, side * v.k * 0.05); ctx.lineCap = 'round'; ctx.stroke(); ctx.lineCap = 'butt';
+          path([tip, [base[0] - sd[0]*head*0.6, base[1] - sd[1]*head*0.6], [base[0] + sd[0]*head*0.6, base[1] + sd[1]*head*0.6]]);
+          ctx.fillStyle = '#3DBE5C'; ctx.fill();
+          const back = Math.min(reach * 0.5, side * 0.3), fs = side * v.k * 0.3;
+          if(fs >= v.minFont){
+            ctx.font = `${fs}px system-ui, sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.lineWidth = side * v.k * 0.03; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.fillStyle = '#fff';
+            const tx = X([c.cx - fd[0]*back, 0]), ty = Y([0, c.cy - fd[1]*back]);
+            ctx.strokeText(c.id, tx, ty); ctx.fillText(c.id, tx, ty);
+          }
+          continue;
+        }
+        const fx = c.cx + fd[0]*reach, fy = c.cy + fd[1]*reach, s = Math.min(v.hr * 1.4 / v.k, Math.min(c.w, c.d) / 3);
+        path([[fx + fd[0]*s*1.4, fy + fd[1]*s*1.4], [fx - sd[0]*s, fy - sd[1]*s], [fx + sd[0]*s, fy + sd[1]*s]]);
+        ctx.fillStyle = '#fff'; ctx.fill();
+      }
+    });
+  }
+  // Pick islands: a click on an island lays objects on it, or takes them away
+  function autoPickMode(i){
+    AUTO.pick = i;
+    if(i >= 0){
+      if(LANES.on) lanesMode(false);
+      if(ISLS.pick >= 0) setPick(-1);
+      if(MAREA.on) mareaMode(false);
+      log('Pick islands: click an island to lay objects on it, click it again to take them away. Pick islands or Esc to finish.');
+    }
+    drawBridges();
+  }
+  function autoPickIsland(id){
+    const p = S.gen.placements[AUTO.pick], isl = islandById(id);
+    if(!p || !p.auto || !isl) return;
+    const was = p.auto.picks || [], picks = was.filter(q => islandAt(q[0], q[1]) !== id), had = picks.length !== was.length;
+    if(!had) picks.push(isl.pt.slice());
+    p.auto = { ...p.auto, picks };
+    log(had ? `Island ${id} taken out.` : `Island ${id} (${Math.round(isl.area_m2).toLocaleString()} m²) picked.`);
+    relayAutoSoon(p);
+  }
+  [['#auWeight', 'weight', 1, 50, true], ['#auSetback', 'setback', 0, 50], ['#auGap', 'gap', 0, 50]].forEach(([id, key, lo, hi, whole]) =>
+    $(id).addEventListener('input', () => {
+      const p = S.gen.placements[S.gen.plSel]; if(!p || !p.auto) return;
+      const val = parseFloat($(id).value); if(!Number.isFinite(val)) return;
+      p.auto = { ...p.auto, [key]: Math.min(hi, Math.max(lo, whole ? Math.round(val) : val)) };
+      relayAutoSoon(p);
+    }));
+  $('#auIslands').addEventListener('change', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.auto) return;
+    const mode = $('#auIslands').value;
+    p.auto = { ...p.auto, islands: mode };
+    if(mode === 'slot' && p.auto.slot == null) p.auto.slot = 0;
+    if(mode === 'picked' && !(p.auto.picks || []).length && ISLS.data) autoPickMode(S.gen.plSel);   // nothing picked yet: pick now
+    else if(mode !== 'picked' && AUTO.pick >= 0) autoPickMode(-1);
+    if(mode === 'slot' && !ISLS.slots.length) log('No material slots yet: add one under Blocks and islands and Pick its islands.', 'warn');
+    relayAutoSoon(p); renderPlacementBox();
+  });
+  $('#auSlot').addEventListener('change', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.auto) return;
+    p.auto = { ...p.auto, slot: +$('#auSlot').value || 0 }; relayAutoSoon(p);
+  });
+  $('#btnAuPick').addEventListener('click', () => {
+    if(!ISLS.data){ log('Generate texture first: it numbers the islands.', 'warn'); return; }
+    autoPickMode(AUTO.pick === S.gen.plSel ? -1 : S.gen.plSel);
+  });
+  $('#btnAuLay').addEventListener('click', () => {
+    const p = S.gen.placements[S.gen.plSel]; if(!p || !p.auto) return;
+    if(!S.gen.result || !ISLS.data){ log('Generate texture first: it finds the islands.', 'warn'); return; }
+    relayAuto(p);
+  });
+  // Turn single objects and Draw spaced on an automatic placement: its objects are on the
+  // overlay, so a press is matched to the one under it here, before the map's own drag
+  $('#genVp').addEventListener('pointerdown', e => {
+    const ed = S.gen.edit;
+    if(!S.gen.mask || !ed || (ed.kind !== 'objects' && ed.kind !== 'spaces') || e.button !== 0 || onHandle(e) || e.target.closest('.vp-tools')) return;
+    const p = S.gen.placements[ed.i]; if(!p || !p.auto) return;
+    const [x, y] = toMask(e), hit = autoCopyAt(x, y, ed.i); if(!hit) return;
+    if(ed.kind === 'objects') pickObject(e, hit[1].id);
+    else spaceAt(e, ed.i, hit[1].id, !hit[1].empty, true);
+  }, true);
+  addEventListener('pointermove', e => {
+    // Draw spaced: dragging on empties (or brings back) every object passed over
+    const ed = S.gen.edit;
+    if(!ed || ed.kind !== 'spaces' || ed.paint == null || !(e.buttons & 1)) return;
+    const p = S.gen.placements[ed.i]; if(!p || !p.auto) return;
+    const [x, y] = toMask(e), hit = autoCopyAt(x, y, ed.i);
+    if(hit) spaceAt(e, ed.i, hit[1].id, ed.paint, false);
   });
 
   function renderObjList(){
@@ -3821,7 +4145,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         try{
           const res = await api('/api/objects/' + o.id, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ scale: sc }) });
           Object.assign(o, res); log(`${o.name}: scale ×${sc}, now ${(o.width_m*sc).toFixed(2)} × ${(o.depth_m*sc).toFixed(2)} m.`);
-          renderObjList(); drawBridges();
+          renderObjList(); drawBridges(); relayAutoUsing(o.id);
         }catch(err){ log(err.message, 'bad'); }
       });
       row.querySelector('.turn').addEventListener('click', async ev => {
@@ -3847,6 +4171,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
       list.appendChild(row);
     });
     $(K.add).disabled = !(S.gen[K.sel] && S.gen.mask);
+    if(!K.foliage) $('#btnAutoObj').disabled = $(K.add).disabled;
   }
 
   async function loadObjects(){
@@ -3881,7 +4206,9 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
           <button class="btn secondary pkg-import">Import ${K.word}</button>
           <button class="btn secondary pkg-place" ${S.gen.mask && slots.length ? '' : 'disabled'}
             title="${S.gen.mask ? '' : 'Load a street mask first'}">Place on the map</button>
-        </div>`;
+        </div>
+        ${K.foliage ? '' : `<button class="btn secondary pkg-auto" ${S.gen.mask && slots.length ? '' : 'disabled'}
+          title="Lay the package's mix on the islands by rule, each object picked by its weight, its front (+Y) to the street">Place automatically on islands</button>`}`;
       const holder = $('.pkg-slots', box);
       slots.forEach(sl => {
         const o = sl.o, [w, d, hgt] = objSize(o);
@@ -3900,13 +4227,13 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         $('.wt', row).addEventListener('change', async ev => {
           try{
             const res = await jsonPost('/api/packages/' + pk.id, { weights: { [o.id]: Math.max(0, +ev.target.value || 0) } });
-            Object.assign(pk, res); drawBridges();
+            Object.assign(pk, res); drawBridges(); relayAutoPackage(pk.id);
           }catch(err){ log(err.message, 'bad'); }
         });
         $('.sc', row).addEventListener('change', async ev => {
           try{
             Object.assign(o, await jsonPost('/api/objects/' + o.id, { scale: Math.max(0.0001, +ev.target.value || 1) }));
-            renderPkgList(); drawBridges();
+            renderPkgList(); drawBridges(); relayAutoPackage(pk.id);
           }catch(err){ log(err.message, 'bad'); }
         });
         $('.turn', row).addEventListener('click', async () => {
@@ -3918,7 +4245,7 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
         $('.del', row).addEventListener('click', async () => {
           try{
             await api('/api/objects/' + o.id, { method:'DELETE' });
-            log(`Removed ${o.name} from ${pk.name}.`); await loadObjects();
+            log(`Removed ${o.name} from ${pk.name}.`); await loadObjects(); relayAutoPackage(pk.id);
           }catch(err){ log(err.message, 'bad'); }
         });
         holder.appendChild(row);
@@ -3951,10 +4278,11 @@ const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
                 log('  That is very large for an object: the file\'s units were probably off. Set its scale (for example 0.01).', 'bad');
             }catch(e){ log('Import failed: ' + e.message, 'bad'); }
           }
-          status('Ready.'); await loadObjects();
+          status('Ready.'); await loadObjects(); relayAutoPackage(pk.id);
         });
         inp.click();
       });
+      if(!K.foliage) $('.pkg-auto', box).addEventListener('click', () => { if(slots.length) addAuto({ package: pk.id, length: 0 }); });
       $('.pkg-place', box).addEventListener('click', () => {
         if(!S.gen.mask || !slots.length) return;
         // in the middle of the view, long enough for about three objects, with a mix of its own

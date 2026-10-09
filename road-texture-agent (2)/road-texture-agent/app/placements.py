@@ -58,11 +58,14 @@ def copies_of(p, objects, packages, mpp_mask):
     """
     if isinstance(p.get("auto"), dict):
         # an automatic placement (app/autoplace.py): its objects as laid on the islands, each
-        # its X along its side and its front to the street, with its own extra turn; empties out
+        # with its X along its side and its front to the street, with its own extra turn; empties
+        # out. "a" is where its front (+Y, the arrow on the map) faces: a quarter-turned object's
+        # frame is turned back by its turn, so its +Y still faces the street
         turns, empty = p.get("turns") or {}, set(p.get("empty") or [])
         items = p.get("items") or []
+        quarter = lambda oid: 90.0 * (int(objects[oid]["meta"].get("turn", 0)) % 4)
         out = [(it["object"], np.array([it["x"], it["y"]], float) * mpp_mask,
-                math.radians(float(it["a"]) + float(turns.get(it["id"], 0.0))), it["id"], 1.0)
+                math.radians(float(it["a"]) - quarter(it["object"]) + float(turns.get(it["id"], 0.0))), it["id"], 1.0)
                for it in items if it["object"] in objects and it["id"] not in empty]
         return out, {"ids": [it["id"] for it in items]}
     layout, spaces, align, jitter = {}, spaces_of(p), p.get("align"), p.get("jitter")

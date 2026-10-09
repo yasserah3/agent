@@ -2048,11 +2048,14 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
         # every copy: its object, centre in metres (image axes), the direction of
         # its X (with its own extra rotation) and its id (app/placements.py)
         spots, _ = PL.copies_of(p, scatter["objects"], scatter.get("packages", {}), mpp_mask)
+        # an automatic placement's objects are on their islands by its rule, set back from the
+        # kerb: kept, even where the model's kerb line runs a pixel from the islands' outline
+        laid_by_rule = isinstance(p.get("auto"), dict)
         for oid, cc, a, cid, sc in spots:
             k, turn, w, d = sized(oid)
             k, w, d = k * sc, w * sc, d * sc                  # a plant's random scale (1 otherwise)
             fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in PL.footprint(cc, a, w, d)])
-            if road.intersects(fp) and road.intersection(fp).area > 0.02 * fp.area:
+            if not laid_by_rule and road.intersects(fp) and road.intersection(fp).area > 0.02 * fp.area:
                 skipped += 1
                 continue
             # image x right, image y down = world +X, +Z; rotation about the up axis

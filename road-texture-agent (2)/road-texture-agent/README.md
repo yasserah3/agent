@@ -1686,6 +1686,70 @@ mirrors all of it (the ends still face out), **Duplicate** copies it, and an
 object's own turn in **Turn single objects** adds to it. The map and the 3D
 model use the same steps.
 
+### Automatic placement on islands
+
+Under **Add selected object to the map**, **Place automatically on islands**
+lays the selected object on the islands by a rule, without drawing rectangles;
+each object package has its own **Place automatically on islands** button, which
+lays the package's mix. The islands are the ones **Generate texture** numbers
+(Blocks and islands); an automatic placement added before there is a texture
+is laid as soon as one is generated.
+
+The rule, for an object W wide and D deep (its real size with its scale), a
+setback S from the kerb (**From the kerb**, 3 m by default) and a gap G
+(**Gap between objects**, 2 m), on each island:
+
+1. The island's **sides** are its outline's straight runs (a side bending by
+   less than the outline's precision stays one side), **longest first**. A side
+   along the edge of the map is not a street: nothing is laid facing it.
+2. On a side of length L, objects stand with their **front (+Y, the arrow) to
+   the street**, S in from the kerb, their width along the side. The stretch
+   where an object fits wholly on the island is found exactly (to a centimetre);
+   where a neighbouring side is long enough for an object, D + G is kept clear
+   at that corner for it.
+3. **Objects per side** (the weight, 1 by default) is how many each side gets:
+   one in the middle of the side, more spread evenly with the same space before,
+   between and after them. A side gets fewer when its stretch holds fewer:
+   capacity = floor((stretch + G) / (W + G)), and never more than the weight.
+4. Sides are filled longest first, and an object that would come within G of
+   one already laid is left out (never moved), so on a small island the longest
+   sides win and nothing overlaps or collapses into the middle.
+5. An island too small for any side gets one object in its middle, facing its
+   nearest street, if it fits there; otherwise none.
+
+So a 500 m island gets an object in the middle of each of its sides (four on a
+rectangle), more with a higher weight; a 50 m island gets one or two,
+depending on the object's size. **Islands**: **All islands**, **Islands I
+pick** (press **Pick islands** and click islands on the map: they show blue;
+click again to take one out) or **Islands of a material slot** (the slot's
+islands under Blocks and islands, kept up to date when the slot changes).
+
+A package's objects are picked by their weights, never the same object twice
+in a row along a side, with their fronts in line; its spots are worked out for
+its widest and deepest object, so no two can touch whichever lands where.
+**Shuffle the mix** picks again.
+
+The objects are laid again whenever the settings, the islands, an object's
+scale or the package change, and after each **Generate texture**; **Lay again**
+does it by hand. Each island's spots are kept for the last few settings, so
+picking islands, changing a slot or a new mix is instant; a city's first lay
+takes a few seconds (the 12 km map, 1,327 islands: about 14 s for 8,587
+objects, with a progress line and the time left in the console), and changing
+a setting while it runs stops it and starts again with the new one. Each
+object's id is **island-number** (island 12's second object is 12-2): **Turn
+single objects** and **Draw spaced** work on them as on any placement, by id,
+and keep them through later lays. An automatic placement has no rectangle, so
+the gaps, random spaces, curves, inner streets and alignment are not in its
+panel, and Duplicate and Flip are off for it. Click one of its objects on the
+map to select it. Its objects are drawn at screen size like the island
+outlines, so a whole city of them moves and zooms smoothly; they are on their
+islands by the rule, so they are never crossed out as on the road, and the 3D
+model keeps every one of them, its front to its street (an object turned with
+**↻** still has its arrow to the street, and its width along the side).
+
+Two automatic placements on the same islands are laid independently and can
+overlap: give them different islands (picked, or two material slots).
+
 Reading FBX: binary FBX only (Blender's default), meshes, UVs, model
 transforms, unit scale and axis settings, material colour and embedded textures.
 ASCII FBX, rigs and animation are not read. OBJ textures need their MTL and

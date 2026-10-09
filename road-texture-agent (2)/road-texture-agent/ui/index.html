@@ -89,6 +89,9 @@
   .minmax{ display:grid; grid-template-columns:1fr 1fr; gap:4px; }
   .field .minmax input[type=number]{ padding:5px 5px; min-width:0; }
   .field input[type=range]{ width:100%; accent-color:var(--blue); }
+  .field select{ background:var(--field); border:1px solid var(--line); border-radius:4px; color:var(--ink); font:inherit; padding:4px 6px; width:100%; min-width:0; }
+  /* an automatic placement (laid on the islands) has no rectangle: none of its settings */
+  #plBox.auto .hand-only{ display:none; }
   .select-full{ margin:4px 0 10px; }
 
   .btn{ width:100%; border:none; border-radius:5px; padding:10px; font-weight:500; cursor:pointer; background:var(--blue); color:#fff; margin-top:8px; }
@@ -452,6 +455,7 @@
           <div class="note" style="color:var(--amber);margin-top:6px">Before importing: the object's front must face the +Y axis (Blender's green arrow). Use ↻ on a layer to turn an object that faces another way. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
           <div id="objList" style="margin-top:8px"></div>
           <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
+          <button class="btn secondary" id="btnAutoObj" disabled title="Lay the selected object on the islands by rule: one in the middle of each side, its front (+Y) to the street, as many per side as the weight and the side's length allow">Place automatically on islands</button>
           <div class="btn-row">
             <button class="btn secondary" id="btnDupPl" disabled title="A copy of the selected placement, just behind it, with all its settings">Duplicate placement</button>
             <button class="btn secondary" id="btnMirrorPl" disabled title="The mirror image of the selected placement, left to right along its rows: the order reverses, a curve bends the other way, single turns mirror; fronts face the same side">Flip placement</button>
@@ -464,8 +468,22 @@
           </div>
           <div id="objPlHost"><div id="plBox" hidden style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px" id="plTitle">Placement</div>
-            <div class="field"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
-            <div class="field"><label for="gapY" id="gapYLabel">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
+            <div id="autoBox" hidden>
+              <div class="field"><label for="auWeight">Objects per side</label><input type="number" id="auWeight" value="1" step="1" min="1" max="50" title="The weight: how many objects each side of an island gets, as long as the side is long enough. A side too short for them gets fewer; an island too small for one on each side gets them on its longest sides first, and one too small for any gets one in its middle, or none"></div>
+              <div class="field"><label for="auIslands">Islands</label><select id="auIslands">
+                <option value="all">All islands</option>
+                <option value="picked">Islands I pick</option>
+                <option value="slot">Islands of a material slot</option>
+              </select></div>
+              <div class="field" id="auSlotRow" hidden><label for="auSlot">Material slot</label><select id="auSlot"></select></div>
+              <button class="btn secondary toggle" id="btnAuPick" aria-pressed="false" hidden title="Click islands on the map to lay objects on them; click one again to take it out">Pick islands</button>
+              <div class="field"><label for="auSetback">From the kerb (m)</label><input type="number" id="auSetback" value="3" step="0.5" min="0" max="50" title="From the island's kerb to each object's front: room for the sidewalk"></div>
+              <div class="field"><label for="auGap">Gap between objects (m)</label><input type="number" id="auGap" value="2" step="0.5" min="0" max="50" title="The least room between two objects, on a side and round a corner"></div>
+              <button class="btn secondary" id="btnAuLay" title="Lay the objects again on the islands of the texture now generated">Lay again</button>
+              <div class="note" id="autoInfo"></div>
+            </div>
+            <div class="field hand-only"><label for="gapX" id="gapXLabel">Gap along X (m)</label><input type="number" id="gapX" value="0" step="0.1" min="0"></div>
+            <div class="field hand-only"><label for="gapY" id="gapYLabel">Gap along Y (m)</label><input type="number" id="gapY" value="0" step="0.1" min="0"></div>
             <div data-only="foliage">
               <div style="font-size:12px;font-weight:600;margin-top:6px">Random transform <span style="font-weight:400;color:var(--muted)">min – max, per plant</span></div>
               <div class="field"><label for="jScMin">Scale (×)</label><span class="minmax"><input type="number" id="jScMin" value="1" step="0.05" min="0.01" aria-label="Scale min"><input type="number" id="jScMax" value="1" step="0.05" min="0.01" aria-label="Scale max"></span></div>
@@ -475,7 +493,7 @@
               <button class="btn secondary" id="btnJitter" title="New random values within the same ranges">New random set</button>
               <div class="note" id="jInfo"></div>
             </div>
-            <div data-only="objects">
+            <div data-only="objects" class="hand-only">
             <div style="font-size:12px;font-weight:600;margin-top:6px">Random spaces <span style="font-weight:400;color:var(--muted)">min – max, metres</span></div>
             <div class="field"><label for="spXmin">X, along the rows</label><span class="minmax"><input type="number" id="spXmin" value="1" step="0.1" min="0" aria-label="X min"><input type="number" id="spXmax" value="4" step="0.1" min="0" aria-label="X max"></span></div>
             <div class="field"><label for="spYmin">Y, between rows</label><span class="minmax"><input type="number" id="spYmin" value="2" step="0.1" min="0" aria-label="Y min"><input type="number" id="spYmax" value="6" step="0.1" min="0" aria-label="Y max"></span></div>
@@ -498,6 +516,7 @@
               <button class="btn secondary" id="btnStraight">Make straight again</button>
             </div>
             <div data-only="objects">
+            <div class="hand-only">
             <div style="font-size:12px;font-weight:600;margin-top:10px">Inner streets &amp; islands</div>
             <button class="btn secondary" id="btnDrawStreets" title="Turn spaces between the objects into streets">Draw inner streets</button>
             <div id="streetBox" hidden>
@@ -509,10 +528,11 @@
             <div class="field"><label for="stReach">Join streets up to (m)</label><input type="number" id="stReach" value="200" step="10" min="0" max="2000" title="A street drawn to the edge of the placement goes straight on to the nearest street within this distance, at either end. Further away, or with objects in the way, it ends at the edge. 0: never"></div>
             <div class="field"><label for="stMarkings">Markings on inner streets</label><input type="checkbox" id="stMarkings" checked style="justify-self:start;accent-color:var(--blue)" title="Ticked: the inner streets get the markings of the main streets. Unticked: no markings on them"></div>
             <div class="note" id="stInfo"></div>
+            </div>
             <div style="font-size:12px;font-weight:600;margin-top:10px">Single objects</div>
             <button class="btn secondary" id="btnEditObjs" title="Pick single objects by their id and turn them">Turn single objects</button>
             <div id="objEditBox" hidden>
-              <div class="note">Click an object to pick it, Shift-click to pick more. Ids are row-column, counted from the top left.</div>
+              <div class="note" id="objEditNote">Click an object to pick it, Shift-click to pick more. Ids are row-column, counted from the top left.</div>
               <div class="field"><label for="objTurn">Rotation (°, clockwise)</label><input type="number" id="objTurn" value="0" step="5"></div>
               <div class="btn-row">
                 <button class="btn secondary" id="btnTurnL" title="A quarter turn anticlockwise">↺ 90°</button>
@@ -527,6 +547,7 @@
               <button class="btn secondary" id="btnSpaceReset">Bring every object back</button>
             </div>
             <div class="note" id="spaceInfo"></div>
+            <div class="hand-only">
             <div style="font-size:12px;font-weight:600;margin-top:10px">Objects alignment</div>
             <div class="btn-row">
               <button class="btn secondary toggle" id="btnAlignRows" aria-pressed="false" title="On or off: every second row faces the other way. Row 1 stays as placed, row 2 is turned round, row 3 as row 1, and so on">Alternate rows</button>
@@ -536,6 +557,7 @@
             <div class="field"><label for="alignExclude">Exclude rows from columns</label><input type="checkbox" id="alignExclude" style="justify-self:start;accent-color:var(--blue)" title="The first and last rows keep their end objects (the four corners) facing as their row"></div>
             <div class="note" id="alignInfo"></div>
             </div>
+            </div>
             <button class="btn secondary" id="btnShuffle" hidden title="A new random mix of the package's objects">Shuffle the mix</button>
             <button class="btn secondary" id="btnCurve" title="Turn this rectangle into a line you can bend to follow a curved street">Bend into a curve</button>
             <div class="note" id="plInfo"></div>
@@ -543,6 +565,7 @@
           </div></div>
           <div class="note">Drag a rectangle to move it, its corners to add copies (it never shrinks below one object), the round handle to rotate. Blue shows the gaps; copies on the road are crossed out and left out of the 3D model.</div>
           <div class="note"><b>Curves:</b> select a placement and press <i>Bend into a curve</i>. Double-click the line (or press <i>Add point</i>) to add a point, drag points to bend the line, double-click a point to remove it. Copies fill the line and turn with it; drag an end point to make the line longer or shorter.</div>
+          <div class="note"><b>Automatic:</b> <i>Place automatically on islands</i> (or <i>Place automatically</i> on a package) lays the object on the islands of the generated texture by rule: one in the middle of each side, its front (+Y) to the street, set back from the kerb; the weight is objects per side. A side too short gets fewer, a small island gets its longest sides first; nothing ever overlaps. It lays them again when its settings change or the texture is generated again; click one of its objects to select it.</div>
           <div class="note"><b>Curve lines:</b> <i>Add curve line</i> gives the rows more lines to bend them by (one per row at most): the first shapes the front row, the last the back row. A point added goes on every line. Drag a point along its line and only that point moves; drag it across and the points at the same place on the other lines move with it.</div>
         </div>
       </section>
