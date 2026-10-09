@@ -19,12 +19,24 @@ Three things live here, in one SQLite file:
 
 The log is the source of truth. Situations and trees can always be rebuilt from
 it, so nothing learned can be lost.
+
+Files are recorded by their place in the workspace (the folder holding this
+database), such as artifacts/tile_x.png, not by a full path, so the workspace
+can be moved or copied to another computer and still find everything. A full
+path recorded before (or on another computer) is found again under this
+workspace by the part from its workspace folder on (artifacts, uploads ...);
+on start the database's full paths are rewritten that way once.
 """
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
+
+_ABS = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/])")      # a full path, Windows or not
+# the workspace's own folders: a full path recorded elsewhere is found again from one of these on
+FOLDERS = ("artifacts", "uploads", "objects", "packages", "looks", "skies", "decals", "errors")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS steps (
@@ -126,11 +138,94 @@ class Memory:
     def __init__(self, db_path: Path):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.root = self.path.parent.resolve()           # the workspace
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
         self.db.commit()
+        self.moved = self._portable()
+
+    # ---------------------------------------------------------------- paths
+    def rel(self, p):
+        """A path as recorded: its place in the workspace (forward slashes) when it lies in it, else as given."""
+        if p is None or p == "":
+            return p
+        s = str(p)
+        try:
+            return Path(s).resolve().relative_to(self.root).as_posix()
+        except (ValueError, OSError):
+            return s
+
+    def resolve(self, p):
+        """
+        A recorded path as a full path on this computer: a place in the
+        workspace under it; a full path recorded on another computer, or before
+        the workspace moved, found again under this workspace by the part from
+        its workspace folder on (artifacts/..., uploads/...).
+        """
+        if p is None or p == "":
+            return p
+        s = str(p)
+        parts = [x for x in re.split(r"[\\/]+", s) if x]
+        if not _ABS.match(s):
+            return str(self.root.joinpath(*parts)) if parts else str(self.root)
+        if Path(s).exists():
+            return s
+        for i in range(len(parts) - 2, -1, -1):          # the last workspace folder in it, not the file itself
+            if parts[i] in FOLDERS:
+                return str(self.root.joinpath(*parts[i:]))
+        return s
+
+    def _meta_out(self, meta):
+        """Meta as recorded: its full paths in the workspace made places in it."""
+        return {k: (self.rel(v) if isinstance(v, str) and _ABS.match(v) else v) for k, v in (meta or {}).items()}
+
+    def _meta_in(self, meta):
+        """Meta as read: its paths (full, or places in the workspace under a path key) made full paths here."""
+        out = {}
+        for k, v in meta.items():
+            if isinstance(v, str) and v and (_ABS.match(v) or ((k == "npz" or k == "nomark" or k.endswith("path"))
+                                                                and re.match(r"(?:%s)[\\/]" % "|".join(FOLDERS), v))):
+                v = self.resolve(v)
+            out[k] = v
+        return out
+
+    def _portable(self):
+        """
+        Once, on start: every full path in the database that lies in this
+        workspace (or did, on another computer) becomes its place in it.
+        Returns how many were rewritten.
+        """
+        n = 0
+
+        def fix(v):
+            if not isinstance(v, str) or not _ABS.match(v):
+                return v
+            r = self.rel(self.resolve(v))
+            return v if _ABS.match(r) else r
+        for table, key, col in (("images", "id", "path"), ("artifacts", "id", "path")):
+            for row in self.db.execute(f"SELECT {key}, {col} FROM {table}").fetchall():
+                new = fix(row[col])
+                if new != row[col]:
+                    self.db.execute(f"UPDATE {table} SET {col}=? WHERE {key}=?", (new, row[key])); n += 1
+        for row in self.db.execute("SELECT part, pair_id, npz FROM library_index").fetchall():
+            new = fix(row["npz"])
+            if new != row["npz"]:
+                self.db.execute("UPDATE library_index SET npz=? WHERE part=? AND pair_id=?",
+                                (new, row["part"], row["pair_id"])); n += 1
+        for row in self.db.execute("SELECT id, patch_files FROM trained_pairs").fetchall():
+            pf = json.loads(row["patch_files"])
+            new = {k: fix(v) for k, v in pf.items()}
+            if new != pf:
+                self.db.execute("UPDATE trained_pairs SET patch_files=? WHERE id=?", (json.dumps(new), row["id"])); n += 1
+        for row in self.db.execute("SELECT id, meta FROM artifacts").fetchall():
+            m = json.loads(row["meta"])
+            new = {k: fix(v) for k, v in m.items()}
+            if new != m:
+                self.db.execute("UPDATE artifacts SET meta=? WHERE id=?", (json.dumps(new), row["id"])); n += 1
+        self.db.commit()
+        return n
 
     def _migrate(self):
         """Add columns introduced after a database was created, keeping its data."""
@@ -165,20 +260,20 @@ class Memory:
     def add_image(self, image_id, role, name, path, width, height, sha256, meta=None):
         self.db.execute(
             "INSERT OR REPLACE INTO images VALUES (?,?,?,?,?,?,?,?,?)",
-            (image_id, role, name, str(path), width, height, sha256, time.time(),
+            (image_id, role, name, self.rel(path), width, height, sha256, time.time(),
              json.dumps(meta or {})),
         )
         self.db.commit()
 
     def image(self, image_id):
         r = self.db.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
-        return dict(r) | {"meta": json.loads(r["meta"])} if r else None
+        return dict(r) | {"path": self.resolve(r["path"]), "meta": json.loads(r["meta"])} if r else None
 
     def images(self, role=None):
         rows = (self.db.execute("SELECT * FROM images WHERE role=? ORDER BY ts DESC", (role,))
                 if role else
                 self.db.execute("SELECT * FROM images ORDER BY ts DESC")).fetchall()
-        return [dict(r) | {"meta": json.loads(r["meta"])} for r in rows]
+        return [dict(r) | {"path": self.resolve(r["path"]), "meta": json.loads(r["meta"])} for r in rows]
 
     # ------------------------------------------------------- situations (KV)
     def touch_situation(self, key: str, tree: str, features: dict):
@@ -275,18 +370,22 @@ class Memory:
         self.db.execute(
             "INSERT OR REPLACE INTO trained_pairs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (pair_id, mask["id"], photo["id"], mask["name"], photo["name"], scale,
-             road_px, junctions, json.dumps(groups), json.dumps(patch_files), time.time()))
+             road_px, junctions, json.dumps(groups), json.dumps({k: self.rel(v) for k, v in patch_files.items()}),
+             time.time()))
         self.db.commit()
+
+    def _patch_files(self, raw):
+        return {k: self.resolve(v) for k, v in json.loads(raw).items()}
 
     def trained_pairs(self):
         rows = self.db.execute("SELECT * FROM trained_pairs ORDER BY created").fetchall()
         return [dict(r) | {"groups": json.loads(r["groups"]),
-                           "patch_files": json.loads(r["patch_files"])} for r in rows]
+                           "patch_files": self._patch_files(r["patch_files"])} for r in rows]
 
     def trained_pair(self, pair_id):
         r = self.db.execute("SELECT * FROM trained_pairs WHERE id=?", (pair_id,)).fetchone()
         return (dict(r) | {"groups": json.loads(r["groups"]),
-                           "patch_files": json.loads(r["patch_files"])}) if r else None
+                           "patch_files": self._patch_files(r["patch_files"])}) if r else None
 
     def delete_trained_pair(self, pair_id):
         rec = self.trained_pair(pair_id)
@@ -321,7 +420,7 @@ class Memory:
                 "confidence, weight, npz, rejections, acceptances, cooldown) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (part, r["pair_id"], 0, r["pixels"], r["patches"], r["size_px"],
-                 conf, r["pixels"] * conf, r["npz"],
+                 conf, r["pixels"] * conf, self.rel(r["npz"]),
                  o.get("rejections", 0), o.get("acceptances", 0), o.get("cooldown", 0)))
         self._rerank(part)
         self.db.commit()
@@ -337,7 +436,7 @@ class Memory:
     def index(self, part):
         rows = self.db.execute(
             "SELECT * FROM library_index WHERE part=? ORDER BY rank", (part,)).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) | {"npz": self.resolve(r["npz"])} for r in rows]
 
     def reject_pair(self, part, pair_id):
         """
@@ -389,17 +488,18 @@ class Memory:
     # ------------------------------------------------------------ artifacts
     def add_artifact(self, artifact_id, kind, path, meta=None):
         self.db.execute("INSERT OR REPLACE INTO artifacts VALUES (?,?,?,?,?)",
-                        (artifact_id, kind, str(path), time.time(), json.dumps(meta or {})))
+                        (artifact_id, kind, self.rel(path), time.time(), json.dumps(self._meta_out(meta))))
         self.db.commit()
 
+    def _artifact(self, r):
+        return dict(r) | {"path": self.resolve(r["path"]), "meta": self._meta_in(json.loads(r["meta"]))} if r else None
+
     def latest_artifact(self, kind):
-        r = self.db.execute("SELECT * FROM artifacts WHERE kind=? ORDER BY ts DESC LIMIT 1",
-                            (kind,)).fetchone()
-        return dict(r) | {"meta": json.loads(r["meta"])} if r else None
+        return self._artifact(self.db.execute("SELECT * FROM artifacts WHERE kind=? ORDER BY ts DESC LIMIT 1",
+                                              (kind,)).fetchone())
 
     def artifact(self, artifact_id):
-        r = self.db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
-        return dict(r) | {"meta": json.loads(r["meta"])} if r else None
+        return self._artifact(self.db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone())
 
     # ------------------------------------------------------------- summary
     def summary(self):

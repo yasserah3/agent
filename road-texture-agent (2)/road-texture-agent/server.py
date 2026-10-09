@@ -61,7 +61,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.08-lane2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.09-move1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -125,6 +125,10 @@ print("  %s: %d trained pairs, %d steps recorded\n" % (
 if _FRESH:
     print("  If you expected your earlier training: stop the server and copy your old 'workspace'")
     print("  folder here, or put its path into workspace.txt next to server.py.\n")
+if mem.moved:
+    print("  %d file references were full paths (from an earlier version, another folder or another" % mem.moved)
+    print("  computer): each now points into this workspace, by its place in it, so the workspace")
+    print("  can be moved or copied to another computer.\n")
 
 ROLES = {"material", "line", "noisy", "pair_mask", "pair_photo", "gen_mask", "sidewalk"}
 
@@ -485,7 +489,7 @@ def _build_tiles(settings=None):
     # older tile sets are no longer used: drop their files
     for row in mem.db.execute("SELECT id, path FROM artifacts WHERE kind IN ('tile','tileset')").fetchall():
         if set_id not in row["id"] and not row["path"].endswith(f"tileset_{set_id}.json"):
-            Path(row["path"]).unlink(missing_ok=True)
+            Path(mem.resolve(row["path"])).unlink(missing_ok=True)
             mem.db.execute("DELETE FROM artifacts WHERE id=?", (row["id"],))
     mem.db.commit()
     mem.add_artifact(f"tileset_{set_id}", "tileset", mpath, manifest)
@@ -532,7 +536,7 @@ def _rebuild_libraries(note: str):
             "SELECT id, path, meta FROM artifacts WHERE kind='patch_library'").fetchall():
         meta = json.loads(row["meta"])
         if str(meta.get("kind", "")).startswith("merged."):
-            for f in (Path(row["path"]), Path(meta.get("npz", "") or "/nonexistent")):
+            for f in (Path(mem.resolve(row["path"])), Path(mem.resolve(meta.get("npz", "")) or "/nonexistent")):
                 if f.exists():
                     f.unlink()
             mem.db.execute("DELETE FROM artifacts WHERE id=?", (row["id"],))

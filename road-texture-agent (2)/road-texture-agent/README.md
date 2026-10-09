@@ -1228,6 +1228,23 @@ warns when it had to create a new, empty one. To keep the workspace somewhere
 else (so updates can never touch it), put its full path into `workspace.txt`
 next to `server.py`, or set the `RTA_WORKSPACE` environment variable.
 
+**Moving the workspace, or using it on another computer.** Copy the whole
+`workspace` folder (with `memory.db` and its `artifacts`, `uploads` and other
+folders) and point the program at it as above. Every file the memory records
+is kept by its place in the workspace (such as `artifacts/tile_x.png`), not by
+a full path, so it is found wherever the workspace now is.
+
+- A workspace from an earlier version recorded full paths (such as
+  `C:\Users\name\Downloads\...\workspace\artifacts\...`). On another
+  computer or in another folder those no longer exist; the program finds each
+  file again under the workspace it is using, by the part from its workspace
+  folder on (`artifacts\...`, `uploads\...`), and on start rewrites the
+  memory that way once. The server's window says how many it rewrote ("...
+  file references were full paths ..."). Nothing else needs doing: the tiles, the trained
+  libraries, your masks and photos and the generated textures all come back.
+- Only files inside the workspace move with it. Objects, packages, skies,
+  decals and looks were already kept by name inside their own folders.
+
 ## Objects (scatter)
 
 In the Generate tab, **Objects** sits above **Foliage** (below) and Bridges.
