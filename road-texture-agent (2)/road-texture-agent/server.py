@@ -61,7 +61,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.09-parts1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.09-area1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1536,8 +1536,11 @@ def generate(payload: dict):
     lanes_path = ARTIFACTS / f"gen_{gid}_lanes.npz"
     # the Lanes tool's choices: sent with the request, else the ones kept for this mask
     lane_picks = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base))
+    # the markings area: lines (and decals) only inside it; sent with the request, else the one kept
+    mark_area = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base))
     res = G.generate(rec["path"], libraries, {
         "lane_picks": lane_picks,
+        "mark_area": mark_area,
         "nomark": streets["nomark"],
         "metres_per_pixel": float(payload.get("scale", 0.25)),
         "wear": float(payload.get("wear", 50)) / 100.0,
@@ -1559,7 +1562,8 @@ def generate(payload: dict):
     mem.add_artifact(f"{gid}_streets", "generated_streets", streets_path, {"mask": rec["id"]})
     # what a street's lanes need to be laid again on their own (the Lanes tool's Done), and the
     # choices the texture has now
-    mem.add_artifact(f"{gid}_lanes", "generation_lanes", lanes_path, {"mask": rec["id"], "picks": lane_picks})
+    mem.add_artifact(f"{gid}_lanes", "generation_lanes", lanes_path, {"mask": rec["id"], "picks": lane_picks,
+                                                                      "area": mark_area})
 
     prog.stage("saving", "saving")
     urls = {}
@@ -1599,7 +1603,7 @@ def generate(payload: dict):
             "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3),
             "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
-            "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks}
+            "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks, "mark_area": mark_area}
 
 
 def _street_material(payload):
@@ -1816,6 +1820,70 @@ def save_lanes(payload: dict):
     return {"ok": True, "picks": len(picks)}
 
 
+# ------------------------------------------------------------------ markings area
+# One rectangle on the map outside which no lane lines and no decals are laid
+# (app/lanes.py), kept with the mask as the lane choices are.
+def _area_key(rec):
+    return f"markarea_{(rec.get('sha256') or rec['id'])[:20]}"
+
+
+def _load_area(rec):
+    art = mem.artifact(_area_key(rec)) if rec else None
+    if not art or not Path(art["path"]).exists():
+        return None
+    return LN.area_check(json.loads(Path(art["path"]).read_text()).get("area"))
+
+
+@app.get("/api/markarea")
+def get_markarea(mask: str):
+    return {"area": _load_area(mem.image(mask))}
+
+
+@app.post("/api/markarea")
+def save_markarea(payload: dict):
+    rec = mem.image(payload.get("mask"))
+    if not rec:
+        raise HTTPException(400, "unknown mask")
+    area = LN.area_check(payload.get("area"))
+    path = ARTIFACTS / f"{_area_key(rec)}.json"
+    path.write_text(json.dumps({"area": area}))
+    mem.add_artifact(_area_key(rec), "markings_area", path, {"mask": rec["id"], "area": area})
+    return {"ok": True, "area": area}
+
+
+@app.post("/api/markarea/apply")
+def apply_markarea(payload: dict):
+    """
+    A markings area set (or changed, or taken away) after the texture was
+    generated: kept with the mask, then laid on the texture by taking away what
+    now lies outside it and laying what now lies inside it, nothing else: the
+    lane lines of the streets the change reaches (lanes_repaint) and the decals
+    (_lay_decals, as last laid: only those that go or come are painted).
+    """
+    gid = payload.get("generation")
+    art = mem.artifact(f"{gid}_map")
+    if not art:
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    area = LN.area_check(payload.get("area"))
+    base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
+    if base_rec:
+        save_markarea({"mask": base_rec["id"], "area": area})
+    t0 = time.time()
+    lanes = mem.artifact(f"{gid}_lanes")
+    lane_res = lanes_repaint({"generation": gid, "lane_picks": (lanes["meta"] or {}).get("picks") or [] if lanes else [],
+                              "mark_area": area})
+    dec_res = None
+    dart = mem.artifact(f"{gid}_decals")
+    if dart and Path(dart["path"]).exists():
+        m = dart["meta"] or {}
+        dec_res = _lay_decals(gid, m.get("layers") if m.get("layers") is not None else _decal_layers(),
+                              m.get("mode", "separate"), int(m.get("seed", 7)), area)
+    v = uuid.uuid4().hex[:6]
+    return {"ok": True, "area": area, "lanes": lane_res, "decals": dec_res, "seconds": round(time.time() - t0, 2),
+            "urls": {"result": f"/api/artifact/{gid}_result?v={v}", "markings": f"/api/artifact/{gid}_markings?v={v}",
+                     "decals": f"/api/artifact/{gid}_decalimg?v={v}", "full": f"/api/artifact/{gid}_full?v={v}"}}
+
+
 _repaint_lock = threading.Lock()
 
 
@@ -1839,6 +1907,8 @@ def lanes_repaint(payload: dict):
     t0 = time.time()
     with _repaint_lock:
         art = mem.artifact(f"{gid}_lanes")
+        old_area = (art["meta"] or {}).get("area")
+        area = LN.area_check(payload["mark_area"]) if "mark_area" in payload else LN.area_check(old_area)
         base = ARTIFACTS / f"gen_{gid}_result_base.png"
         full = mem.artifact(f"{gid}_full")
         files = {"result": result["path"], "markings": markings["path"],
@@ -1850,8 +1920,9 @@ def lanes_repaint(payload: dict):
             places = mem.artifact(f"{gid}_decals")
             decals = (np.asarray(Image.open(dec["path"]).convert("RGBA")),
                       bool(places and (places["meta"] or {}).get("mode") == "painted"))
-        out = G.repaint_lanes(art["path"], (art["meta"] or {}).get("picks") or [], picks, files, decals)
-        meta = dict(art["meta"] or {}, picks=picks)
+        out = G.repaint_lanes(art["path"], (art["meta"] or {}).get("picks") or [], picks, files, decals,
+                              old_area=old_area, new_area=area)
+        meta = dict(art["meta"] or {}, picks=picks, area=area)
         mem.add_artifact(f"{gid}_lanes", "generation_lanes", Path(art["path"]), meta)
         st = mem.artifact(f"{gid}_streets")
         if out["changed"] and st and Path(st["path"]).exists():
@@ -1868,7 +1939,7 @@ def lanes_repaint(payload: dict):
     if out["changed"]:
         mem.record("lanes_repaint", f"lanes laid again on {len(out['changed'])} street(s) in {secs} s",
                    {"generation": gid, "changed": out["changed"]})
-    return {"ok": True, "changed": out["changed"], "seconds": secs,
+    return {"ok": True, "changed": out["changed"], "area_streets": out.get("area_streets", 0), "seconds": secs,
             "urls": {"result": f"/api/artifact/{gid}_result?v={v}", "markings": f"/api/artifact/{gid}_markings?v={v}",
                      **({"full": f"/api/artifact/{gid}_full?v={v}"} if files["full"] else {})}}
 
@@ -2081,17 +2152,29 @@ def apply_decals(payload: dict):
     are placed (that is quick), compared with the ones laid last time, and only
     the footprints of those gone, moved or new (all of them when the mode
     changes) are worked out again in the Decals layer and the road texture
-    (app/decals.py's repaint). payload "whole": lay everything again.
+    (app/decals.py's repaint). payload "whole": lay everything again. Only
+    decals whose middle lies inside the markings area (payload "mark_area",
+    else the one kept for the mask) are laid.
     """
     gid = payload.get("generation")
+    art = mem.artifact(f"{gid}_map")
+    if not art:
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    area = LN.area_check(payload["mark_area"] if "mark_area" in payload
+                         else _load_area(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])))
+    return _lay_decals(gid, payload.get("layers"), "painted" if payload.get("mode") == "painted" else "separate",
+                       int(payload.get("seed", 7)), area, bool(payload.get("whole")))
+
+
+def _lay_decals(gid, raw_layers, mode, seed, area, whole=False):
+    """Lay a generation's decals (apply_decals): only what changed since last time, unless whole."""
     t0 = time.time()
     art, result = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_result")
     if not art or not result:
         raise HTTPException(400, "unknown generation: run Generate texture first")
     rec = mem.image(art["meta"]["mask"])
     idx = _decal_index()
-    layers = DC.layer_list(payload.get("layers"), {d["id"] for d in idx})
-    mode = "painted" if payload.get("mode") == "painted" else "separate"
+    layers = DC.layer_list(raw_layers, {d["id"] for d in idx})
     base = ARTIFACTS / f"gen_{gid}_result_base.png"
     if not base.exists():
         import shutil
@@ -2103,7 +2186,11 @@ def apply_decals(payload: dict):
     base_mask = mem.artifact(f"bridges_{art['meta'].get('base_mask') or rec['id']}")
     if base_mask and Path(base_mask["path"]).exists():
         bridges = _bridge_list(json.loads(Path(base_mask["path"]).read_text()))
-    placements = DC.place(gray, mpp, layers, sizes, int(payload.get("seed", 7)), bridges)
+    placements = DC.place(gray, mpp, layers, sizes, seed, bridges)
+    if area:
+        # the markings area: a decal is laid when its middle lies inside
+        keep = LN.in_area(LN.area_scaled(area, 1), [p["x"] for p in placements], [p["y"] for p in placements])
+        placements = [p for p, k in zip(placements, np.atleast_1d(keep)) if k]
     pics = DC.load_pictures(idx, DECALS)
     base_rgb = np.asarray(Image.open(base).convert("RGB"))
     _, coverage = _prep_cached(rec["path"], gray, s) if s else (None, None)
@@ -2112,7 +2199,7 @@ def apply_decals(payload: dict):
     layer_png = ARTIFACTS / f"gen_{gid}_decals.png"
     before = mem.artifact(f"{gid}_decals")
     old = None
-    if before and Path(before["path"]).exists() and layer_png.exists() and not payload.get("whole"):
+    if before and Path(before["path"]).exists() and layer_png.exists() and not whole:
         old = json.loads(Path(before["path"]).read_text()).get("placements")
     if old is not None:
         # laid before: only where something changed
@@ -2153,7 +2240,8 @@ def apply_decals(payload: dict):
     DC.save(placements, ARTIFACTS / f"gen_{gid}_decals.json")
     mem.add_artifact(f"{gid}_decalimg", "generated_decals", layer_png, {"generation": gid})
     mem.add_artifact(f"{gid}_decals", "decal_places", ARTIFACTS / f"gen_{gid}_decals.json",
-                     {"generation": gid, "count": len(placements), "mode": mode})
+                     {"generation": gid, "count": len(placements), "mode": mode, "seed": seed, "area": area,
+                      "layers": layers})
     names = {d["id"]: d["name"] for d in idx}
     v = uuid.uuid4().hex[:6]
     return {"ok": True, "count": len(placements), "mode": mode, "layers": DC.summary(placements, layers, names),
@@ -2222,13 +2310,13 @@ def export3d(payload: dict):
 # the objects, the decals, the streets' lanes): a model whose only changes are in
 # those parts builds just them again and the view swaps just them, not the whole model
 PART_FIELDS = {"paving": ("island_slots",), "objects": ("scatter",), "decals": ("decals", "decal_version"),
-               "lanes": ("lane_picks",)}
+               "lanes": ("lane_picks", "mark_area")}
 _models = {}                       # base key -> {"rebuild", "parts", "info", "tileset", "lock", "at"}
 _models_lock = threading.Lock()
 MODELS_KEEP = 2
 
 
-def _model_keys(gid, payload, streets_sig, picks):
+def _model_keys(gid, payload, streets_sig, picks, area=None):
     """A model's base key (all it is built from but its parts) and each part's key."""
     import hashlib
     skip = {"progress", "view"} | {f for fs in PART_FIELDS.values() for f in fs}
@@ -2239,7 +2327,7 @@ def _model_keys(gid, payload, streets_sig, picks):
     parts = {"paving": json.dumps(payload.get("island_slots"), sort_keys=True, default=str),
              "objects": json.dumps(payload.get("scatter"), sort_keys=True, default=str),
              "decals": json.dumps([payload.get("decals"), hashlib.sha1(dc.read_bytes()).hexdigest() if dc.exists() else None]),
-             "lanes": json.dumps(picks, sort_keys=True)}
+             "lanes": json.dumps([picks, area], sort_keys=True)}
     return base, parts
 
 
@@ -2248,7 +2336,7 @@ def _sig(text):
     return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
-def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out):
+def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None):
     """
     The model with only its changed parts built again, from a model built before
     with everything else the same, or None if there is none (or it cannot).
@@ -2263,7 +2351,7 @@ def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out):
     changed = [n for n, k in part_keys.items() if e["parts"].get(n) != k]
     inputs = {}
     for n in changed:
-        inputs[n] = (picks if n == "lanes" else _islands_for(gid, e["tileset"], payload) if n == "paving"
+        inputs[n] = ({"picks": picks, "area": area} if n == "lanes" else _islands_for(gid, e["tileset"], payload) if n == "paving"
                      else _scatter_for_export(payload.get("scatter")) if n == "objects" else _decals_for(gid, payload))
     view = payload.get("view") if isinstance(payload.get("view"), dict) else {}
     send = None
@@ -2319,6 +2407,7 @@ def _export3d(payload):
     dash_cfg = dict(art["meta"].get("dashes") or {})
     base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
     dash_cfg["lane_picks"] = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base_rec))
+    dash_cfg["mark_area"] = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base_rec))
     if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
         dash_cfg["nomark"] = np.array(Image.open(art["meta"]["nomark"]).convert("L")) > 127
     stale, inner, streets_now = None, None, {"sig": None}
@@ -2331,10 +2420,11 @@ def _export3d(payload):
         elif streets_now["shapes"] and base["id"] != rec["id"]:
             # the inner streets as they were drawn, laid exactly; the other roads from the mask without them
             inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
-    rkey, part_keys = (_model_keys(gid, payload, [streets_now["sig"], stale is None], dash_cfg["lane_picks"])
-                       if mode == "tiled" else (None, None))
+    rkey, part_keys = (_model_keys(gid, payload, [streets_now["sig"], stale is None], dash_cfg["lane_picks"],
+                                   dash_cfg["mark_area"]) if mode == "tiled" else (None, None))
     try:
-        info = _rebuild_parts(gid, rkey, part_keys, payload, dash_cfg["lane_picks"], out, lanes_out) if rkey else None
+        info = (_rebuild_parts(gid, rkey, part_keys, payload, dash_cfg["lane_picks"], out, lanes_out, dash_cfg["mark_area"])
+                if rkey else None)
         if info is not None:
             pass                                          # only some parts changed: built again on their own
         elif mode == "tiled":

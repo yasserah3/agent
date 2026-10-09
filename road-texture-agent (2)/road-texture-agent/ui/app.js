@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -148,6 +148,8 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
   // the Lanes tool (lanes below): the streets of the last texture, the choices kept for the mask
   const LN = { TOL: 0.4, LANE: 3.0, HIGHWAY: 22.0, ISLAND: 1.0, EDGE: 0.3 };
   const LANES = { picks: [], streets: null, mpp: 1, on: false, sel: -1, mask: null };
+  // the markings area (see markings area below)
+  const MAREA = { area: null, on: false, mask: null, painted: 'null', busy: false, again: false, timer: null, drag: null };
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
     if(kept){
@@ -367,8 +369,10 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
     const stage = $('.stage', root), canvas = $('canvas', stage), zoomEl = $('.vp-zoom', root);
     const enlargedEl = $('.vp-enlarged', root);
     let s = 1, tx = 0, ty = 0, drag = null, moved = false, has = false;
+    let zoomWas = 1;
     const apply = () => {
       stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
+      if(s !== zoomWas){ zoomWas = s; root.dispatchEvent(new Event('vpzoom')); }   // for handles kept at screen size
       // smooth scaling when zoomed in; hard pixel squares only at extreme zoom, for inspecting pixels
       stage.classList.toggle('pixelated', s > 8);
       const pct = Math.round(s*100);
@@ -824,6 +828,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
         S.gen.placements = sc.placements || []; S.gen.plSel = -1; maskPixels = null;
         await loadSlots(rec.id);
         await loadLanes(rec.id);
+        await loadMarea(rec.id);
         if(S.gen.placements.length) log(`${S.gen.placements.length} saved object placement(s) restored for this mask.`);
         renderObjList();
         drawBridges();
@@ -861,9 +866,12 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
           output_scale: +$('#outScale').value, soft_edges: $('#softEdges').checked,
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
           line_width_mode: $('#lineMode').value,
-          materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks }) });
+          materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks,
+          mark_area: MAREA.area }) });
       S.gen.result = res;
       S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
+      MAREA.painted = JSON.stringify(res.mark_area || null);               // and its markings area
+      renderMarea();
       S.gen.top = null; S.gen.decals = null;
       await loadIslands(res);
       await loadStreets(res);
@@ -974,7 +982,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
                        square: $('#matSquare').value },
           match_tone: $('#matTone').checked,
           island_slots: ISLS.slots,
-          lane_picks: LANES.picks,
+          lane_picks: LANES.picks, mark_area: MAREA.area,
           decals: $('#decalMode').value, decal_version: S.gen.decalVersion || 0,
           scatter: S.gen.placements,
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
@@ -1303,6 +1311,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
     if(!S.gen.mask) return;
     drawIslands(f);
     drawLanes(f);
+    drawMarea(f, Math.max(4, genVp.canvas.width / 260));
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
     // ramps and deck along the road, from the last preview
     S.gen.bridgePreview.forEach(p => {
@@ -1744,7 +1753,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
     status('Laying the changed lanes…');
     try{
       const r = await api('/api/lanes/repaint', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ generation: res.id, lane_picks: JSON.parse(want) }) });
+        body: JSON.stringify({ generation: res.id, lane_picks: JSON.parse(want), mark_area: MAREA.area }) });
       if(S.gen.result === res){
         S.gen.lanesPainted = want;
         if(r.changed.length){
@@ -1767,6 +1776,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
   }
   function lanesMode(on){
     LANES.on = on && !!LANES.streets;
+    if(LANES.on && MAREA.on){ MAREA.on = false; renderMarea(); }
     if(LANES.on && ISLS.pick >= 0) setPick(-1);
     if(!LANES.on){ LANES.sel = -1; paintLanes(); }
     else log('Set lanes: click a street to choose how many lanes each side has (the two sides show in blue and orange). Esc or Set lanes to finish.');
@@ -1909,6 +1919,173 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
     LANES.picks = []; LANES.sel = -1; lanesChanged(); paintLanes();
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && LANES.on && !MAT.open) lanesMode(false); });
+
+  // ------------------------------------------------ markings area (app/lanes.py)
+  // One rectangle on the map: lane lines and decals only inside it (a dash whole or not
+  // at all, by its middle; a solid line up to the edge; a decal by its middle). Kept with
+  // the mask. Set before Generate texture, the texture is made with it; set or changed
+  // afterwards, what now lies outside is taken away and what comes inside is laid, the
+  // rest of the texture as it is. { cx, cy, w, h (mask pixels), angle (degrees) }.
+  function mareaCorners(a){
+    const r = a.angle * Math.PI / 180, ux = Math.cos(r), uy = Math.sin(r), vx = -uy, vy = ux;
+    return [[-1,-1],[1,-1],[1,1],[-1,1]].map(([i, j]) => [a.cx + ux*a.w/2*i + vx*a.h/2*j, a.cy + uy*a.w/2*i + vy*a.h/2*j]);
+  }
+  function renderMarea(){
+    const has = !!S.gen.mask, a = MAREA.area;
+    $('#btnMarea').disabled = !has;
+    $('#btnMarea').setAttribute('aria-pressed', MAREA.on);
+    $('#btnMarea').textContent = MAREA.on ? 'Done' : a ? 'Edit markings area' : 'Markings area';
+    $('#btnMareaAll').disabled = !a;
+    const m = mppMask();
+    $('#mareaNote').textContent = a
+      ? `Lane lines and decals only inside the area: ${Math.round(a.w * m)} × ${Math.round(a.h * m)} m`
+        + `${Math.round(a.angle) % 360 ? `, turned ${Math.round(((a.angle % 360) + 360) % 360)}°` : ''}.`
+        + (MAREA.on ? ' Drag it to move it, a corner to size it, the round handle to turn it; Done or Esc to finish.' : '')
+        + (S.gen.result ? ' Changes are laid on the texture as you make them: markings outside are taken away, nothing else is generated again.'
+                        : ' Generate texture lays the markings inside it only.')
+      : 'Markings everywhere. Markings area puts a rectangle on the map: lane lines and decals only inside it (move it, size it from its corners, turn it from its handle).';
+  }
+  function drawMarea(f, hr){
+    const a = MAREA.area;
+    if(!a) return;
+    // handles about 7 screen pixels whatever the zoom (the layer's pixels are the texture's)
+    const shownW = genVp.canvas.getBoundingClientRect().width;
+    if(shownW > 0) hr = Math.max(hr, 7 * genVp.canvas.width / shownW);
+    const pts = mareaCorners(a).map(q => [q[0] * f, q[1] * f]);
+    const g = el('g', {}, layer), poly = pts.map(q => q.join(',')).join(' ');
+    if(MAREA.on){
+      // outside it darkened: no markings there
+      const W = genVp.canvas.width, H = genVp.canvas.height;
+      el('path', { d: `M0,0H${W}V${H}H0Z M${pts.map(q => q.join(',')).join('L')}Z`, 'fill-rule': 'evenodd',
+                   fill: 'rgba(0,0,0,.38)', 'pointer-events': 'none' }, g);
+    }
+    const body = el('polygon', { points: poly, fill: MAREA.on ? 'rgba(80,200,170,.10)' : 'none', stroke: '#50C8AA',
+      'stroke-width': hr * (MAREA.on ? 0.55 : 0.35), 'stroke-dasharray': MAREA.on ? 'none' : `${hr * 1.6} ${hr}`,
+      class: MAREA.on ? 'grab' : '', 'pointer-events': MAREA.on ? 'all' : 'none' }, g);
+    const tl = pts[0];
+    const lab = el('text', { x: tl[0] + hr, y: tl[1] - hr * 0.8, 'font-size': hr * 1.8, fill: '#50C8AA', class: 'lane-lbl',
+                             'stroke-width': hr * 0.35, 'pointer-events': 'none' }, g);
+    lab.textContent = 'Markings area';
+    if(!MAREA.on) return;
+    body.addEventListener('pointerdown', e => mareaStart(e, 'move'));
+    pts.forEach(q => {
+      const c = el('circle', { cx: q[0], cy: q[1], r: hr, class: 'corner', fill: '#fff', stroke: '#50C8AA', 'stroke-width': hr * 0.35 }, g);
+      c.addEventListener('pointerdown', e => mareaStart(e, 'size'));
+    });
+    const r = a.angle * Math.PI / 180, ex = (a.cx + Math.cos(r) * a.w / 2) * f, ey = (a.cy + Math.sin(r) * a.w / 2) * f;
+    const rx = ex + Math.cos(r) * hr * 5, ry = ey + Math.sin(r) * hr * 5;
+    el('line', { x1: ex, y1: ey, x2: rx, y2: ry, stroke: '#50C8AA', 'stroke-width': hr * 0.35 }, g);
+    const spin = el('circle', { cx: rx, cy: ry, r: hr * 1.15, class: 'spin', fill: '#50C8AA' }, g);
+    spin.addEventListener('pointerdown', e => mareaStart(e, 'rotate'));
+  }
+  function mareaStart(e, mode){
+    e.stopPropagation(); e.preventDefault();
+    MAREA.drag = { mode, start: toMask(e), orig: { ...MAREA.area } };
+  }
+  addEventListener('pointermove', e => {
+    const d = MAREA.drag;
+    if(!d) return;
+    const a = MAREA.area, o = d.orig, p = toMask(e);
+    if(d.mode === 'move'){ a.cx = o.cx + p[0] - d.start[0]; a.cy = o.cy + p[1] - d.start[1]; }
+    else if(d.mode === 'size'){
+      const r = o.angle * Math.PI / 180, dx = p[0] - o.cx, dy = p[1] - o.cy;
+      a.w = Math.max(8, 2 * Math.abs(dx * Math.cos(r) + dy * Math.sin(r)));
+      a.h = Math.max(8, 2 * Math.abs(-dx * Math.sin(r) + dy * Math.cos(r)));
+    }else a.angle = Math.atan2(p[1] - o.cy, p[0] - o.cx) * 180 / Math.PI;
+    renderMarea(); drawBridges();
+  });
+  addEventListener('pointerup', () => {
+    if(!MAREA.drag) return;
+    MAREA.drag = null;
+    mareaChanged();
+  });
+  function mareaMode(on){
+    MAREA.on = on && !!S.gen.mask;
+    if(MAREA.on){
+      if(LANES.on) lanesMode(false);
+      if(ISLS.pick >= 0) setPick(-1);
+      if(!MAREA.area){
+        // a first rectangle: the middle half of the mask
+        const W = S.gen.mask.width, H = S.gen.mask.height;
+        MAREA.area = { cx: W / 2, cy: H / 2, w: W / 2, h: H / 2, angle: 0 };
+        log('Markings area: lane lines and decals only inside the rectangle. Move it, size it from its corners, turn it from its round handle.');
+        mareaChanged();
+      }
+    }
+    renderMarea(); drawBridges();
+  }
+  // kept with the mask, the 3D tab told, and laid on the texture as it is
+  function mareaChanged(){
+    renderMarea(); drawBridges();
+    window.dispatchEvent(new Event('materials'));
+    if(!S.gen.mask) return;
+    clearTimeout(MAREA.timer);
+    const mask = S.gen.mask.id, area = MAREA.area ? { ...MAREA.area } : null;
+    MAREA.timer = setTimeout(() => api('/api/markarea', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ mask, area }) }).catch(e => log('Markings area not saved: ' + e.message, 'bad')), 300);
+    paintMarea();
+  }
+  // only what the change reaches: lines of the streets its edges cross or that come in or go
+  // out, decals that come in or go out. One at a time; asked again meanwhile, once more after
+  async function paintMarea(){
+    const res = S.gen.result;
+    if(!res) return;
+    const want = JSON.stringify(MAREA.area);
+    if(want === MAREA.painted) return;
+    if(MAREA.busy){ MAREA.again = true; return; }
+    MAREA.busy = true;
+    status('Laying the markings area on the texture…');
+    try{
+      const r = await api('/api/markarea/apply', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ generation: res.id, area: JSON.parse(want) }) });
+      if(S.gen.result === res){
+        MAREA.painted = want;
+        res.urls.result = r.urls.result; res.urls.markings = r.urls.markings;
+        if(r.lanes) S.gen.lanesPainted = JSON.stringify(LANES.picks);
+        if(r.decals && S.gen.decals){ S.gen.decals.urls = r.decals.urls; S.gen.decals.count = r.decals.count; }
+        if(S.gen.islandTex && S.gen.islandTex.gid === res.id) S.gen.islandTex.urls.full = r.urls.full;
+        const n = r.lanes ? r.lanes.changed.length : 0, dp = r.decals && r.decals.partial;
+        const dTxt = r.decals ? (dp ? (dp.changed ? `, ${dp.gone} decal(s) taken away and ${dp.changed - dp.gone} laid` : ', decals as they were')
+                                    : `, ${r.decals.count} decal(s) laid`) : '';
+        log(`Markings area ${JSON.parse(want) ? 'laid' : 'taken away: markings everywhere again'} in ${r.seconds.toFixed(1)} s: `
+          + `lines of ${n} street(s) laid again${dTxt}; the rest of the texture as it was, nothing generated again.`, 'ok');
+        if(['result', 'markings', 'full', 'decals'].includes(S.gen.layer)) await showLayer(S.gen.layer, true);
+        renderLayerThumbs();
+        if(S.gen.decals) try{ drawInto($('#lp-decals'), await loadImage(API + r.urls.decals)); }catch(_){}
+        if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) buildTopView(res.id, true);
+      }
+    }catch(e){
+      log('Markings area not laid on the texture: ' + e.message, 'bad');
+      if(e.status === 409 && S.gen.result === res) MAREA.painted = want;
+    }
+    status('Ready.');
+    MAREA.busy = false;
+    if(MAREA.again){ MAREA.again = false; paintMarea(); }
+  }
+  async function loadMarea(maskId){
+    MAREA.mask = maskId; MAREA.area = null; MAREA.on = false; MAREA.painted = 'null';
+    try{
+      const r = await api('/api/markarea?mask=' + maskId);
+      if(MAREA.mask !== maskId) return;
+      MAREA.area = r.area || null;
+      if(MAREA.area) log('Markings area restored for this mask: lane lines and decals only inside it.');
+    }catch(_){}
+    renderMarea();
+  }
+  $('#btnMarea').addEventListener('click', () => mareaMode(!MAREA.on));
+  // its handles stay the same size on screen as you zoom
+  let mareaFrame = 0;
+  $('#genVp').addEventListener('vpzoom', () => {
+    if(!MAREA.on || !MAREA.area || mareaFrame) return;
+    mareaFrame = requestAnimationFrame(() => { mareaFrame = 0; drawBridges(); });
+  });
+  $('#btnMareaAll').addEventListener('click', () => {
+    if(!MAREA.area) return;
+    MAREA.area = null; MAREA.on = false;
+    log('Markings area taken away: lane lines and decals everywhere.');
+    mareaChanged();
+  });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && MAREA.on && !MAT.open) mareaMode(false); });
   $('#btnAddSlot').addEventListener('click', () => {
     const first = MAT.lib && MAT.lib.materials.find(m => m.kind === 'ground');
     ISLS.slots.push({ material: first ? first.id : 'same', picks: [] });
@@ -2110,7 +2287,7 @@ const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
     status('Laying the decals…');
     try{
       const res = await api('/api/decals/apply', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value }) });
+        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value, mark_area: MAREA.area }) });
       if(!S.gen.result || S.gen.result.id !== gid) return;
       S.gen.decals = res; S.gen.decalVersion = Date.now();
       S.gen.result.urls.result = res.urls.result;

@@ -476,6 +476,45 @@ highways' median islands and, with painted markings, the road surface (it
 carries the painted dashes): 0.2 s instead of 20 s with lines as strips, 1.6
 to 3 s instead of 13 to 50 s with painted lines.
 
+### Markings area: lane lines and decals in one rectangle only
+
+In the Generate tab, under the Lanes list, **Markings area** puts a rectangle
+on the map: the lane lines and the decals are laid only inside it, nowhere
+else. It is optional: with no area (the default, or **Everywhere**) the
+markings go everywhere as before.
+
+- **Move** it by dragging it, **size** it from any corner (it keeps its
+  middle), **turn** it from the round handle on its side. Outside it the map
+  is darkened while you edit it. **Done** (or Esc) finishes; the button then
+  reads **Edit markings area** and the rectangle stays on the map as a dashed
+  outline. The note under it gives its size in metres and its turn.
+- **At its edge** a dash is kept whole or taken away whole, by its middle (no
+  cut dashes); a solid line (an island's outline, a centre line) stops at the
+  edge. A decal is kept when its middle is inside.
+- **What it covers**: the lane lines (dashes, solid lines, the islands'
+  painted outlines) and the decals. The highways' median islands stay
+  everywhere, and so do the street material and everything else.
+- **Set before Generate texture**, the texture is generated with the markings
+  inside it only.
+- **Set or changed after**, nothing is generated again: the markings that now
+  lie outside are taken away and any that come inside are laid, on the
+  texture as it is, through the quick lane update (only the streets the
+  rectangle's edges cross, or that come in or go out, and only their line
+  pixels) and the quick decal update (only the decals that come in or go
+  out). Each move, size or turn is laid when you let go: 1.5 to 2.5 s on the
+  test map, 4.9 s on a texture at 2× output size (28 streets, 176 decals
+  taken away). **Everywhere** puts every marking back the same way. The
+  result is the same as a texture generated with that area (within one
+  colour level).
+- It is **kept with the mask** (on the server, like the lane choices), so it
+  is there again for the next texture of the same mask, and the decal layers
+  and Update decals keep to it.
+- In 3D (Update view, the export, the Top view) the markings follow it the
+  same way: lines as strips keep whole dashes by their middle and solid lines
+  to the edge; with painted markings a street the edge crosses has its lines
+  laid as strips (a road texture is shared along its street). Only the lanes
+  part of the model is built again: 0.2 s with strips, 3 s painted.
+
 ## Line width
 
 By default, lines are drawn as a **share of each street's width**, learned from
@@ -1643,6 +1682,7 @@ model it touches, never the whole.
 | What changed | In the texture (Generate tab) | In the 3D model (Update view) |
 |---|---|---|
 | A street's lanes | **Done** lays only its lines | the lane lines, median islands (painted: the road surface) |
+| Markings area | takes away only the lines and decals outside it (lays any that come in) | the lane lines (painted: the road surface), the decals |
 | Decal layers | **Update decals** paints only the changed decals' footprints | the decals |
 | Island material slots | **Update islands texture** lays only the changed islands | the paving: sidewalks, kerbs, blocks and islands |
 | Objects and plants | (not in the texture) | the objects and the street lamps |

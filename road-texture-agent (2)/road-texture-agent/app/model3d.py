@@ -741,8 +741,10 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         E = None
         mark_size = None
         if painted:
+            # a street the markings area cuts keeps its dashes as strips (only those inside it)
             dashed = {sid: st for sid, st in mesh.streets.items()
-                      if st.get("dash") and any(k == "dash" for _, k in st["dash"]["lines"])}
+                      if st.get("dash") and any(k == "dash" for _, k in st["dash"]["lines"])
+                      and not st["dash"].get("clipped")}
             if dashed:
                 cycle = float((dash_cfg or {}).get("cycle_m", 9.0))
                 share = float((dash_cfg or {}).get("dash_share", 0.6))
@@ -1091,7 +1093,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         """
         The model with some of its parts built again from new inputs, changes:
         {part: its input} ("paving": the island slots, "objects": the objects,
-        "decals": the decals, "lanes": the Lanes tool's choices), everything else
+        "decals": the decals, "lanes": {"picks": the Lanes tool's choices,
+        "area": the markings area}), everything else
         as built: the whole model to glb_path, and to part_path the parts a view
         needs alone (send: their names; None: those built again; nothing written
         when they come to nothing). Returns (report, those parts' names), or None
@@ -1100,7 +1103,9 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         """
         lanes_changed = None
         if "lanes" in changes:
-            lanes_changed, flipped = QM.relane(mesh, changes["lanes"])
+            ch = changes["lanes"]
+            lanes_changed, flipped = (QM.relane(mesh, ch["picks"], ch.get("area")) if isinstance(ch, dict)
+                                      else QM.relane(mesh, ch))
             if flipped and painted:
                 return None
         for name, fn in parts:

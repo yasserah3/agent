@@ -158,3 +158,75 @@ def summary(layouts):
         key = "none" if L["kind"] == "none" else f"{a} + {b}" + (" highway" if L["kind"] == "highway" else "")
         out[key] = out.get(key, 0) + 1
     return out
+
+
+# ---------------------------------------------------------------- markings area
+# One rectangle, set on the map (the Generate tab's Markings area), outside which
+# no lane lines and no decals are laid: {"cx", "cy" (its middle), "w", "h" (its
+# width along its turn and its height across it), "angle" (degrees, from the
+# picture's x axis towards its y axis, as the map turns it)}, in mask pixels. None:
+# markings everywhere. A dash is kept whole when its middle lies inside, a solid
+# line stops at the edge, a decal is kept when its middle lies inside.
+
+def area_check(raw):
+    """A markings area as the page sends it, checked; None when there is none."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        a = {k: float(raw[k]) for k in ("cx", "cy", "w", "h")}
+        a["angle"] = float(raw.get("angle", 0.0)) % 360.0
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in a.values()) or a["w"] <= 0 or a["h"] <= 0:
+        return None
+    return {k: round(v, 3) for k, v in a.items()}
+
+
+def area_scaled(area, scale):
+    """
+    The area in the pixels of a picture scale times the mask's size, counted as
+    the code counts them (a pixel's middle at its whole number; the map counts
+    from its corner).
+    """
+    if not area:
+        return None
+    return dict(area, cx=area["cx"] * scale - 0.5, cy=area["cy"] * scale - 0.5, w=area["w"] * scale, h=area["h"] * scale)
+
+
+def area_outside(area, x, y):
+    """
+    How far each point (x, y, arrays or numbers, the area's pixels) lies outside
+    the area: below 0 inside (minus the distance to the nearest edge), above 0
+    outside (the distance past the edge, at least). No area: everywhere inside.
+    """
+    import numpy as np
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if not area:
+        return np.full(np.broadcast(x, y).shape, -np.inf)
+    a = math.radians(area["angle"])
+    c, s = math.cos(a), math.sin(a)
+    dx, dy = x - area["cx"], y - area["cy"]
+    u, v = dx * c + dy * s, -dx * s + dy * c
+    return np.maximum(np.abs(u) - area["w"] / 2, np.abs(v) - area["h"] / 2)
+
+
+def in_area(area, x, y):
+    """Whether each point (x, y) lies inside the area (always, with none)."""
+    return area_outside(area, x, y) <= 0
+
+
+def area_status(area, x, y, reach):
+    """
+    Whether a street with these centreline points, whose lines reach this far
+    from them, lies all "in" the area, all "out" of it, or across its edge
+    ("edge").
+    """
+    if not area:
+        return "in"
+    d = area_outside(area, x, y)
+    if (d <= -reach).all():
+        return "in"
+    if (d > reach).all():
+        return "out"
+    return "edge"
+
