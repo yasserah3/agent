@@ -904,6 +904,16 @@ async function generate(keep = false){
   const gid = window.lastGeneration && window.lastGeneration();
   if(!gid){ note('Generate the texture first (Generate tab), then come back and press Generate 3D scene.', true); return; }
   if(!renderer && !init()) return;
+  // a big map's whole model: say what it costs before building it (app.js modelCost)
+  const cost = window.modelCost && window.modelCost();
+  if(cost && cost.big && !(keep && world)){
+    const km = `${cost.km[0].toFixed(1)} × ${cost.km[1].toFixed(1)} km`;
+    if(!confirm(`This map is ${km}. Its 3D model takes ${cost.text} to build and about ${Math.max(1, Math.round(cost.gb))} GB `
+      + 'of memory, and the view then holds all of it. Build it now?')){
+      note(`Not built: the ${km} map's 3D model takes ${cost.text}. A smaller map, or a part of it, builds quickly.`);
+      return;
+    }
+  }
   busy = true; $('#btnScene3d').disabled = true; $('#btnScene3dUpdate').disabled = true;
   stopPhoto();
   note(keep ? 'Updating the scene with the current materials and settings…' : 'Building the 3D model: streets, sidewalks, kerbs, blocks and objects…');

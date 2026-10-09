@@ -633,6 +633,57 @@ thousands of street lamps. Mesh detail *Optimised* (Generate tab, 3D model)
 keeps far fewer rows along straight streets; Bake light *Whole place* covers it
 at about 1.8 m a pixel, so bake *What you see* close to where you look.
 
+### Cities of 10 km and more
+
+Measured on a 12 × 9 km city (a 2000 × 1500 px mask at 6 m a pixel: 1,555
+blocks, about 690 km of streets, 30 km² of road), default settings, a 4-core
+machine:
+
+| | Before | Now |
+|---|---|---|
+| Decals (4 layers, 187,272 decals) | about a day (3 km: 28 min) | 36 s to place, 91 s with painting them |
+| Generate texture | 48 s (31 s of markings) | 26 s (9 s of markings) |
+| 2D map, one zoom step, island outlines shown | 2.2 s (up to 3.9 s) | 0.06 to 0.08 s |
+| 2D map, one zoom step, Lanes tool on | 0.5 s (up to 4.8 s) | 0.03 s, as with nothing drawn over the texture |
+| Top view after Generate texture | 22 min of 3D model, every time | only when you click it |
+| Generate texture, as the page runs it (with the decals) | did not finish (the decals alone: about a day) | 77 s |
+
+- **Decals** were each checked against every decal laid before them: fine for
+  a district, hopeless for a city. They are now kept in a grid of cells, and a
+  new one is checked only against those in the cells it could reach (as far
+  as the largest decal reaches). Each decal picture is also sized once per
+  size, not again for every decal. The placements and the decals layer are
+  exactly the same as before, decal for decal and pixel for pixel.
+- **Dashes too small to see**: at 6 m a pixel a 9 m dash cycle is 1.5 pixels,
+  so the dashes run together into a line, yet each of 168,000 dashes was drawn
+  on its own. When a cycle is under 2 pixels, or its gaps under 1 pixel, the
+  line is drawn whole, as strong as its dashes show on average (their soft
+  ends fill most of each gap). The texture differs by at most 3 colour levels;
+  where dashes show (a cycle of 2 pixels or more), nothing changes, pixel for
+  pixel. Long lines are drawn in pieces of 24 pixels instead of one dash cycle
+  (the same pixels, fewer steps).
+- **The 2D map's overlays** (island outlines and numbers, the Lanes tool's
+  lines and labels) are drawn on a canvas the size of the view, between the
+  texture and the handles: only what is in view, again after each move or
+  zoom, crisp at any zoom, and numbers and labels too small to read are left
+  out. As SVG, the browser drew all 2,600 to 3,000 shapes again at every zoom
+  step. Clicking an island (Pick) or a street (Lanes tool) finds it from its
+  outline or line; the handles (bridges, the markings area, the street being
+  set) are as before.
+- **Top view**: it is the whole 3D model drawn from above, and on a city that
+  model takes 20 minutes or more. When the estimate (about 45 s for every km² of
+  road, from the measurements above) is over a minute, it is no longer built by
+  itself after Generate texture or a change: its layer button says *click to
+  build* with the time, and a click builds it. Smaller maps work as before.
+- **Generate 3D scene** on such a map first asks, with the time and memory
+  it will take (23 min and 11 GB on the city above).
+
+What stays slow on a city is the 3D model of the whole of it at once (23 min,
+10.6 GB, 10 million triangles; it grows with the area, about 12.5 s a km² on
+this map). The next step builds it in patches of 1 km × 1 km, in parallel,
+nearest the camera first, each under 1 GB, and the 3D view loads the patches
+around you.
+
 ## Time so far and time left, in the console
 
 Every long job has a line in the console that updates about once a second:
@@ -1011,7 +1062,9 @@ made of, before you press Generate texture:
   24 cm per pixel on a 1 km place): streets, sidewalks, kerbs, blocks,
   islands, markings and objects. It shows by itself when ready, and the
   *Top view* layer button switches between it and the texture. Clicking a
-  spot on it inspects the same spot of the texture.
+  spot on it inspects the same spot of the texture. On a big map (its 3D
+  model over about a minute) it is built only when you click its layer
+  button, which says how long it takes (see Cities of 10 km and more).
 - **The 3D tab** uses the same choices: *Update view* rebuilds the scene with
   them (see 3D tab).
 - Painted dashes are painted on the scanned asphalt too, smoother and

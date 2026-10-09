@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.09-big1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -373,6 +373,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
     const apply = () => {
       stage.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
       if(s !== zoomWas){ zoomWas = s; root.dispatchEvent(new Event('vpzoom')); }   // for handles kept at screen size
+      root.dispatchEvent(new Event('vpview'));                                      // for what is drawn at screen size
       // smooth scaling when zoomed in; hard pixel squares only at extreme zoom, for inspecting pixels
       stage.classList.toggle('pixelated', s > 8);
       const pct = Math.round(s*100);
@@ -434,7 +435,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
     $('[data-fit]', root).addEventListener('click', fit);
     $('[data-one]', root).addEventListener('click', one);
     addEventListener('resize', fit);
-    return { canvas, show, fit, wasDrag: () => moved };
+    return { canvas, show, fit, wasDrag: () => moved, view: () => ({ s, tx, ty }) };
   }
   const trainVp = makeViewport($('#trainVp'));
   const genVp = makeViewport($('#genVp'));
@@ -921,7 +922,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
       await showLayer('result');
       renderLayerThumbs();
       renderInfo();
-      buildTopView(res.id);
+      refreshTopView(res.id);
     }catch(e){ log(e.message, 'bad'); $('#genNote').textContent = e.message; }
     status('Ready.'); $('#btnGenerate').disabled = false; renderMemory();
   });
@@ -932,6 +933,34 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
   // one at a time: asked again while one is being built (new island materials, say),
   // it is built once more when that one is done
   // stay: an update of the same texture (its lanes laid again): the layer on screen stays
+  // A big map's 3D model takes long to build, and all of its memory: measured on a dense 12 x 9 km
+  // city, about 45 s and 0.35 GB for every km² of road (23 min, 10.6 GB). Past BIG_MODEL_S its Top
+  // view is built only when asked for (its layer button), never by itself after Generate texture or
+  // a change, so the whole city is not being built while you work in 2D; Generate 3D scene asks first.
+  const BIG_MODEL_S = 60;
+  function modelCost(){
+    const m = S.gen.mask;
+    if(!m) return null;
+    const mpp = mppMask(), roadPx = m.road_px || m.width * m.height * 0.28;
+    const roadKm2 = roadPx * mpp * mpp / 1e6, s = 45 * roadKm2;
+    return { s, big: s > BIG_MODEL_S, km: [m.width * mpp / 1000, m.height * mpp / 1000], roadKm2,
+             gb: 0.5 + 0.35 * roadKm2,
+             text: s < 90 ? `about ${Math.max(5, Math.round(s / 5) * 5)} s` : `about ${Math.round(s / 60)} min` };
+  }
+  window.modelCost = modelCost;
+  const kmText = c => `${c.km[0].toFixed(1)} × ${c.km[1].toFixed(1)} km`;
+  // after a new texture or a change: built again (small maps), else only marked to be built when asked
+  function refreshTopView(gid, stay = false){
+    const c = modelCost();
+    if(!c || !c.big){ buildTopView(gid, stay); return; }
+    const had = S.gen.top && S.gen.top.gid === gid;
+    if(S.gen.topStale === gid) return;                                   // said so already
+    S.gen.topStale = gid;
+    $('#lp-top').innerHTML = `<div class="ph">${had ? 'out of date:<br>click to build again' : 'click to build'}<br>(${c.text})</div>`;
+    log(had ? `Top view out of date: click its layer to build it again (${c.text}).`
+      : `Top view not built by itself: this map is ${kmText(c)}, and its 3D model takes ${c.text} and about `
+        + `${Math.max(1, Math.round(c.gb))} GB of memory. Click the Top view layer to build it.`);
+  }
   async function buildTopView(gid, stay = false){
     if(S.gen.topBusy){ S.gen.topAgain = gid; S.gen.topStay = stay && S.gen.topStay !== false; return; }
     S.gen.topBusy = true;
@@ -1098,7 +1127,16 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
   async function showLayer(name, keep){
     const res = S.gen.result;
     if(!res) return;
-    if(name === 'top' && !(S.gen.top && S.gen.top.gid === res.id)) return;
+    if(name === 'top' && (!(S.gen.top && S.gen.top.gid === res.id) || S.gen.topStale === res.id)){
+      // not built (a big map) or out of date: built now that it is asked for
+      if(S.gen.topStale === res.id && !S.gen.topBusy){
+        const c = modelCost();
+        S.gen.topStale = null;
+        log(`Top view: building the 3D model of the whole map (${kmText(c)}): ${c.text}.`);
+        buildTopView(res.id);
+      }
+      if(!(S.gen.top && S.gen.top.gid === res.id)) return;
+    }
     const it = S.gen.islandTex;
     if((name === 'islands' || name === 'full') && !it) return;
     if(name === 'decals' && !S.gen.decals) return;
@@ -1304,12 +1342,66 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
     return [[-1,-1],[1,-1],[1,1],[-1,1]].map(([i, j]) => [b.cx + ux*L*i + vx*W*j, b.cy + uy*L*i + vy*W*j]);
   }
 
+  // The island outlines and numbers and the lanes' lines and labels: thousands of shapes on a city
+  // (1,500 islands, 1,000 streets), drawn on a canvas the size of the view, between the texture and
+  // the handles: only what is in view, again after each move or zoom (a frame or two), crisp at any
+  // zoom. As SVG the browser drew every one of them again at each zoom step: 2 s a step on a city.
+  const ovl = document.createElement('canvas');
+  ovl.className = 'vp-overlay';
+  $('#genVp .stage').insertBefore(ovl, layer);
+  let ovlFrame = 0;
+  const scheduleOverlay = () => { if(!ovlFrame) ovlFrame = requestAnimationFrame(() => { ovlFrame = 0; drawOverlay(); }); };
+  $('#genVp').addEventListener('vpview', scheduleOverlay);
+  new ResizeObserver(scheduleOverlay).observe($('#genVp'));             // resized, or shown again (its tab)
+  function drawOverlay(){
+    const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0)) || (LANES.on && LANES.streets));
+    ovl.hidden = !want;
+    if(!want) return;
+    const root = $('#genVp'), r = root.getBoundingClientRect(), { s, tx, ty } = genVp.view();
+    const dpr = window.devicePixelRatio || 1, W = Math.max(1, Math.round(r.width * dpr)), H = Math.max(1, Math.round(r.height * dpr));
+    if(ovl.width !== W || ovl.height !== H){ ovl.width = W; ovl.height = H; }
+    // the stage is moved and scaled (tx, ty, s): the overlay undoes it, so it lies on the view
+    ovl.style.width = r.width + 'px'; ovl.style.height = r.height + 'px';
+    ovl.style.transform = `translate(${-tx / s}px, ${-ty / s}px) scale(${1 / s})`;
+    const ctx = ovl.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    // mask pixels to the overlay's: x * k + ox; what of the mask is in view; the handle size the
+    // SVG drawing uses (a share of the texture's width) as it shows on screen
+    const f = shown(), k = dpr * s * f, ox = dpr * tx, oy = dpr * ty;
+    const v = { k, ox, oy, x0: -ox / k, y0: -oy / k, x1: (W - ox) / k, y1: (H - oy) / k, dpr,
+                hr: Math.max(4, genVp.canvas.width / 260) * dpr * s, minFont: 7 * dpr };
+    drawIslandsOn(ctx, v);
+    drawLanesOn(ctx, v);
+  }
+  // a line (mask pixels) as a path on the overlay, its points closer than half a pixel there left out
+  function tracePath(ctx, v, pts, close){
+    let lx = Infinity, ly = Infinity;
+    pts.forEach((q, i) => {
+      const x = q[0] * v.k + v.ox, y = q[1] * v.k + v.oy;
+      if(i === 0) ctx.moveTo(x, y);
+      else if(Math.abs(x - lx) + Math.abs(y - ly) >= 0.5 || i === pts.length - 1) ctx.lineTo(x, y);
+      else return;
+      lx = x; ly = y;
+    });
+    if(close) ctx.closePath();
+  }
+  const inView = (v, b, pad = 0) => !(b[2] + pad < v.x0 || b[0] - pad > v.x1 || b[3] + pad < v.y0 || b[1] - pad > v.y1);
+  function overlayLabels(ctx, labels, outline){
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+    labels.forEach(([x, y, size, text, fill]) => {
+      ctx.font = `700 ${size}px system-ui, sans-serif`;
+      ctx.lineWidth = size * outline; ctx.strokeStyle = 'rgba(0,0,0,.8)'; ctx.strokeText(text, x, y);
+      ctx.fillStyle = fill || '#fff'; ctx.fillText(text, x, y);
+    });
+  }
+
   function drawBridges(){
     const f = shown();
     layer.setAttribute('width', genVp.canvas.width); layer.setAttribute('height', genVp.canvas.height);
     layer.innerHTML = '';
+    drawOverlay();
     if(!S.gen.mask) return;
-    drawIslands(f);
     drawLanes(f);
     drawMarea(f, Math.max(4, genVp.canvas.width / 260));
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
@@ -1627,37 +1719,35 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
     }
     renderSlots(); drawBridges();
   }
-  function drawIslands(f){
+  // the islands' outlines (each in its slot's colour) and numbers, on the overlay (drawOverlay)
+  function drawIslandsOn(ctx, v){
     const d = ISLS.data;
     if(!d || !(ISLS.show || ISLS.pick >= 0)) return;
-    const { of } = slotIslands();
-    const g = el('g', {}, layer), hr = Math.max(4, genVp.canvas.width / 260);
-    const labels = el('g', {}, layer);
-    const scaleF = shown();
-    d.islands.forEach(isl => {
-      const s = of.has(isl.id) ? of.get(isl.id) : -1;
-      const dpath = isl.rings.map(r => 'M' + r.map(q => `${(q[0]*scaleF).toFixed(1)},${(q[1]*scaleF).toFixed(1)}`).join('L') + 'Z').join('');
-      const mine = ISLS.pick >= 0 && s === ISLS.pick;
-      const p = el('path', { d: dpath, 'fill-rule': 'evenodd',
-        fill: s >= 0 ? `rgba(${slotColour(s)},${mine ? .62 : .42})` : (ISLS.pick >= 0 ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.03)'),
-        stroke: s >= 0 ? `rgb(${slotColour(s)})` : 'rgba(255,190,60,.9)', 'stroke-width': Math.max(1, hr * (mine ? 0.45 : 0.25)),
-        class: 'isl' + (ISLS.pick >= 0 ? ' pickable' : '') }, g);
-      if(ISLS.pick >= 0) p.addEventListener('click', e => {
-        if(genVp.wasDrag && genVp.wasDrag()) return;
-        e.stopPropagation();
-        const slot = ISLS.pick, had = s === slot;
-        assign([isl.id], had ? -1 : slot);
-        log(had ? `Island ${isl.id} taken out of slot ${slot + 1}.` : `Island ${isl.id} (${Math.round(isl.area_m2).toLocaleString()} m²) into slot ${slot + 1}: ${slotMaterial(slot).name}.`);
-        ISLS.changed();
-      });
-      // its number where it is widest, sized to fit
-      const r = isl.r_m / mppMask() * scaleF;
-      const fs = Math.max(hr * 1.1, Math.min(hr * 3.2, r * 0.9));
-      if(r > hr * 0.5){
-        const tx = el('text', { x: isl.pt[0] * scaleF, y: isl.pt[1] * scaleF, 'font-size': fs, 'stroke-width': fs * 0.18, class: 'isl-id' }, labels);
-        tx.textContent = isl.id;
-      }
-    });
+    const { of } = slotIslands(), labels = [], mpp = mppMask();
+    for(const isl of d.islands){
+      if(!inView(v, isl.bbox)) continue;
+      const s = of.has(isl.id) ? of.get(isl.id) : -1, mine = ISLS.pick >= 0 && s === ISLS.pick;
+      ctx.beginPath();
+      isl.rings.forEach(r => tracePath(ctx, v, r, true));
+      ctx.fillStyle = s >= 0 ? `rgba(${slotColour(s)},${mine ? .62 : .42})` : (ISLS.pick >= 0 ? 'rgba(255,255,255,.07)' : 'rgba(255,255,255,.03)');
+      ctx.fill('evenodd');
+      ctx.strokeStyle = s >= 0 ? `rgb(${slotColour(s)})` : 'rgba(255,190,60,.9)';
+      ctx.lineWidth = Math.max(v.dpr, v.hr * (mine ? 0.45 : 0.25));
+      ctx.stroke();
+      // its number where it is widest, sized to fit; none too small to read
+      const r = isl.r_m / mpp * v.k, fs = Math.max(v.hr * 1.1, Math.min(v.hr * 3.2, r * 0.9));
+      if(r > v.hr * 0.5 && fs >= v.minFont) labels.push([isl.pt[0] * v.k + v.ox, isl.pt[1] * v.k + v.oy, fs, String(isl.id)]);
+    }
+    overlayLabels(ctx, labels, 0.18);
+  }
+  // Pick: a click on an island puts it in the slot being picked (or takes it out)
+  function pickIsland(id){
+    const isl = ISLS.data.islands.find(q => q.id === id);
+    if(!isl) return;
+    const { of } = slotIslands(), s = of.has(id) ? of.get(id) : -1, slot = ISLS.pick, had = s === slot;
+    assign([id], had ? -1 : slot);
+    log(had ? `Island ${id} taken out of slot ${slot + 1}.` : `Island ${id} (${Math.round(isl.area_m2).toLocaleString()} m²) into slot ${slot + 1}: ${slotMaterial(slot).name}.`);
+    ISLS.changed();
   }
   // ------------------------------------------------ lanes (app/lanes.py: the same equation)
   // Every street's lanes are split evenly between its two sides, as many as its width
@@ -1763,7 +1853,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
             + ` in ${r.seconds.toFixed(1)} s: only their lines, the rest of the texture as it was.`, 'ok');
           if(['result', 'markings', 'full'].includes(S.gen.layer)) await showLayer(S.gen.layer, true);
           renderLayerThumbs();
-          if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) buildTopView(res.id, true);
+          if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) refreshTopView(res.id, true);
         }
       }
     }catch(e){
@@ -1843,53 +1933,108 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
       list.appendChild(row);
     });
   }
+  // the street being set: its two sides, lines and island, as SVG over the overlay (the other streets'
+  // lines and labels are on the overlay: drawLanesOn)
   function drawLanes(f){
     const st = LANES.streets;
-    if(!st || !LANES.on) return;
+    if(!st || !LANES.on || LANES.sel < 0 || !st[LANES.sel]) return;
     const of = laneMatch(), g = el('g', {}, layer), top = el('g', {}, layer);
     const pts = l => l.map(q => `${(q[0] * f).toFixed(1)},${(q[1] * f).toFixed(1)}`).join(' ');
     const hr = Math.max(4, genVp.canvas.width / 260), m2px = f / LANES.mpp;   // display pixels per metre
+    const s = st[LANES.sel];
+    if(s.line.length < 2) return;
+    const { L } = streetLayout(LANES.sel, of);
+    const fs = Math.max(hr * 1.2, Math.min(hr * 8, s.width_m * m2px * 0.42));       // a label that fits the road
+    // its two sides, in two colours, each as wide as its lanes (split at the island, or at the
+    // line between the sides), and its lines and island as they will be laid
+    const half = s.width_m / 2 / LANES.mpp, [a, b] = L.sides;
+    const split = (L.island ? (L.island[0] + L.island[1]) / 2 : (a + b ? a * L.lane_m - s.width_m / 2 : 0)) / LANES.mpp;
+    const bands = [[-half, split, 'rgba(70,140,255,.40)', '1'], [split, half, 'rgba(255,150,60,.40)', '2']];
+    bands.forEach(([d0, d1, c, t]) => {
+      if(d1 - d0 < 1e-6) return;
+      el('polygon', { points: pts(offsetLine(s.line, d0).concat(offsetLine(s.line, d1).reverse())), fill: c, stroke: 'none' }, g);
+      const p = midOf(offsetLine(s.line, (d0 + d1) / 2));
+      const tx = el('text', { x: p[0] * f, y: p[1] * f, 'font-size': Math.min(fs * 1.4, (d1 - d0) * f * 0.8 + hr),
+                              'stroke-width': fs * 0.2, class: 'lane-lbl' }, top);
+      tx.textContent = t;
+    });
+    if(L.island) el('polygon', { points: pts(offsetLine(s.line, L.island[0] / LANES.mpp).concat(offsetLine(s.line, L.island[1] / LANES.mpp).reverse())),
+                                fill: 'rgba(200,196,186,.95)', stroke: 'rgba(90,88,84,.9)', 'stroke-width': Math.max(1, 0.1 * m2px) }, g);
+    L.lines.forEach(([x, kind]) => el('polyline', { points: pts(offsetLine(s.line, x / LANES.mpp)), fill: 'none',
+      stroke: '#fff', 'stroke-width': Math.max(1, 0.3 * m2px), 'stroke-dasharray': kind === 'dash' ? `${3 * m2px} ${6 * m2px}` : 'none' }, g));
+  }
+  // every street's centre line and what it has (2|2, yellow when set in the tool), on the overlay
+  function drawLanesOn(ctx, v){
+    const st = LANES.streets;
+    if(!st || !LANES.on) return;
+    const of = laneMatch(), labels = [], m2px = v.k / LANES.mpp;          // overlay pixels per metre
+    ctx.lineCap = 'butt';
     st.forEach((s, i) => {
       if(s.line.length < 2) return;
+      const b = s.bbox || (s.bbox = lineBox(s.line)), pad = s.width_m / LANES.mpp;
+      if(!inView(v, b, pad)) return;
       const { k, L } = streetLayout(i, of), sel = i === LANES.sel;
-      const fs = Math.max(hr * 1.2, Math.min(hr * 8, s.width_m * m2px * 0.42));     // a label that fits the road
-      if(sel){
-        // its two sides, in two colours, each as wide as its lanes (split at the island, or at the
-        // line between the sides), and its lines and island as they will be laid
-        const half = s.width_m / 2 / LANES.mpp, [a, b] = L.sides;
-        const split = (L.island ? (L.island[0] + L.island[1]) / 2 : (a + b ? a * L.lane_m - s.width_m / 2 : 0)) / LANES.mpp;
-        const bands = [[-half, split, 'rgba(70,140,255,.40)', '1'], [split, half, 'rgba(255,150,60,.40)', '2']];
-        bands.forEach(([d0, d1, c, t]) => {
-          if(d1 - d0 < 1e-6) return;
-          el('polygon', { points: pts(offsetLine(s.line, d0).concat(offsetLine(s.line, d1).reverse())), fill: c, stroke: 'none' }, g);
-          const p = midOf(offsetLine(s.line, (d0 + d1) / 2));
-          const tx = el('text', { x: p[0] * f, y: p[1] * f, 'font-size': Math.min(fs * 1.4, (d1 - d0) * f * 0.8 + hr),
-                                  'stroke-width': fs * 0.2, class: 'lane-lbl' }, top);
-          tx.textContent = t;
-        });
-        if(L.island) el('polygon', { points: pts(offsetLine(s.line, L.island[0] / LANES.mpp).concat(offsetLine(s.line, L.island[1] / LANES.mpp).reverse())),
-                                    fill: 'rgba(200,196,186,.95)', stroke: 'rgba(90,88,84,.9)', 'stroke-width': Math.max(1, 0.1 * m2px) }, g);
-        L.lines.forEach(([x, kind]) => el('polyline', { points: pts(offsetLine(s.line, x / LANES.mpp)), fill: 'none',
-          stroke: '#fff', 'stroke-width': Math.max(1, 0.3 * m2px), 'stroke-dasharray': kind === 'dash' ? `${3 * m2px} ${6 * m2px}` : 'none' }, g));
-      }
-      el('polyline', { points: pts(s.line), fill: 'none', stroke: k != null ? 'rgba(255,200,80,.95)' : 'rgba(255,255,255,.55)',
-        'stroke-width': Math.max(1, hr * (sel ? 0.18 : 0.3)), 'stroke-dasharray': sel ? 'none' : `${hr} ${hr * 0.7}` }, g);
-      // what it has, on it
-      const p = midOf(s.line);
-      if(!sel){
-        const tx = el('text', { x: p[0] * f, y: p[1] * f, 'font-size': fs, 'stroke-width': fs * 0.2, class: 'lane-lbl',
-          fill: k != null ? '#ffd27a' : '#fff' }, top);
-        tx.textContent = L.lanes < 2 ? '–' : `${L.sides[0]}|${L.sides[1]}`;
-      }
-      const hit = el('polyline', { points: pts(s.line), fill: 'none', stroke: 'rgba(0,0,0,0)',
-        'stroke-width': Math.max(hr * 2, s.width_m * m2px), class: 'lane-hit' }, top);
-      hit.addEventListener('click', e => {
-        if(genVp.wasDrag && genVp.wasDrag()) return;
-        e.stopPropagation();
-        if(LANES.sel >= 0 && LANES.sel !== i) paintLanes();                 // the street left: its lanes laid
-        LANES.sel = i; renderLanes(); drawBridges();
-      });
+      ctx.beginPath(); tracePath(ctx, v, s.line, false);
+      ctx.strokeStyle = k != null ? 'rgba(255,200,80,.95)' : 'rgba(255,255,255,.55)';
+      ctx.lineWidth = Math.max(v.dpr, v.hr * (sel ? 0.18 : 0.3));
+      ctx.setLineDash(sel ? [] : [v.hr, v.hr * 0.7]);
+      ctx.stroke();
+      if(sel) return;
+      const fs = Math.max(v.hr * 1.2, Math.min(v.hr * 8, s.width_m * m2px * 0.42));
+      if(fs < v.minFont) return;
+      const p = s.mid || (s.mid = midOf(s.line));
+      labels.push([p[0] * v.k + v.ox, p[1] * v.k + v.oy, fs, L.lanes < 2 ? '–' : `${L.sides[0]}|${L.sides[1]}`, k != null ? '#ffd27a' : '#fff']);
     });
+    ctx.setLineDash([]);
+    overlayLabels(ctx, labels, 0.2);
+  }
+  function lineBox(line){
+    const b = [Infinity, Infinity, -Infinity, -Infinity];
+    line.forEach(q => { b[0] = Math.min(b[0], q[0]); b[1] = Math.min(b[1], q[1]); b[2] = Math.max(b[2], q[0]); b[3] = Math.max(b[3], q[1]); });
+    return b;
+  }
+  // A click on the map: in Pick, the island under it; in the Lanes tool, the street under it (found by
+  // their outlines and lines, as the overlay draws them, not by a shape each to click on). Before the
+  // map's own click (the review), which then does not see it; a handle's own clicks are left alone
+  const onHandle = e => e.target.closest && e.target.closest('#bridgeLayer .grab, #bridgeLayer .corner, #bridgeLayer .spin, #bridgeLayer .pt');
+  $('#genVp').addEventListener('click', e => {
+    if(!S.gen.mask || (genVp.wasDrag && genVp.wasDrag()) || e.target.closest('.vp-tools') || onHandle(e)) return;
+    const [x, y] = toMask(e);
+    if(ISLS.pick >= 0 && ISLS.data){
+      const id = islandAt(x, y);
+      if(id){ e.stopPropagation(); pickIsland(id); return; }
+    }
+    if(LANES.on && LANES.streets){
+      const i = streetAt(x, y);
+      if(i >= 0){
+        e.stopPropagation();
+        if(LANES.sel >= 0 && LANES.sel !== i) paintLanes();                     // the street left: its lanes laid
+        LANES.sel = i; renderLanes(); drawBridges();
+      }
+    }
+  }, true);
+  // and a hand over what a click would pick
+  $('#genVp').addEventListener('pointermove', e => {
+    const stage = $('#genVp .stage');
+    let hit = false;
+    if(S.gen.mask && !e.buttons && !onHandle(e) && ((ISLS.pick >= 0 && ISLS.data) || (LANES.on && LANES.streets))){
+      const [x, y] = toMask(e);
+      hit = (ISLS.pick >= 0 && ISLS.data && islandAt(x, y) > 0) || (LANES.on && LANES.streets && streetAt(x, y) >= 0);
+    }
+    stage.style.cursor = hit ? 'pointer' : '';
+  });
+  // the street a point (mask pixels) is on: the nearest whose road (or a finger's width) it lies on
+  function streetAt(x, y){
+    const st = LANES.streets || [], f = shown(), hr = Math.max(4, genVp.canvas.width / 260);
+    let best = -1, bd = Infinity;
+    st.forEach((s, i) => {
+      if(s.line.length < 2) return;
+      const tol = Math.max(hr * 2 / f, s.width_m / LANES.mpp) / 2, b = s.bbox || (s.bbox = lineBox(s.line));
+      if(x < b[0] - tol || x > b[2] + tol || y < b[1] - tol || y > b[3] + tol) return;
+      const d = distToLine([x, y], s.line);
+      if(d <= tol && d < bd){ bd = d; best = i; }
+    });
+    return best;
   }
   async function loadLanes(maskId){
     LANES.mask = maskId; LANES.picks = []; LANES.streets = null; LANES.sel = -1; LANES.on = false;
@@ -2052,7 +2197,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
         if(['result', 'markings', 'full', 'decals'].includes(S.gen.layer)) await showLayer(S.gen.layer, true);
         renderLayerThumbs();
         if(S.gen.decals) try{ drawInto($('#lp-decals'), await loadImage(API + r.urls.decals)); }catch(_){}
-        if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) buildTopView(res.id, true);
+        if((S.gen.top && S.gen.top.gid === res.id) || S.gen.topBusy) refreshTopView(res.id, true);
       }
     }catch(e){
       log('Markings area not laid on the texture: ' + e.message, 'bad');
@@ -2123,7 +2268,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
       try{ drawInto($('#lp-islands'), await loadImage(API + res.urls.islands)); drawInto($('#lp-full'), await loadImage(API + res.urls.full)); }catch(_){}
       await showLayer(pt && ['islands', 'full'].includes(S.gen.layer) ? S.gen.layer : 'full', !!pt && ['islands', 'full'].includes(S.gen.layer));
       // the top view shows the 3D model's islands too: brought up to date
-      if(!S.gen.top || S.gen.top.gid !== gid || S.gen.top.key !== JSON.stringify(exportSettings())) buildTopView(gid);
+      if(!S.gen.top || S.gen.top.gid !== gid || S.gen.top.key !== JSON.stringify(exportSettings())) refreshTopView(gid);
     }catch(e){ log('Islands texture failed: ' + e.message, 'bad'); }
     status('Ready.'); btn.disabled = false; renderSlots();
   });
@@ -2308,7 +2453,7 @@ const UI_VERSION = '2026.10.09-area1';   // must match VERSION in server.py
       try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
       if(['result', 'decals', 'full'].includes(S.gen.layer)) await showLayer(S.gen.layer, !!pt);
       window.dispatchEvent(new Event('materials'));            // the 3D tab's scene is out of date
-      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) buildTopView(gid, !!pt);
+      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) refreshTopView(gid, !!pt);
     }catch(e){ log('Decals not laid: ' + e.message, 'bad'); }
     status('Ready.'); renderDecals();
   }

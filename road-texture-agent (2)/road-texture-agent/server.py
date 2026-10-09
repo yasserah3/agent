@@ -61,7 +61,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.09-area1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.09-big1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -220,6 +220,18 @@ TRAIN_PLAN = [("pairs", 8.0), ("libraries", 2.0)]
 PRIME_PLAN = [("material", 3.0), ("line", 2.0), ("noise", 2.0), ("trees", 1.0)]
 TILES_PLAN = [("tiles", 1.0)]
 JUNCTIONS_PLAN = [("junctions", 1.0)]
+
+
+def _write_json(path, obj):
+    """
+    A settings file the page saves while it may be reading it (lane choices, island slots,
+    placements...): written beside it and put in place whole, so a read never finds it half
+    written (an empty file, read at that moment, failed to load).
+    """
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(json.dumps(obj))
+    os.replace(tmp, path)
 
 
 def tracked(name, plan):
@@ -1355,7 +1367,7 @@ def save_scatter(payload: dict):
         raise HTTPException(400, "unknown mask")
     pl = _placement_list(payload.get("placements"))
     path = ARTIFACTS / f"scatter_{rec['id']}.json"
-    path.write_text(json.dumps(pl))
+    _write_json(path, pl)
     mem.add_artifact(f"scatter_{rec['id']}", "scatter", path, {"mask": rec["id"], "count": len(pl)})
     return {"ok": True, "count": len(pl)}
 
@@ -1412,7 +1424,7 @@ def save_bridges(payload: dict):
         raise HTTPException(400, "unknown mask")
     bridges = _bridge_list(payload.get("bridges"))
     path = ARTIFACTS / f"bridges_{rec['id']}.json"
-    path.write_text(json.dumps(bridges))
+    _write_json(path, bridges)
     mem.add_artifact(f"bridges_{rec['id']}", "bridges", path, {"mask": rec["id"], "count": len(bridges)})
     return {"ok": True, "count": len(bridges)}
 
@@ -1815,7 +1827,7 @@ def save_lanes(payload: dict):
     picks = LN.picks_list(payload.get("picks"))
     key = _lanes_key(rec)
     path = ARTIFACTS / f"{key}.json"
-    path.write_text(json.dumps(picks))
+    _write_json(path, picks)
     mem.add_artifact(key, "lane_picks", path, {"mask": rec["id"], "picks": len(picks)})
     return {"ok": True, "picks": len(picks)}
 
@@ -1846,7 +1858,7 @@ def save_markarea(payload: dict):
         raise HTTPException(400, "unknown mask")
     area = LN.area_check(payload.get("area"))
     path = ARTIFACTS / f"{_area_key(rec)}.json"
-    path.write_text(json.dumps({"area": area}))
+    _write_json(path, {"area": area})
     mem.add_artifact(_area_key(rec), "markings_area", path, {"mask": rec["id"], "area": area})
     return {"ok": True, "area": area}
 
@@ -1959,7 +1971,7 @@ def save_island_slots(payload: dict):
     slots = ISL.slot_list(payload.get("slots"))
     key = _slots_key(rec)
     path = ARTIFACTS / f"{key}.json"
-    path.write_text(json.dumps(slots))
+    _write_json(path, slots)
     mem.add_artifact(key, "island_slots", path, {"mask": rec["id"], "slots": len(slots)})
     return {"ok": True, "slots": len(slots)}
 
@@ -2125,7 +2137,7 @@ def delete_decal(did: str):
 def save_decal_layers(payload: dict):
     DECALS.mkdir(parents=True, exist_ok=True)
     layers = DC.layer_list(payload.get("layers"), {d["id"] for d in _decal_index()})
-    (DECALS / "layers.json").write_text(json.dumps(layers))
+    _write_json(DECALS / "layers.json", layers)
     return {"ok": True, "layers": len(layers)}
 
 

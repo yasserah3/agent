@@ -197,6 +197,32 @@ def _overlap(a, b, share=0.0):
     return A.intersection(B).area > share * min(A.area, B.area)
 
 
+class _Near:
+    """
+    Decals laid so far, by where they are: a grid of cells, so a new decal is
+    checked only against those that could reach it, not every one on the map
+    (a city asks for hundreds of thousands: checking each against all of them
+    took a day). far: the furthest any of them reaches from its middle (its
+    half diagonal, a crossing's width stretched as free() stretches it).
+    """
+    CELL = 32.0                                               # mask pixels
+
+    def __init__(self, mpp):
+        self.mpp, self.cells, self.far = mpp, {}, 0.0
+
+    def add(self, q):
+        c = self.CELL
+        self.cells.setdefault((int(q["x"] // c), int(q["y"] // c)), []).append(q)
+        self.far = max(self.far, math.hypot(q["w_m"] * 1.5, q["h_m"]) / self.mpp)
+
+    def near(self, x, y, reach):
+        """Every decal whose middle is within reach + far of (x, y), and maybe a few more."""
+        c, r = self.CELL, reach + self.far
+        for i in range(int((x - r) // c), int((x + r) // c) + 1):
+            for j in range(int((y - r) // c), int((y + r) // c) + 1):
+                yield from self.cells.get((i, j), ())
+
+
 def _count(weight, rng):
     """How many for a weight of 100 per one: 250 is two, and a third half the time."""
     w = max(0.0, weight) / 100.0
@@ -256,17 +282,21 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
     # edges), then the decals beside the kerbs at the edges (behind any crossing there), then
     # inside the junctions, then anywhere on the road; each keeps clear of those laid before it
     placed = {li: [] for li in range(len(layers))}
-    marks = []                                                # crossings and edge decals, every layer's
+    # by where they are: each layer's own, and the crossings and edge decals of every layer
+    near_mine = {li: _Near(mpp) for li in range(len(layers))}
+    near_marks = _Near(mpp)
 
-    def free(p, mine, gap, share, others):
+    def free(p, li, gap, share, others):
         c = _corners(p, mpp, gap)
         reach = math.hypot(p["w_m"], p["h_m"]) * gap / mpp
-        for q in list(mine) + (marks if others else []):
-            # a crossing counts as reaching from kerb to kerb: nothing squeezes in beside it
-            across = 1.5 if q["at"] == "intersection" and q not in mine else 1.0
-            if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < reach + math.hypot(q["w_m"] * across, q["h_m"]) / mpp \
-                    and _overlap(c, _corners(q, mpp, gap, across), share if q in mine else 0.0):
-                return False
+        for group in (near_mine[li], near_marks) if others else (near_mine[li],):
+            for q in group.near(p["x"], p["y"], reach):
+                mine = q["layer"] == li                       # one of its own layer's
+                # a crossing counts as reaching from kerb to kerb: nothing squeezes in beside it
+                across = 1.5 if q["at"] == "intersection" and not mine else 1.0
+                if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < reach + math.hypot(q["w_m"] * across, q["h_m"]) / mpp \
+                        and _overlap(c, _corners(q, mpp, gap, across), share if mine else 0.0):
+                    return False
         return True
 
     def make(li, cx, cy, ux, uy, w, h, at, gap=1.0, share=0.0, others=True):
@@ -279,11 +309,12 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
              "ux": round(ux / n, 5), "uy": round(uy / n, 5), "w_m": round(w, 3), "h_m": round(h, 3), "at": at}
         # two of a layer never on each other (a short street between two junctions: one crossing, not
         # two); share lets two crossings' corners meet at a junction's corner; gap keeps room between
-        if not free(p, placed[li], gap, share, others):
+        if not free(p, li, gap, share, others):
             return None
         placed[li].append(p)
+        near_mine[li].add(p)
         if at in ("intersection", "edge"):
-            marks.append(p)
+            near_marks.add(p)
         return p
 
     ctx = []
@@ -417,11 +448,20 @@ def changed(old, new):
     return [p for p in old if _key(p) not in kn] + [p for p in new if _key(p) not in ko]
 
 
-def _turned(p, img, mpp_out):
-    """A placed decal's picture, sized and turned as it lies (float RGBA 0-1)."""
+def _turned(p, img, mpp_out, sized=None):
+    """
+    A placed decal's picture, sized and turned as it lies (float RGBA 0-1).
+    sized: a dict that keeps each picture at each size, for the next decal of
+    that size (a layer's decals are all one size: sized once, not each time).
+    """
     w = max(1, int(round(p["w_m"] / mpp_out)))
     h = max(1, int(round(p["h_m"] / mpp_out)))
-    im = img.resize((w, h), Image.LANCZOS if w < img.width else Image.BICUBIC)
+    k = (p["decal"], w, h)
+    im = sized.get(k) if sized is not None else None
+    if im is None:
+        im = img.resize((w, h), Image.LANCZOS if w < img.width else Image.BICUBIC)
+        if sized is not None:
+            sized[k] = im
     # turned so its top (0, -1) faces (ux, uy): PIL turns anticlockwise as seen
     deg = math.degrees(math.atan2(-p["ux"], -p["uy"]))
     im = im.rotate(deg, resample=Image.BICUBIC, expand=True)
@@ -440,6 +480,7 @@ def paint(shape, placements, images, mpp_out, scale, coverage=None, window=None,
     H, W = shape
     wx0, wy0, wx1, wy1 = window if window is not None else (0, 0, W, H)
     acc = np.zeros((wy1 - wy0, wx1 - wx0, 4), np.float32)
+    sized = {}
     for p in placements:
         img = images.get(p["decal"])
         if img is None:
@@ -449,11 +490,11 @@ def paint(shape, placements, images, mpp_out, scale, coverage=None, window=None,
             if fx1 <= wx0 or fx0 >= wx1 or fy1 <= wy0 or fy0 >= wy1:
                 continue                                     # nowhere near this part
         if turned is None:
-            a = _turned(p, img, mpp_out)
+            a = _turned(p, img, mpp_out, sized)
         else:
             k = _key(p)
             if k not in turned:
-                turned[k] = _turned(p, img, mpp_out)
+                turned[k] = _turned(p, img, mpp_out, sized)
             a = turned[k]
         ih, iw = a.shape[:2]
         cx, cy = p["x"] * scale, p["y"] * scale

@@ -36,6 +36,12 @@ from app import progress as prog
 EDGE_METRES = 1.5
 ISLAND_RGB = (178, 175, 168)          # a highway island's concrete top, from above
 ISLAND_RIM_RGB = (112, 110, 106)      # and its kerb's face and shadow round it
+# a dashed line shows as one line when its gaps are narrower than a pixel, or its cycle
+# shorter than two (a pattern finer than two pixels cannot show in pixels): it is then drawn
+# whole, not dash by dash (a 9 m cycle at 6 m a pixel: 1.5 px, thousands of dashes per km)
+MERGE_GAP_PX = 1.0
+MERGE_CYCLE_PX = 2.0
+STROKE_PIECE_PX = 24.0                # a long line is drawn in pieces about this long
 
 
 def load_patches(npz_path, with_masks=False):
@@ -321,6 +327,7 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cycle_m, dash_share, width
     px = max(metres_per_pixel, 1e-6)
     cycle_px = cycle_m / px
     setback_px = setback_m / px
+    piece_px = max(cycle_px, STROKE_PIECE_PX)
     oy, ox = float(origin[0]), float(origin[1])
     solid = np.zeros((H, W), np.float32) if area else cover      # clipped to the area at the end
     placed = 0
@@ -375,7 +382,7 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cycle_m, dash_share, width
         for x_m, kind in lay["lines"]:
             off = x_m / px
             if kind == "solid":
-                _strokes(solid, along(off, setback_px, total - setback_px), half_w, strength, cycle_px)
+                _strokes(solid, along(off, setback_px, total - setback_px), half_w, strength, piece_px)
                 continue
             starts = setback_px + step * np.arange(cycles)
             keep = np.ones(cycles, bool)
@@ -384,6 +391,19 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cycle_m, dash_share, width
                 q = pts + nrm * off
                 mid = starts + dash_len / 2
                 keep = LN.in_area(area, np.interp(mid, dist, q[:, 1]) + ox, np.interp(mid, dist, q[:, 0]) + oy)
+            gap_px = step - dash_len
+            if gap_px < MERGE_GAP_PX or step < MERGE_CYCLE_PX:
+                # the dashes run together: the line is drawn whole (as a solid line, stopping
+                # at the area's edge), as strong as the dashes show on average along it. Each
+                # dash's soft ends reach a pixel into the gap (g: the gap their half widths
+                # past half a pixel do not already cover): two ends meeting fill all but g^2 / 4
+                # of it, apart they fill one pixel of it
+                g = max(0.0, gap_px - 2 * (half_w - 0.5))
+                filled = step - g * g / 4.0 if g < 2.0 else step - g + 1.0
+                _strokes(solid, along(off, setback_px, total - setback_px), half_w,
+                         strength * filled / step, piece_px)
+                placed += int(keep.sum())
+                continue
             for a, k in zip(starts, keep):
                 if k:
                     _stroke(cover, along(off, a, a + dash_len), half_w, strength)
@@ -392,8 +412,8 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cycle_m, dash_share, width
             x0, x1 = lay["island"]
             spine = along((x0 + x1) / 2 / px, setback_px, total - setback_px)
             hw_isl = (x1 - x0) / 2 / px
-            _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), cycle_px)
-            _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), cycle_px)
+            _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), piece_px)
+            _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), piece_px)
     if area and solid.any():
         np.maximum(cover, solid * _area_cover(area, (H, W), origin), out=cover)   # solid lines stop at the edge
     return cover, isl, isl_top, {"placed": placed, "widths": widths_used, "layouts": layouts, "streets": streets}
