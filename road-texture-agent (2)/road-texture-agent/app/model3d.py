@@ -553,43 +553,59 @@ def write_glb_scene(path, meshes, materials, images):
     return total
 
 
-def _subset_scene(meshes, materials, images, names):
-    """
-    The meshes named (glTF names) of a scene on their own, with only the
-    materials and pictures they use, renumbered: (meshes, materials, images)
-    for write_glb_scene.
-    """
+def _copy_material(m, src_images, dst_images, part=None):
+    """A material of one scene for another: its pictures put in dst_images (shared, not repeated), tagged with part."""
     import copy
-    mats, imgs, mat_of = [], [], {}
+    m = copy.deepcopy(m)
 
     def pic(i):
-        return _image_index(imgs, *images[i])
+        return _image_index(dst_images, *src_images[i])
+    pbr = m.get("pbrMetallicRoughness") or {}
+    for holder, key in ((pbr, "baseColorTexture"), (pbr, "metallicRoughnessTexture"), (m, "normalTexture"),
+                        (m, "occlusionTexture"), (m, "emissiveTexture")):
+        if key in holder:
+            holder[key]["index"] = pic(holder[key]["index"])
+    ex = m.get("extras") or {}
+    if "relief" in ex:
+        ex["relief"]["index"] = pic(ex["relief"]["index"])
+    if "pattern" in ex:
+        ex["pattern"] = pic(ex["pattern"])
+    for key in ("map", "normal", "orh"):
+        if key in (ex.get("mix") or {}):
+            ex["mix"][key] = pic(ex["mix"][key])
+    if part:
+        m["extras"] = dict(ex, part=part)
+    return m
 
-    def material(i):
-        if i not in mat_of:
-            m = copy.deepcopy(materials[i])
-            pbr = m.get("pbrMetallicRoughness") or {}
-            for holder, key in ((pbr, "baseColorTexture"), (pbr, "metallicRoughnessTexture"), (m, "normalTexture"),
-                                (m, "occlusionTexture"), (m, "emissiveTexture")):
-                if key in holder:
-                    holder[key]["index"] = pic(holder[key]["index"])
-            ex = m.get("extras") or {}
-            if "relief" in ex:
-                ex["relief"]["index"] = pic(ex["relief"]["index"])
-            if "pattern" in ex:
-                ex["pattern"] = pic(ex["pattern"])
-            for key in ("map", "normal", "orh"):
-                if key in (ex.get("mix") or {}):
-                    ex["mix"][key] = pic(ex["mix"][key])
-            mats.append(m)
-            mat_of[i] = len(mats) - 1
-        return mat_of[i]
 
-    out = []
-    for m in meshes:
-        if m["name"] in names:
-            out.append(dict(m, primitives=[dict(p, material=material(p["material"])) for p in m["primitives"]]))
-    return out, mats, imgs
+def _assemble(base, parts):
+    """
+    One scene for write_glb_scene, (meshes, materials, images): base's and each
+    part's, parts = [(name, (meshes, materials, images))]. A part's materials
+    carry its name (extras "part"), so a view can tell its objects from the
+    rest and put new ones in their place. A part's mesh with "into" ("front" or
+    "back") joins the base's mesh of its name (the road object), its primitives
+    first or last, instead of being one of its own.
+    """
+    meshes = [dict(m, primitives=list(m["primitives"])) for m in base[0]]
+    materials, images = list(base[1]), list(base[2])
+    for name, (ms, mats, imgs) in parts:
+        mat_of = {}
+
+        def mat(i):
+            if i not in mat_of:
+                materials.append(_copy_material(mats[i], imgs, images, name))
+                mat_of[i] = len(materials) - 1
+            return mat_of[i]
+        for m in ms:
+            prims = [dict(p, material=mat(p["material"])) for p in m["primitives"]]
+            into = m.get("into")
+            dst = next((d for d in meshes if d["name"] == m["name"]), None) if into else None
+            if dst is not None:
+                dst["primitives"] = prims + dst["primitives"] if into == "front" else dst["primitives"] + prims
+            else:
+                meshes.append({k: v for k, v in m.items() if k != "into"} | {"primitives": prims})
+    return meshes, materials, images
 
 
 def variation_factor(result_path, markings_path, coverage, mpp_out, strength=1.0, sigma_m=3.0):
@@ -707,7 +723,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
 
     painted = markings == "painted"
 
-    def road_prims():
+    def road_prims(images, materials):
         """
         The streets' and junctions' surfaces: their quads grouped into
         primitives by tile variant, each with its material. Painted markings:
@@ -850,7 +866,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
 
     images, materials = [], []
     # the streets' surfaces: here, unless painted markings decide them (lane_parts)
-    primitives, road_rep = ([], None) if painted else road_prims()
+    primitives, road_rep = ([], None) if painted else road_prims(images, materials)
 
     # tight groups of junctions, junctions at the border and any road nothing
     # else covered: the traced outline, 3 mm below the road, so strips on top
@@ -916,64 +932,80 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         regions = QM.block_polygons(mesh, (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale),
                                     output_scale, mpp_out * output_scale, min_area_m2=0.5)
         frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac)
-        if islands:
-            frames.set_islands(islands, output_scale)
-    prog.stage("sidewalk_meshes", "sidewalk paving")
-    sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, images, materials, meshes, surface, frames)
-    scatter_info = None
-    if scatter:
-        stand = (float(blocks.get("height_m", 0.10)) if blocks else
-                 float(sidewalk.get("height_m", 0.10)) if sidewalk else 0.0)
-        prog.stage("objects", "objects")
-        scatter_info = _object_meshes(mesh, scatter, metres_per_pixel, output_scale, mpp_out, W, H,
-                                      stand, images, materials, meshes)
-    blocks_info = None
-    if blocks:
-        mask_shape = (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale)
-        prog.stage("blocks", "blocks and islands")
-        blocks_info = _block_meshes(mesh, mask_shape, output_scale, mpp_out, W, H,
-                                    fac, tiles, tile_m, images, materials, meshes,
-                                    height_m=float(blocks.get("height_m", 0.10)),
-                                    with_sidewalks=bool(mesh.sw_quads),
-                                    cell_m=16.0 if optimise else 8.0, surface=surface, frames=frames)
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
-    feet = scatter_info.pop("_feet", None) if scatter_info else None
-    prog.stage("lamps", "street lamps")
-    lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
+    base = (meshes, materials, images)
 
-    decal_info = None
-    if decals and decals.get("placements"):
-        on_road = decals.get("mode") == "painted"
-        dprims = DC.mesh_prims(decals["placements"], decals["images"], materials, images, W, H, mpp_out, output_scale,
-                               DC.LIFT_PAINTED if on_road else DC.LIFT_SEPARATE,
-                               lambda data, mime: _image_index(images, data, mime), decals.get("names"))
-        if dprims:
-            if on_road:
-                meshes[0]["primitives"].extend(dprims)            # part of the road object
-            else:
-                meshes.append({"name": "Decals", "primitives": dprims})
-            decal_info = {"count": len(decals["placements"]), "mode": "painted" if on_road else "separate",
-                          "pictures": len(dprims)}
+    # The parts of the model that a change on its own can build again (rebuild): each
+    # makes its own meshes, materials and pictures, and the model is the base and
+    # them put together (_assemble), its materials tagged with the part's name
 
-    def lane_parts():
+    def paving_part(islands_now):
+        """Sidewalks and kerbs, blocks and islands: the island material slots decide their paving."""
+        imgs, mats, ms = [], [], []
+        if frames is not None:
+            frames.set_islands(islands_now, output_scale)
+        prog.stage("sidewalk_meshes", "sidewalk paving")
+        sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, imgs, mats, ms, surface, frames)
+        blocks_info = None
+        if blocks:
+            mask_shape = (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale)
+            prog.stage("blocks", "blocks and islands")
+            blocks_info = _block_meshes(mesh, mask_shape, output_scale, mpp_out, W, H,
+                                        fac, tiles, tile_m, imgs, mats, ms,
+                                        height_m=float(blocks.get("height_m", 0.10)),
+                                        with_sidewalks=bool(mesh.sw_quads),
+                                        cell_m=16.0 if optimise else 8.0, surface=surface, frames=frames)
+        return (ms, mats, imgs), {"sidewalk": sw_info, "blocks": blocks_info}
+
+    def objects_part(scatter_now):
+        """Your objects and plants, and the street lamps (they keep clear of the objects)."""
+        imgs, mats, ms = [], [], []
+        scatter_info = None
+        if scatter_now:
+            stand = (float(blocks.get("height_m", 0.10)) if blocks else
+                     float(sidewalk.get("height_m", 0.10)) if sidewalk else 0.0)
+            prog.stage("objects", "objects")
+            scatter_info = _object_meshes(mesh, scatter_now, metres_per_pixel, output_scale, mpp_out, W, H,
+                                          stand, imgs, mats, ms)
+        feet = scatter_info.pop("_feet", None) if scatter_info else None
+        prog.stage("lamps", "street lamps")
+        lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
+        return (ms, mats, imgs), {"scatter": scatter_info, "lamps": lamps}
+
+    def decals_part(decals_now):
+        """The decals: an object of their own (Decals), or painted: part of the road object, just above it."""
+        imgs, mats, ms = [], [], []
+        decal_info = None
+        if decals_now and decals_now.get("placements"):
+            on_road = decals_now.get("mode") == "painted"
+            dprims = DC.mesh_prims(decals_now["placements"], decals_now["images"], mats, imgs, W, H, mpp_out,
+                                   output_scale, DC.LIFT_PAINTED if on_road else DC.LIFT_SEPARATE,
+                                   lambda data, mime: _image_index(imgs, data, mime), decals_now.get("names"))
+            if dprims:
+                ms.append({"name": "Road", "primitives": dprims, "into": "back"} if on_road
+                          else {"name": "Decals", "primitives": dprims})
+                decal_info = {"count": len(decals_now["placements"]), "mode": "painted" if on_road else "separate",
+                              "pictures": len(dprims)}
+        return (ms, mats, imgs), {"decals": decal_info}
+
+    def lanes_part(_=None):
         """
-        The parts of the model the streets' lanes decide, built last so they can
-        be built again on their own (relane): with painted markings the
-        streets' surfaces (first in the road object), the highways' raised
+        The parts of the model the streets' lanes decide: with painted markings
+        the streets' surfaces (first in the road object), the highways' raised
         islands (Median islands) and the lines laid as strips (Markings).
-        Returns their report and the names of the objects they make.
         """
         prog.stage("lanes", "the streets' lanes: " + ("painted surfaces, " if painted else "") + "islands and lines")
+        imgs, mats, ms = [], [], []
         rr = road_rep
         if painted:
-            prims, rr = road_prims()
-            meshes[0]["primitives"][0:0] = prims
+            prims, rr = road_prims(imgs, mats)
+            ms.append({"name": "Road", "primitives": prims, "into": "front"})
         # dashes: their own mesh, a centimetre above the road so they never flicker into it
         dpos, dcol, didx = [], [], []
         painted_dashes = 0
         for di, strip in enumerate(mesh.dashes):
-            base = len(dpos)
+            base_i = len(dpos)
             owner = mesh.dash_owner[di] if di < len(mesh.dash_owner) else None
             solid = di < len(mesh.dash_solid) and mesh.dash_solid[di]
             if painted and not solid and owner is not None and rr["mark_class"](owner) in rr["marked"]:
@@ -990,26 +1022,26 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                 dcol.append((c, c, c, 1.0))
             # this dash's points at the precision the file stores (only its own: all the
             # dashes so far, again for every dash, grew with the square of their number)
-            Pl = np.array(dpos[base:], np.float32).astype(np.float64).tolist()
+            Pl = np.array(dpos[base_i:], np.float32).astype(np.float64).tolist()
             for k in range(len(strip) - 1):
-                a, b, c, d = base + 2 * k, base + 2 * k + 1, base + 2 * k + 3, base + 2 * k + 2
+                a, b, c, d = base_i + 2 * k, base_i + 2 * k + 1, base_i + 2 * k + 3, base_i + 2 * k + 2
                 for t in ((a, b, c), (a, c, d)):
                     # the y part of cross(B - A, C - A), as numpy works it out
-                    A_, B_, C_ = Pl[t[0] - base], Pl[t[1] - base], Pl[t[2] - base]
+                    A_, B_, C_ = Pl[t[0] - base_i], Pl[t[1] - base_i], Pl[t[2] - base_i]
                     n_y = (B_[2] - A_[2]) * (C_[0] - A_[0]) - (B_[0] - A_[0]) * (C_[2] - A_[2])
                     if abs(n_y) < 2e-6:
                         continue                                # no area: a repeated point
                     didx.append(t if n_y > 0 else (t[0], t[2], t[1]))
-        island_info = _lane_island_mesh(mesh, plans, output_scale, mpp_out, W, H, tiles, tile_m, images, materials,
-                                        meshes, surface)
+        island_info = _lane_island_mesh(mesh, plans, output_scale, mpp_out, W, H, tiles, tile_m, imgs, mats, ms,
+                                        surface)
         if didx:
-            materials.append({"name": "RoadMarkings", "doubleSided": True,
-                              "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
-                                                       "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
-            meshes.append({"name": "Markings", "primitives": [{
+            mats.append({"name": "RoadMarkings", "doubleSided": True,
+                         "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
+                                                  "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
+            ms.append({"name": "Markings", "primitives": [{
                 "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
-                "colors": np.array(dcol), "indices": np.array(didx), "material": len(materials) - 1}]})
-        return {
+                "colors": np.array(dcol), "indices": np.array(didx), "material": len(mats) - 1}]})
+        return (ms, mats, imgs), {
             "quads": int(rr["road_quads"]), "dashes": len(mesh.dashes),
             "markings": ("painted" if painted and rr["marked"] else "strips"),
             "painted_dashes": painted_dashes if painted else 0,
@@ -1018,23 +1050,18 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "lanes_cut": sum(1 for st in mesh.streets.values() if (st.get("dash") or {}).get("cut")),
             "marked_quads": rr["marked_quads"],
             "strip_dashes": len(mesh.dashes) - (painted_dashes if painted else 0),
-        }, (["Road"] if painted else []) + ["Median islands", "Markings"]
+        }
 
-    # all but the lanes' parts, so those can be laid again on their own
-    kept = (len(materials), len(images), list(meshes), list(meshes[0]["primitives"]))
-    lane_info, lane_names = lane_parts()
-
-    prog.stage("writing", "writing the 3D file")
-    size = write_glb_scene(out_path, meshes, materials, images)
+    parts = (("paving", paving_part), ("objects", objects_part), ("decals", decals_part), ("lanes", lanes_part))
+    inputs = {"paving": islands, "objects": scatter, "decals": decals, "lanes": None}
+    built = {name: fn(inputs[name]) for name, fn in parts}
 
     out = {"mesh": "tiled", "streets": rep["streets"],
            "junctions": rep["junctions_patched"],
            "tile_m": tile_m, "mm_per_px": tileset.get("mm_per_px"),
            "variation": variation, "size_m": [round(W * mpp_out, 1), round(H * mpp_out, 1)],
-           "interchange_triangles": ic_tris, "sidewalk": sw_info,
+           "interchange_triangles": ic_tris,
            "fill_triangles": fill_tris, "groups": rep.get("clusters"), "bare_filled": rep.get("bare_filled"),
-           "blocks": blocks_info,
-           "scatter": scatter_info,
            "mesh_detail": "optimised" if optimise else "full",
            "rows_full": rep.get("rows_full"), "rows_kept": rep.get("rows_kept"),
            "bridges": [{k: (float(v) if isinstance(v, (np.floating, float)) else v)
@@ -1042,40 +1069,56 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                                           "r_after", "height", "steepest_pct",
                                                           "warnings", "streets")}
                        for pl in plans] if plans else None,
-           "deck": deck_info,
-           "decals": decal_info,
-           "lamps": lamps}
+           "deck": deck_info}
 
-    def report(lanes_now, nbytes):
-        return dict(out, **lanes_now, materials=len(materials), file_bytes=int(nbytes),
-                    surface=sorted({m["extras"]["surface"] for m in materials
-                                    if (m.get("extras") or {}).get("surface")}))
+    def assemble(names=None):
+        """The whole model (names None), or those parts alone (for a view that has the rest)."""
+        chosen = [(n, built[n][0]) for n, _ in parts if names is None or n in names]
+        return _assemble(base if names is None else ([], [], []), chosen)
 
-    def relane(picks, glb_path, part_path):
+    def report(scene, nbytes):
+        info = dict(out)
+        for name, _ in parts:
+            info.update(built[name][1])
+        return dict(info, materials=len(scene[1]), file_bytes=int(nbytes),
+                    surface=sorted({m["extras"]["surface"] for m in scene[1] if (m.get("extras") or {}).get("surface")}))
+
+    prog.stage("writing", "writing the 3D file")
+    scene = assemble()
+    size = write_glb_scene(out_path, *scene)
+
+    def rebuild(changes, glb_path, part_path, send=None):
         """
-        The model with other Lanes tool choices, its lanes' parts alone built
-        again (everything else as built): the whole model to glb_path, and those
-        parts alone to part_path, for a view that has the rest already. None
+        The model with some of its parts built again from new inputs, changes:
+        {part: its input} ("paving": the island slots, "objects": the objects,
+        "decals": the decals, "lanes": the Lanes tool's choices), everything else
+        as built: the whole model to glb_path, and to part_path the parts a view
+        needs alone (send: their names; None: those built again; nothing written
+        when they come to nothing). Returns (report, those parts' names), or None
         when a street gains its first lines or loses all of them with painted
         markings: its road was built for the lines it had, so build it all.
         """
-        changed, flipped = QM.relane(mesh, picks)
-        if flipped and painted:
-            return None
-        del materials[kept[0]:]
-        del images[kept[1]:]
-        meshes[:] = kept[2]
-        meshes[0]["primitives"] = list(kept[3])
-        now, names = lane_parts()
+        lanes_changed = None
+        if "lanes" in changes:
+            lanes_changed, flipped = QM.relane(mesh, changes["lanes"])
+            if flipped and painted:
+                return None
+        for name, fn in parts:
+            if name in changes:
+                built[name] = fn(changes[name])
+        names = [n for n, _ in parts if (n in changes if send is None else n in send)]
         prog.stage("writing", "writing the 3D file")
-        nbytes = write_glb_scene(glb_path, meshes, materials, images)
-        part = _subset_scene(meshes, materials, images, names)
-        part_bytes = write_glb_scene(part_path, *part)
-        return dict(report(now, nbytes), lanes_changed=sorted(int(c) for c in changed if c is not None),
-                    part_bytes=int(part_bytes)), names
+        whole = assemble()
+        nbytes = write_glb_scene(glb_path, *whole)
+        piece = assemble(names)
+        part_bytes = write_glb_scene(part_path, *piece) if piece[0] else 0
+        info = dict(report(whole, nbytes), part_bytes=int(part_bytes))
+        if lanes_changed is not None:
+            info["lanes_changed"] = sorted(int(c) for c in lanes_changed if c is not None)
+        return info, names
 
-    return dict(report(lane_info, size), layouts={int(k): v for k, v in layouts.items()}, _mesh=mesh, _world=world,
-                _fac=fac, _relane=relane)
+    return dict(report(scene, size), layouts={int(k): v for k, v in layouts.items()}, _mesh=mesh, _world=world,
+                _fac=fac, _rebuild=rebuild)
 
 
 def repeat_check(glb_path, mesh, world, tile_m, mm_per_px=20.0):
@@ -1221,7 +1264,11 @@ class PavedFrames:
         The island material slots (server.py's _islands_for): the numbered islands
         (mask pixels, scale times coarser than the texture), each pixel of road
         given its nearest island, so a point on the kerb line still finds one.
+        None: no slots (every island laid alike).
         """
+        if not islands:
+            self.near, self.slot_map, self.iscale, self.looks = None, None, 1, {}
+            return
         lab = islands["labels"]
         if lab.any() and (lab == 0).any():
             iy, ix = ndi.distance_transform_edt(lab == 0, return_distances=False, return_indices=True)

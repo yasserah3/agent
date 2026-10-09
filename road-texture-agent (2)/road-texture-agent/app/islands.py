@@ -26,6 +26,7 @@ from scipy import ndimage as ndi
 from app import progress as prog
 
 MIN_M2 = 4.0            # smaller areas between roads get no number (the 3D model fills only larger)
+TEXTURE_VERSION = 1     # how the islands texture is laid: a new one lays every island again
 GROUND_AMP = 0.10       # broad light and dark over ground (sand, gravel, earth): +-10%
 PAVED_AMP = 0.04        # and over paving and concrete, gentler
 
@@ -317,8 +318,30 @@ def _srgb(c):
     return 255.0 * np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
 
 
+_edges = {}           # the last mask's road edge at the texture's size and nearest islands (slow on a big map)
+
+
+def _edge_of(gray, lab, s, soft_edges):
+    import hashlib
+    from app.generation import prepare_mask
+    key = (hashlib.sha1(np.ascontiguousarray(gray).tobytes()).hexdigest(), gray.shape,
+           hashlib.sha1(np.ascontiguousarray(lab).tobytes()).hexdigest(), int(s), bool(soft_edges))
+    if key not in _edges:
+        prog.stage("mask", "the road edge at the texture's size")
+        prepared, coverage = prepare_mask(gray, s)
+        cov = coverage if soft_edges else (prepared > 0).astype(np.float32)
+        # every pixel's nearest island, so the soft edge under the road's has a colour
+        near = lab
+        if (lab == 0).any() and lab.any():
+            iy, ix = ndi.distance_transform_edt(lab == 0, return_distances=False, return_indices=True)
+            near = lab[iy, ix]
+        _edges.clear()
+        _edges[key] = (cov, near)
+    return _edges[key]
+
+
 def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, default, seed, out_path,
-            result_path=None, full_path=None, background=(18, 18, 20)):
+            result_path=None, full_path=None, background=(18, 18, 20), only=None):
     """
     The islands texture: the same size as the road texture (out_scale times the
     mask), each island laid with its material at real size along its main kerb
@@ -336,23 +359,19 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
     "mix": {"tile": path, "height": picture, "depth_m", "thresh", "scale", "offset"}}};
     default: the same for islands in no slot. With result_path and full_path,
     also writes the road texture with the islands under it.
-    Returns {"size", "islands", "by_slot": {slot: count}}.
+
+    only: the islands to lay again (their material changed), on the pictures as
+    they are (out_path, full_path): every other pixel stays as it was, and those
+    come out as laying the whole texture gives them. None: all of them.
+    Returns {"size", "islands", "by_slot": {slot: count}, "pixels": pixels laid}.
     """
-    from app.generation import prepare_mask
     gray = np.asarray(gray)
     s = int(out_scale)
     mpp_out = mpp / s
-    prog.stage("mask", "the road edge at the texture's size")
-    prepared, coverage = prepare_mask(gray, s)
-    cov = coverage if soft_edges else (prepared > 0).astype(np.float32)
+    cov, near = _edge_of(gray, lab, s, soft_edges)
     Ho, Wo = cov.shape
     H, W = lab.shape
-    # every pixel's nearest island, so the soft edge under the road's has a colour
     prog.stage("islands", "the islands")
-    near = lab
-    if (lab == 0).any() and lab.any():
-        iy, ix = ndi.distance_transform_edt(lab == 0, return_distances=False, return_indices=True)
-        near = lab[iy, ix]
     n = len(islands)
     rng = np.random.default_rng([int(seed), 77])
     theta = np.zeros(n + 1)
@@ -383,10 +402,15 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
     field = ground_field(Wo * mpp_out, Ho * mpp_out, seed)
     half_w, half_h = Wo * mpp_out / 2, Ho * mpp_out / 2           # the 3D model's x = 0, z = 0
     mix = ground_field(Wo * mpp_out, Ho * mpp_out, int(seed) + 1)
-    out = np.zeros((Ho, Wo, 4), np.uint8)
-    full = None
+    out = np.zeros((Ho, Wo, 4), np.uint8) if only is None else np.array(Image.open(out_path).convert("RGBA"))
+    full = road = None
     if full_path is not None and result_path is not None:
-        full = np.asarray(Image.open(result_path).convert("RGB")).copy()
+        road = np.asarray(Image.open(result_path).convert("RGB"))
+        full = road.copy() if only is None else np.array(Image.open(full_path).convert("RGB"))
+    redo = np.zeros(n + 1, bool)
+    if only is not None:
+        redo[[int(k) for k in only if 0 < int(k) <= n]] = True
+    laid = 0
     bg = np.asarray(background, np.float32)
     prog.stage("texture", "laying the materials")
     step = max(1, 1_500_000 // max(1, Wo))
@@ -398,8 +422,11 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
         L = np.repeat(lab_rows, s, axis=1)[:, :Wo]
         a = 1.0 - cov[r0:r1]
         want = (a > 0.002) & (L > 0)
+        if only is not None:
+            want &= redo[L]
         if not want.any():
             continue
+        laid += int(want.sum())
         yy, xx = np.nonzero(want)
         ids = L[yy, xx]
         X = (xx + 0.5) * mpp_out
@@ -456,13 +483,15 @@ def texture(gray, lab, islands, mpp, out_scale, soft_edges, slot_of, looks, defa
         out[yy + r0, xx, :3] = np.clip(rgb + 0.5, 0, 255).astype(np.uint8)
         out[yy + r0, xx, 3] = np.clip(alpha * 255 + 0.5, 0, 255).astype(np.uint8)
         if full is not None:
-            f = full[yy + r0, xx].astype(np.float32)
+            f = road[yy + r0, xx].astype(np.float32)
             full[yy + r0, xx] = np.clip(f + (rgb - bg) * alpha[:, None] + 0.5, 0, 255).astype(np.uint8)
     prog.stage("saving", "saving")
-    Image.fromarray(out, "RGBA").save(out_path, compress_level=4)
-    if full is not None:
-        Image.fromarray(full).save(full_path, compress_level=4)
+    level = 4 if only is None else 1
+    if only is None or laid:
+        Image.fromarray(out, "RGBA").save(out_path, compress_level=level)
+        if full is not None:
+            Image.fromarray(full).save(full_path, compress_level=level)
     by = {}
     for k in range(1, n + 1):
         by[int(look_of[k])] = by.get(int(look_of[k]), 0) + 1
-    return {"size": [int(Wo), int(Ho)], "islands": n, "by_slot": by}
+    return {"size": [int(Wo), int(Ho)], "islands": n, "by_slot": by, "pixels": laid}

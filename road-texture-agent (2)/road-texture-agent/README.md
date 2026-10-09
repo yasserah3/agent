@@ -471,19 +471,10 @@ Changing a street's lanes does not generate the texture again.
   for Generate texture once, then lane changes are quick.
 
 In the 3D tab, **Update view** after a lane change builds only the parts the
-lanes decide and puts them in place of the scene's own: the lane lines
-(Markings), the highways' median islands and, with painted markings, the road
-surface (it carries the painted dashes). The server keeps the model it built
-last (in memory, the latest two builds of the current texture) and lays only
-the lanes again: 0.2 s instead of 20 s with lines as strips, about 3 s instead
-of 25 to 50 s with painted lines. The view loads just those objects (0.8 MB
-instead of 6.6 MB on the test map) and swaps them by name; the camera, the
-lamps, the bakes, the sidewalks, blocks and objects stay. The whole model file
-is written too, so Download 3D model and the Top view have the new lanes.
-Everything else (a material, a 3D setting, a new texture, decals) builds the
-whole scene as before, and so does a street that gains its first line or
-loses its last with painted markings (its road surface was built for the lines
-it had).
+lanes decide (see Quick updates under 3D tab): the lane lines (Markings), the
+highways' median islands and, with painted markings, the road surface (it
+carries the painted dashes): 0.2 s instead of 20 s with lines as strips, 1.6
+to 3 s instead of 13 to 50 s with painted lines.
 
 ## Line width
 
@@ -1193,6 +1184,15 @@ their own, island by island:
     + islands* download them (`<mask>_islands.png`,
     `<mask>_roads_and_islands.png`). The Top view is rebuilt with the island
     materials.
+  - Once made, the button reads **Update islands texture** (it lights up
+    when the slots change): it compares what each island is laid from now
+    (its slot's material, its mix) with what it was laid from, and lays
+    again only the islands that changed, on the pictures as they are. The
+    other islands' pixels stay exactly as they were, and the changed ones
+    come out as a whole new texture gives them: on the test map 0.7 s
+    instead of 3.6 s (2.1 s instead of 6.8 s at 2×). The console names the
+    islands laid again. A change of the seed, the mask or the texture's
+    size lays them all.
 
 ## Decals
 
@@ -1240,8 +1240,20 @@ streets). Layers saved before this (Place randomly) come back as Place
 intersections (with a junction choice) or Place on streets.
 
 The layers are kept on the server for every map. **Generate texture** lays
-them, and **Place decals** lays them again after a change (quickly: the
-texture as generated is kept, so they never pile up). The places come from the
+them, and **Place decals** lays them again after a change (the texture as
+generated is kept, so they never pile up). Once laid, the button reads
+**Update decals** (it lights up when a layer changes): the decals are placed
+again (that is quick), compared with the ones laid last time, and only the
+footprints of those taken away, moved or new are painted again, in the Decals
+layer and the road texture (and the roads + islands picture); a change of
+how they lie (painted or separate) goes over every decal's footprint. The
+rest of the texture is not touched, and what is painted is exactly what laying
+them all again gives (1.5 s instead of 3.7 s for a texture of 1824 × 4440 on
+the test map; the console says how many changed and what share of the
+texture was gone over). When the changed decals cover more than a third of
+the texture, it simply paints them all (the same result, and no slower). The
+mask's junctions and road edge are kept between updates, so laying them again
+after the first time is quicker too. The places come from the
 generation's mask (its junctions and street centre lines), the same for the
 texture and the 3D model; decals over a bridge's raised road are left out.
 
@@ -1623,6 +1635,40 @@ plant as an instance with its own scale and rotation, exactly as on the map.
 
 ## 3D tab
 
+### Quick updates: only what changed is built again
+
+The rule everywhere: a change rebuilds only the part of the texture or the
+model it touches, never the whole.
+
+| What changed | In the texture (Generate tab) | In the 3D model (Update view) |
+|---|---|---|
+| A street's lanes | **Done** lays only its lines | the lane lines, median islands (painted: the road surface) |
+| Decal layers | **Update decals** paints only the changed decals' footprints | the decals |
+| Island material slots | **Update islands texture** lays only the changed islands | the paving: sidewalks, kerbs, blocks and islands |
+| Objects and plants | (not in the texture) | the objects and the street lamps |
+
+The 3D model is built in parts (`app/model3d.py`): the base (the streets,
+junctions, fills, bridges' decks) and four parts that a change can build again
+on its own: the **paving** (sidewalks and kerbs, blocks and islands, which the
+island material slots decide), the **objects** (with the street lamps, which
+keep clear of them), the **decals** and the **lanes**. The server keeps the
+last model it built (in memory, the latest two builds of the current texture)
+with what each part was built from. When Update view asks for a model whose
+base is the same, it builds again only the parts whose inputs changed, writes
+the whole model file (so Download 3D model and the Top view have it) and a
+file of those parts alone. Each part's materials carry its name (glTF
+material extras `"part"`; other programs ignore it), so the view takes out
+every object of a changed part and puts the new ones in, painted lanes and
+painted decals into the road object. The camera, the time of day, the look,
+the lamps and the bakes stay. On the test map: lanes 0.2 s (painted 1.6 s),
+decals and objects 0.1 s, paving 2.7 s, against 12 to 14 s for the whole
+model; the model is the same as one built whole.
+
+Anything in the base (a street, sidewalk or kerb material, a 3D model
+setting, the mask, inner streets, a new texture) builds the whole model as
+before, and so does a street that gains its first line or loses its last with
+painted markings (its road surface was built for the lines it had).
+
 The **3D** tab shows the whole place in 3D, to look around:
 
 - **Wheel**: zooms towards the point under the mouse, a share of the way each
@@ -1645,9 +1691,8 @@ The **3D** tab shows the whole place in 3D, to look around:
 - **Update view** builds the scene again with the current materials and 3D
   model settings, keeping the camera, the time of day and the look. When the
   materials or settings (or the texture) have changed since the scene was
-  built, the button lights up and a note says so. When only streets' lanes
-  changed (the Lanes tool), only the lane parts are built and swapped in
-  (see Quick lane updates).
+  built, the button lights up and a note says so. When only some parts
+  changed, only those are built and swapped in (Quick updates, below).
 - **Generate 3D scene** builds the last generated texture (Generate it in the
   Generate tab first): streets and inner streets, sidewalks and kerbs, blocks
   and islands, markings, and your objects and plants, exactly the model the

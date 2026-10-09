@@ -203,6 +203,20 @@ def _count(weight, rng):
     return int(w) + (1 if rng.random() < w - int(w) else 0)
 
 
+_det = {}            # the last mask's junctions (finding them is the slow part of placing)
+
+
+def _detect(gray):
+    import hashlib
+    from app import junctions as J
+    g = np.ascontiguousarray(np.asarray(gray))
+    key = (g.shape, hashlib.sha1(g.tobytes()).hexdigest())
+    if key not in _det:
+        _det.clear()
+        _det[key] = J.detect(g)
+    return _det[key]
+
+
 def place(gray, mpp, layers, sizes, seed=7, bridges=None):
     """
     Where every decal goes: [{"layer", "decal", "x", "y" (mask pixels, its
@@ -210,8 +224,7 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
     "at" ("intersection", "street", "junction" or "edge")}].
     sizes: {decal id: (width px, height px)}.
     """
-    from app import junctions as J
-    det = J.detect(np.asarray(gray))
+    det = _detect(gray)
     road = det["road"]
     H, W = road.shape
     junctions = [j for j in det["junctions"] if j["type"] != "interchange (flagged)"]
@@ -387,39 +400,116 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
 
 
 # ------------------------------------------------------------------ the texture
-def paint(shape, placements, images, mpp_out, scale, coverage=None):
+def footprint(p, mpp_out, scale, pad=3):
+    """The texture pixels a placed decal can cover, turned any way: (x0, y0, x1, y1)."""
+    r = math.hypot(p["w_m"], p["h_m"]) / 2 / mpp_out + pad
+    cx, cy = p["x"] * scale, p["y"] * scale
+    return int(math.floor(cx - r)), int(math.floor(cy - r)), int(math.ceil(cx + r)) + 1, int(math.ceil(cy + r)) + 1
+
+
+def _key(p):
+    return (p["decal"], p["x"], p["y"], p["ux"], p["uy"], p["w_m"], p["h_m"])
+
+
+def changed(old, new):
+    """The decals laid before and not now, and now and not before (each as it lies): [placement]."""
+    ko, kn = {_key(p) for p in old}, {_key(p) for p in new}
+    return [p for p in old if _key(p) not in kn] + [p for p in new if _key(p) not in ko]
+
+
+def _turned(p, img, mpp_out):
+    """A placed decal's picture, sized and turned as it lies (float RGBA 0-1)."""
+    w = max(1, int(round(p["w_m"] / mpp_out)))
+    h = max(1, int(round(p["h_m"] / mpp_out)))
+    im = img.resize((w, h), Image.LANCZOS if w < img.width else Image.BICUBIC)
+    # turned so its top (0, -1) faces (ux, uy): PIL turns anticlockwise as seen
+    deg = math.degrees(math.atan2(-p["ux"], -p["uy"]))
+    im = im.rotate(deg, resample=Image.BICUBIC, expand=True)
+    return np.asarray(im, np.float32) / 255.0
+
+
+def paint(shape, placements, images, mpp_out, scale, coverage=None, window=None, turned=None):
     """
     The decals as a picture of the texture's size (RGBA, float 0-1, H x W x 4),
     each turned and sized as placed; only on the road (coverage).
-    images: {decal id: PIL RGBA image}.
+    images: {decal id: PIL RGBA image}. window: (x0, y0, x1, y1), only that
+    part of it (the same pixels the whole picture has there; coverage is still
+    the whole texture's). turned: a dict that keeps each decal's sized and
+    turned picture for the next window.
     """
     H, W = shape
-    acc = np.zeros((H, W, 4), np.float32)
+    wx0, wy0, wx1, wy1 = window if window is not None else (0, 0, W, H)
+    acc = np.zeros((wy1 - wy0, wx1 - wx0, 4), np.float32)
     for p in placements:
         img = images.get(p["decal"])
         if img is None:
             continue
-        w = max(1, int(round(p["w_m"] / mpp_out)))
-        h = max(1, int(round(p["h_m"] / mpp_out)))
-        im = img.resize((w, h), Image.LANCZOS if w < img.width else Image.BICUBIC)
-        # turned so its top (0, -1) faces (ux, uy): PIL turns anticlockwise as seen
-        deg = math.degrees(math.atan2(-p["ux"], -p["uy"]))
-        im = im.rotate(deg, resample=Image.BICUBIC, expand=True)
-        a = np.asarray(im, np.float32) / 255.0
+        if window is not None:
+            fx0, fy0, fx1, fy1 = footprint(p, mpp_out, scale)
+            if fx1 <= wx0 or fx0 >= wx1 or fy1 <= wy0 or fy0 >= wy1:
+                continue                                     # nowhere near this part
+        if turned is None:
+            a = _turned(p, img, mpp_out)
+        else:
+            k = _key(p)
+            if k not in turned:
+                turned[k] = _turned(p, img, mpp_out)
+            a = turned[k]
+        ih, iw = a.shape[:2]
         cx, cy = p["x"] * scale, p["y"] * scale
-        x0, y0 = int(round(cx - im.width / 2)), int(round(cy - im.height / 2))
-        xa, ya, xb, yb = max(0, x0), max(0, y0), min(W, x0 + im.width), min(H, y0 + im.height)
+        x0, y0 = int(round(cx - iw / 2)), int(round(cy - ih / 2))
+        xa, ya = max(0, x0, wx0), max(0, y0, wy0)
+        xb, yb = min(W, x0 + iw, wx1), min(H, y0 + ih, wy1)
         if xa >= xb or ya >= yb:
             continue
         src = a[ya - y0:yb - y0, xa - x0:xb - x0]
         al = src[..., 3:4]
         if coverage is not None:
             al = al * coverage[ya:yb, xa:xb, None]
-        dst = acc[ya:yb, xa:xb]
+        dst = acc[ya - wy0:yb - wy0, xa - wx0:xb - wx0]
         # premultiplied "over"
         dst[..., :3] = src[..., :3] * al + dst[..., :3] * (1 - al)
         dst[..., 3:4] = al + dst[..., 3:4] * (1 - al)
     return acc
+
+
+def layer_picture(rgba):
+    """The Decals layer as saved (RGBA uint8, colour not premultiplied) from paint's picture."""
+    return np.clip(np.concatenate([rgba[..., :3] / np.maximum(rgba[..., 3:], 1e-6), rgba[..., 3:]], -1) * 255 + 0.5,
+                   0, 255).astype(np.uint8)
+
+
+def repaint(changes, placements, images, mpp_out, scale, coverage, base_rgb, layer, result, painted):
+    """
+    Only where decals changed (changes: placements laid before or now, as
+    changed() finds them): the Decals layer (RGBA uint8, as saved) and the
+    road texture (painted: the texture as generated, base_rgb, with the decals
+    in; else the texture as generated) are worked out again from every decal
+    now there, in each changed decal's footprint, and written in place. The
+    pixels come out as painting the whole picture again gives them. Returns
+    the number of pixels gone over.
+    """
+    H, W = result.shape[:2]
+    # the decals now laid, by the 64-pixel cells their footprints touch, to find those near a footprint
+    cells = {}
+    for i, p in enumerate(placements):
+        x0, y0, x1, y1 = footprint(p, mpp_out, scale)
+        for cy in range(max(0, y0) // 64, max(0, min(H, y1) - 1) // 64 + 1):
+            for cx in range(max(0, x0) // 64, max(0, min(W, x1) - 1) // 64 + 1):
+                cells.setdefault((cx, cy), []).append(i)
+    done, turned = 0, {}
+    for q in changes:
+        x0, y0, x1, y1 = footprint(q, mpp_out, scale)
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        near = sorted({i for cy in range(y0 // 64, (y1 - 1) // 64 + 1) for cx in range(x0 // 64, (x1 - 1) // 64 + 1)
+                       for i in cells.get((cx, cy), [])})
+        rgba = paint((H, W), [placements[i] for i in near], images, mpp_out, scale, coverage, (x0, y0, x1, y1), turned)
+        layer[y0:y1, x0:x1] = layer_picture(rgba)
+        result[y0:y1, x0:x1] = composite(base_rgb[y0:y1, x0:x1], rgba) if painted else base_rgb[y0:y1, x0:x1]
+        done += (x1 - x0) * (y1 - y0)
+    return done
 
 
 def composite(base_rgb, decal_rgba):

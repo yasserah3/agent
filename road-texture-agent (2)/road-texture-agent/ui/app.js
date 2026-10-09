@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.09-parts1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1562,6 +1562,10 @@ const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
     $('#btnShowIslands').disabled = !d;
     $('#btnShowIslands').setAttribute('aria-pressed', ISLS.show);
     $('#btnIslandsTex').disabled = !d || !S.gen.result;
+    // made once: the button updates it, laying again only the islands whose material changed
+    const itx = S.gen.islandTex && S.gen.result && S.gen.islandTex.gid === S.gen.result.id;
+    $('#btnIslandsTex').textContent = itx ? 'Update islands texture' : 'Generate islands texture';
+    $('#btnIslandsTex').classList.toggle('attention', !!(itx && S.gen.islandTex.slots !== JSON.stringify(ISLS.slots)));
     if(d){
       const free = d.count - [...slotIslands().of.keys()].length;
       $('#islandNote').textContent = ISLS.pick >= 0
@@ -1918,21 +1922,29 @@ const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
   $('#btnIslandsTex').addEventListener('click', async () => {
     if(!S.gen.result || !ISLS.data) return;
     const btn = $('#btnIslandsTex'); btn.disabled = true; status('Generating the islands texture…');
-    log('Generating the islands texture: only the islands, each with its slot\'s material, at real size…');
-    const gid = S.gen.result.id;
+    const gid = S.gen.result.id, slots = JSON.stringify(ISLS.slots);
+    const again = S.gen.islandTex && S.gen.islandTex.gid === gid;
+    log(again ? 'Updating the islands texture: only the islands whose material changed are laid again…'
+              : 'Generating the islands texture: only the islands, each with its slot\'s material, at real size…');
     try{
       const res = await api('/api/islands/texture', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the islands texture',
         body: JSON.stringify({ generation: gid, island_slots: ISLS.slots, materials: { square: $('#matSquare').value },
                                match_tone: $('#matTone').checked, seed: +$('#seed').value }) });
       if(!S.gen.result || S.gen.result.id !== gid) return;
-      S.gen.islandTex = res;
-      log(`Islands texture ready (${res.size[0]} × ${res.size[1]}, the road texture's size): `
-        + res.by_slot.map(b => `${b.islands} island(s) ${b.name}${b.slot >= 0 ? ` (slot ${b.slot + 1})` : ''}`).join(', ') + '.', 'ok');
-      log('  The roads are transparent in it, so it lies under the road texture with no gap; Roads + islands shows the two together.');
+      S.gen.islandTex = Object.assign(res, { gid, slots });
+      renderSlots();
+      const pt = res.partial;
+      if(pt) log(pt.islands.length
+        ? `Islands texture updated in ${res.seconds.toFixed(1)} s: ${pt.islands.length} island(s) laid again with their new material`
+          + ` (${pt.islands.slice(0, 12).join(', ')}${pt.islands.length > 12 ? '…' : ''}); the other ${res.islands - pt.islands.length} kept as they were.`
+        : 'Islands texture: no island changed its material; the texture is as it was.', 'ok');
+      log(`Islands texture ${pt ? 'now' : 'ready'} (${res.size[0]} × ${res.size[1]}, the road texture's size): `
+        + res.by_slot.map(b => `${b.islands} island(s) ${b.name}${b.slot >= 0 ? ` (slot ${b.slot + 1})` : ''}`).join(', ') + '.', pt ? '' : 'ok');
+      if(!pt) log('  The roads are transparent in it, so it lies under the road texture with no gap; Roads + islands shows the two together.');
       $('#saveIslands').href = API + res.downloads.islands; $('#saveFull').href = API + res.downloads.full;
       $('#islandSaves').hidden = false;
       try{ drawInto($('#lp-islands'), await loadImage(API + res.urls.islands)); drawInto($('#lp-full'), await loadImage(API + res.urls.full)); }catch(_){}
-      await showLayer('full');
+      await showLayer(pt && ['islands', 'full'].includes(S.gen.layer) ? S.gen.layer : 'full', !!pt && ['islands', 'full'].includes(S.gen.layer));
       // the top view shows the 3D model's islands too: brought up to date
       if(!S.gen.top || S.gen.top.gid !== gid || S.gen.top.key !== JSON.stringify(exportSettings())) buildTopView(gid);
     }catch(e){ log('Islands texture failed: ' + e.message, 'bad'); }
@@ -1957,7 +1969,10 @@ const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
     DEC.timer = setTimeout(() => api('/api/decals/layers', { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ layers }) }).catch(e => log('Decal layers not saved: ' + e.message, 'bad')), 300);
     renderDecals();
-    $('#decalNote').textContent = S.gen.result ? 'Changed: press Place decals to lay them again.' : 'Generate texture lays them.';
+    $('#decalNote').textContent = !S.gen.result ? 'Generate texture lays them.'
+      : S.gen.decals ? 'Changed: press Update decals. Only the decals that change are painted again; the rest of the texture stays.'
+      : 'Changed: press Place decals to lay them.';
+    if(S.gen.decals) $('#btnPlaceDecals').classList.add('attention');
   }
   // a layer's places, in words (the card's second line)
   function decalWhere(L){
@@ -2058,6 +2073,11 @@ const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
     });
     $('#decalCount').textContent = DEC.layers.length ? String(DEC.layers.length) : '';
     $('#btnPlaceDecals').disabled = !S.gen.result || !(DEC.layers.length || S.gen.decals);
+    // laid once: the button updates them, painting again only where decals change
+    $('#btnPlaceDecals').textContent = S.gen.decals ? 'Update decals' : 'Place decals';
+    $('#btnPlaceDecals').title = S.gen.decals
+      ? 'Lay the decals again where they changed: only the decals added, moved or removed are painted again, the rest of the texture stays'
+      : 'Lay the decals on the generated texture (Generate texture lays them too)';
   }
   $('#btnImportDecal').addEventListener('click', () => { $('#decalFile').value = ''; $('#decalFile').click(); });
   $('#decalFile').addEventListener('change', async () => {
@@ -2094,14 +2114,24 @@ const UI_VERSION = '2026.10.09-lanes3';   // must match VERSION in server.py
       if(!S.gen.result || S.gen.result.id !== gid) return;
       S.gen.decals = res; S.gen.decalVersion = Date.now();
       S.gen.result.urls.result = res.urls.result;
+      if(S.gen.islandTex && S.gen.islandTex.gid === gid) S.gen.islandTex.urls.full = res.urls.full;
+      $('#btnPlaceDecals').classList.remove('attention');
+      const pt = res.partial;
+      if(pt && !pt.changed){
+        log(`Decals: nothing changed (${res.count.toLocaleString()} laid as before); the texture is as it was.`, 'ok');
+        $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
+        status('Ready.'); renderDecals(); return;
+      }
+      if(pt) log(`Decals updated in ${res.seconds.toFixed(1)} s: ${pt.changed - pt.gone} laid where they changed, ${pt.gone} taken away; `
+        + `only their places were painted again (${(pt.share * 100).toFixed(1)}% of the texture), the rest stays as it was.`, 'ok');
       log(`Decals: ${res.count.toLocaleString()} laid, ${mode === 'painted' ? 'painted into the road texture and part of the road in the 3D model'
                                                             : 'on a layer of their own and an object of their own in the 3D model'}`
-        + (res.layers.length ? ': ' + res.layers.map(l => `${l.count} ${l.name}` + decalCounted(l)).join(', ') : '') + '.', 'ok');
+        + (res.layers.length ? ': ' + res.layers.map(l => `${l.count} ${l.name}` + decalCounted(l)).join(', ') : '') + '.', pt ? '' : 'ok');
       $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
       try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
-      if(['result', 'decals'].includes(S.gen.layer)) await showLayer(S.gen.layer);
+      if(['result', 'decals', 'full'].includes(S.gen.layer)) await showLayer(S.gen.layer, !!pt);
       window.dispatchEvent(new Event('materials'));            // the 3D tab's scene is out of date
-      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) buildTopView(gid);
+      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) buildTopView(gid, !!pt);
     }catch(e){ log('Decals not laid: ' + e.message, 'bad'); }
     status('Ready.'); renderDecals();
   }

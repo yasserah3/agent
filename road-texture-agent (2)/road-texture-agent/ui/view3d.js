@@ -892,9 +892,10 @@ function assignPool(){
 // what the scene was built from (the texture and the 3D model settings, materials
 // included), to tell when it is out of date
 let builtFrom = null;
-// what the model in the view was built from but its streets' lanes (the server's lanes_base):
-// a model of the same base can take new lanes as its lane parts alone
-let worldBase = null;
+// what the model in the view was built from but its parts (the server's model_base: the
+// paving, the objects, the decals, the lanes): a model of the same base takes a change
+// in those as the changed parts alone
+let worldBase = null, worldParts = null;
 const buildKey = () => JSON.stringify([window.lastGeneration && window.lastGeneration(), window.exportSettings ? window.exportSettings() : null]);
 
 // keep: Update view, the same camera (and time of day and look); else the whole place framed
@@ -911,19 +912,26 @@ async function generate(keep = false){
   const job = window.trackJob ? window.trackJob(keep ? 'Updating the 3D scene' : 'Building the 3D scene') : null;
   try{
     const r = await fetch('/api/export3d', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined }) });
+      body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined,
+                             // what the view holds: the server sends every part that differs from it
+                             view: keep && world && worldBase ? { base: worldBase, parts: worldParts } : undefined }) });
     const res = await r.json();
     if(!r.ok) throw new Error(res.detail || 'the 3D model could not be built');
-    if(keep && world && res.partial && res.lanes_base && res.lanes_base === worldBase){
-      // only the streets' lanes changed: their parts alone, in place of the ones in the view
-      await swapLaneParts(res, job);
+    if(keep && world && res.partial && res.model_base && res.model_base === worldBase){
+      // only some parts changed: those alone, in place of the ones in the view
+      const names = res.partial.replace;
+      await swapParts(res, job);
+      worldParts = res.model_parts || null;
       builtFrom = key;
       staleCheck();
       const n = res.lanes_changed ? res.lanes_changed.length : 0;
-      note(`Lanes updated${n ? ` on ${n} street${n === 1 ? '' : 's'}` : ''}: only the lane lines, islands`
-        + `${res.markings === 'painted' ? ' and painted road surfaces' : ''} were built again; the rest of the scene is as it was.`);
-      if(job) job.done(true, `lanes only${n ? `, ${n} street${n === 1 ? '' : 's'}` : ''}`);
-      window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: lamps ? lamps.items.length : 0, lanesOnly: true } }));
+      const what = names.map(p => p === 'lanes' ? `the lanes${n ? ` (${n} street${n === 1 ? '' : 's'})` : ''}`
+        + (res.markings === 'painted' ? ' with the painted road surfaces' : '')
+        : PART_NAMES[p] || p);
+      note(names.length ? `Updated only what changed: ${what.join(', ')}. The rest of the scene is as it was.`
+                        : 'Nothing in the scene changed.');
+      if(job) job.done(true, names.length ? `only ${names.join(', ')}` : 'nothing changed');
+      window.dispatchEvent(new CustomEvent('scene3d', { detail: { lamps: lamps ? lamps.items.length : 0, parts: names } }));
       busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
       return;
     }
@@ -940,7 +948,8 @@ async function generate(keep = false){
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
     dropBakes();
     world = gltf.scene;
-    worldBase = res.lanes_base || null;
+    worldBase = res.model_base || null;
+    worldParts = res.model_parts || null;
     await loadRelief(gltf);
     prepare(world);
     scene.add(world);
@@ -970,21 +979,44 @@ async function generate(keep = false){
   busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
 }
 
-// the lane parts (the server's partial model: with painted markings the road, the
-// median islands, the lane lines) in place of the view's own, by their names; the
-// rest of the scene, its lamps and its bakes stay
-async function swapLaneParts(res, job){
-  if(job) job.set(`loading the lanes into the view${res.partial.bytes ? ` (${(res.partial.bytes / 1048576).toFixed(1)} MB)` : ''}`, null);
-  const gltf = await new GLTFLoader().loadAsync(res.partial.url);
-  const names = new Set(res.partial.replace.map(n => THREE.PropertyBinding.sanitizeNodeName(n)));
-  for(const o of [...world.children]){
-    if(!names.has(o.name)) continue;
-    world.remove(o);
-    o.traverse(c => { if(c.geometry) c.geometry.dispose(); });
+// the parts of the model the server builds again on their own (app/model3d.py)
+const PART_NAMES = { paving: 'the paving (sidewalks, kerbs, blocks and islands)', objects: 'the objects and street lamps',
+                     decals: 'the decals', lanes: 'the lanes' };
+
+// the changed parts (the server's partial model) in place of the view's own: every mesh
+// whose material belongs to a part built again goes (the materials carry their part's
+// name), and the new ones come in, a road part (painted lanes or decals) into the road
+// object; the rest of the scene, the camera and the bakes stay
+async function swapParts(res, job){
+  const parts = new Set(res.partial.replace);
+  if(!parts.size) return;
+  let gltf = null;
+  if(res.partial.url){
+    if(job) job.set(`loading the changed parts into the view${res.partial.bytes ? ` (${(res.partial.bytes / 1048576).toFixed(1)} MB)` : ''}`, null);
+    gltf = await new GLTFLoader().loadAsync(res.partial.url);
   }
-  await loadRelief(gltf);
-  prepare(gltf.scene);
-  for(const o of [...gltf.scene.children]) world.add(o);
+  const gone = [];
+  world.traverse(o => { if(o.isMesh && [].concat(o.material).some(m => m && m.userData && parts.has(m.userData.part))) gone.push(o); });
+  for(const o of gone){
+    let p = o.parent;
+    p.remove(o);
+    if(o.geometry) o.geometry.dispose();
+    while(p && p !== world && !p.isMesh && !p.children.length){ const up = p.parent; up.remove(p); p = up; }   // groups left empty
+  }
+  if(gltf){
+    await loadRelief(gltf);
+    prepare(gltf.scene);
+    const road = world.children.find(c => c.name === 'Road');
+    for(const node of [...gltf.scene.children]){
+      if(node.name === 'Road' && road && !road.isMesh){
+        const ms = []; node.traverse(o => { if(o.isMesh) ms.push(o); });
+        ms.forEach(m => road.add(m));                                     // part of the road object
+      }else world.add(node);
+    }
+  }
+  if(parts.has('objects')) buildLamps(res.lamps || []);
+  bvhFor = null;                                                          // focusing finds the new surfaces
+  poolAt = null;
   applyBake();
 }
 
@@ -2782,6 +2814,9 @@ window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.
   // for comparisons: the path tracer's light tree on or off (off: each light as likely)
   lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
   capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi,
+  // the scene's meshes by the part of the model they belong to (base: the rest), and the lamps
+  parts: () => { const c = {}; if(world) world.traverse(o => { if(o.isMesh){ const m = [].concat(o.material)[0];
+    const p = (m && m.userData && m.userData.part) || 'base'; c[p] = (c[p] || 0) + 1; } }); return { meshes: c, lamps: lamps ? lamps.items.length : 0 }; },
   dof: async patch => { Object.assign(DOF, patch); dofChanged(); applyLens(); if(DOF.on) await indexScene(); focusAim = null; focusMoved = 0;
                         return { ...DOF, now: DOF.on ? focusDistance(true) : null }; },
   // the sky: an id of the list (or 'physical'), turned and as strong as given; resolves when shown
