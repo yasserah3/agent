@@ -48,6 +48,7 @@ from app import model3d as M3
 from app import library as LIB
 from app import looks as LK
 from app import autoplace as AP
+from app import buildings as BLD
 from app import placements as PL
 from app import tiles as TL
 from app import objects as OB
@@ -64,7 +65,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.09-auto1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.10-build1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -92,7 +93,8 @@ UPLOADS = WORK / "uploads"
 ARTIFACTS = WORK / "artifacts"
 OBJECTS = WORK / "objects"
 PACKAGES = WORK / "packages"
-for d in (UPLOADS, ARTIFACTS, OBJECTS, PACKAGES):
+BUILDINGS = WORK / "buildings"
+for d in (UPLOADS, ARTIFACTS, OBJECTS, PACKAGES, BUILDINGS):
     d.mkdir(parents=True, exist_ok=True)
 
 mem = Memory(WORK / "memory.db")
@@ -1172,6 +1174,102 @@ def delete_object(oid: str):
         pk["slots"] = [sl for sl in pk["slots"] if sl["object"] != oid]
         _save_package(m["package"], pk)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ buildings
+# Buildings made in the Dynamic creation tab (app/buildings.py), one buildings/<id>.json
+# each. Use as object makes one an object layer, as an imported object, so it can be
+# placed, put in a package or laid automatically on islands like any other.
+def _building(bid):
+    bid = _safe_id(bid)
+    f = BUILDINGS / ("%s.json" % bid)
+    if not f.exists():
+        raise HTTPException(404, "unknown building")
+    return bid, json.loads(f.read_text())
+
+
+@app.get("/api/buildings")
+def list_buildings():
+    out = []
+    for f in sorted(BUILDINGS.glob("*.json"), key=lambda p: -p.stat().st_mtime):
+        try:
+            b = json.loads(f.read_text())
+        except ValueError:
+            continue
+        out.append({"id": f.stem, "name": b.get("name", "Building"), "levels": len(b.get("levels", [])),
+                    "object": b.get("object") if b.get("object") and _object_meta(b["object"]) else None,
+                    "updated": round(f.stat().st_mtime)})
+    return {"buildings": out}
+
+
+@app.get("/api/buildings/{bid}")
+def get_building(bid: str):
+    bid, b = _building(bid)
+    if b.get("object") and not _object_meta(b["object"]):
+        b.pop("object")                                  # its object was deleted since
+    return {"id": bid, **b}
+
+
+@app.post("/api/buildings")
+def save_building(payload: dict):
+    """Save a building (a new one without an id): its name, preset and levels."""
+    b = BLD.check(payload)
+    bid = payload.get("id")
+    if bid:
+        bid, old = _building(bid)
+        if old.get("object") and "object" not in b:
+            b["object"] = old["object"]
+    else:
+        bid = uuid.uuid4().hex[:12]
+    _write_json(BUILDINGS / ("%s.json" % bid), b)
+    return {"id": bid, **b}
+
+
+@app.delete("/api/buildings/{bid}")
+def delete_building(bid: str):
+    """Delete a building; an object made from it stays (delete it in the Objects panel)."""
+    bid, _ = _building(bid)
+    (BUILDINGS / ("%s.json" % bid)).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.post("/api/buildings/{bid}/object")
+def building_object(bid: str):
+    """
+    The building as an object layer: a box for each drawn level, footprint centred,
+    base at 0, its front (-Z) the object's front. Sent again, the same layer is
+    updated (its scale and quarter turn kept), so its placements follow.
+    """
+    bid, b = _building(bid)
+    parts = BLD.parts(b)
+    if not parts:
+        raise HTTPException(400, "draw at least one level first")
+    allp = np.vstack([p["pos"] for p in parts])
+    lo, hi = allp.min(axis=0), allp.max(axis=0)
+    shift = np.array([(lo[0] + hi[0]) / 2, lo[1], (lo[2] + hi[2]) / 2])
+    for p in parts:
+        p["pos"] = p["pos"] - shift
+    size = hi - lo
+    oid = b.get("object") if b.get("object") and _object_meta(b["object"]) else None
+    old = _object_meta(oid) if oid else None
+    if oid is None:
+        oid = uuid.uuid4().hex[:12]
+    folder = OBJECTS / oid
+    OB.save(parts, folder)
+    meta = {"name": b["name"], "file": "building", "format": "building", "building": bid,
+            "scale": (old or {}).get("scale", 1.0), "turn": (old or {}).get("turn", 0),
+            "frame": "the building's own axes, its front towards the top of the map",
+            "width_m": round(float(size[0]), 3), "depth_m": round(float(size[2]), 3), "height_m": round(float(size[1]), 3),
+            "triangles": int(sum(len(p["faces"]) for p in parts)), "parts": len(parts)}
+    if old and old.get("package"):
+        meta["package"] = old["package"]                  # a slot of a package stays one
+    _write_json(folder / "meta.json", meta)
+    if b.get("object") != oid:
+        b["object"] = oid
+        _write_json(BUILDINGS / ("%s.json" % bid), b)
+    mem.record("building_object", "%s %s as an object: %.1f x %.1f x %.1f m, %d levels" % (
+        b["name"], "updated" if old else "made", meta["width_m"], meta["depth_m"], meta["height_m"], len(parts)), {"id": oid, "building": bid})
+    return {"id": oid, "updated": bool(old), **meta}
 
 
 # ------------------------------------------------------------------ packages

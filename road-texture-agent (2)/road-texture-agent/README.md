@@ -2115,6 +2115,62 @@ A browser with WebGL 2 is needed (any current Chrome, Edge, Firefox or
 Safari); the photo render and its denoising are much faster on a real
 graphics card.
 
+## Dynamic creation tab: buildings
+
+A tab after **3D**, before Memory, to make things inside the agent. At the top of
+its viewport: **Building**, **Foliage**, **Traffic** and **Assets**; Building works
+now, the other three come later. Under Building, **Create** works now and
+**Import** comes later.
+
+**Making a building**
+
+1. **Presets** (left): a preset decides the building's shape. For now there is
+   one, **Simple block**: every level is a box. Presets you import later will show
+   in the same list. Picking a preset starts a new building (Building 1, 2, ...;
+   rename it in **Name**).
+2. **Create floor level** makes the first level, the **Ground floor**, and starts
+   drawing it: press and drag a rectangle on the ground in the viewport. The box
+   appears, 4 m high (shops); set its **Height**, **Width**, **Length** and
+   position (**X**, **Z**) on the right.
+3. **Create floor level** again makes the **First floor**: draw its rectangle on
+   the top of the ground floor (its outline shows in orange, and corners snap to
+   it, so the same rectangle is easy; **Same as below** copies it at once). Each
+   new floor is 3 m high and stands on the level below. And so on for every floor.
+4. **Create roof** makes the **Roof**, the same kind of box as the floors (1 m
+   high to start), always the top level: a floor made after it goes under it.
+
+A floor may stick out past the level below it (a balcony, an overhang): its plan
+shows the part that sticks out in orange, and its row and panel say by how much.
+A level not drawn yet shows as a faint box of its height, so what stands above it
+does not seem to float.
+
+**Levels** (left), the top one first. Levels are named by where they stand:
+Ground floor, First floor, Second floor, ... and Roof.
+- **Delete floor level** deletes the selected level: the levels above move down
+  in the viewport and are named again (delete the First floor and the Second
+  becomes the First).
+- **↑** and **↓** move a level up or down the building: it swaps places with
+  its neighbour, both are named again and move in the viewport. The roof has no
+  arrows and nothing moves above it.
+- **Undo** (or Ctrl+Z) takes back the last change.
+
+**Right**: the selected level's options and range (from 4 to 7 m, say), **Draw
+rectangle** / **Draw again**, **Same as below**, then the **Floor plans** of every
+level, the top one first, at one scale so they compare, each with the outline of
+the level below dashed. The top of every plan is the building's **front**, the
+blue arrow on the ground in the viewport: the side that faces the street.
+
+In the viewport: drag to turn round the building, right-drag to move, wheel to
+zoom, **Fit** to frame it; click a box to select its level; Esc stops drawing.
+Snapping: to the half metre, and to the edges of the level below within 0.6 m.
+
+**Saved and used.** A building is saved as it changes (in the workspace's
+buildings folder) and listed under Building: click one to open it. **Use as
+object** makes it an object layer in the Generate tab's Objects, its size that of
+the building, its front its front: place it, put it in a package, or lay it with
+**Place automatically on islands**. After changes, **Update its object** updates
+that same layer, and its placements follow. Deleting a building keeps its object.
+
 ## When something goes wrong
 
 An unexpected server error now shows its real cause in the console, the error

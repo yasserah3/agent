@@ -90,6 +90,50 @@
   .field .minmax input[type=number]{ padding:5px 5px; min-width:0; }
   .field input[type=range]{ width:100%; accent-color:var(--blue); }
   .field select{ background:var(--field); border:1px solid var(--line); border-radius:4px; color:var(--ink); font:inherit; padding:4px 6px; width:100%; min-width:0; }
+  /* Dynamic creation: the building editor (ui/building.js) */
+  .bd-view{ grid-column:2; grid-row:1; user-select:none; -webkit-user-select:none; }
+  .dc-modes{ position:absolute; top:10px; left:50%; transform:translateX(-50%); display:flex; gap:2px; padding:3px;
+             background:rgba(26,30,34,.85); border:1px solid var(--line); border-radius:7px; z-index:2; }
+  .dc-mode{ background:none; border:none; color:var(--muted); padding:6px 14px; border-radius:5px; cursor:pointer; font:inherit; font-weight:500; }
+  .dc-mode[aria-pressed="true"]{ background:var(--blue); color:#fff; }
+  .dc-mode:disabled{ cursor:not-allowed; color:var(--faint); }
+  .dc-mode small, .seg-b small{ font-size:10.5px; color:var(--faint); margin-left:3px; }
+  .bd-view .bd-tools{ position:absolute; top:10px; right:10px; bottom:auto; z-index:2; }
+  .bd-msg{ pointer-events:none; position:absolute; left:50%; bottom:14px; transform:translateX(-50%); max-width:80%; text-align:center; z-index:2;
+           background:rgba(26,30,34,.88); border:1px solid var(--blue); border-radius:6px; padding:7px 12px; font-size:12.5px; }
+  .seg{ display:grid; grid-template-columns:1fr 1fr; gap:2px; padding:3px; background:var(--field); border:1px solid var(--line); border-radius:6px; margin-bottom:6px; }
+  .seg-b{ background:none; border:none; color:var(--muted); padding:6px; border-radius:4px; cursor:pointer; font:inherit; }
+  .seg-b[aria-pressed="true"]{ background:var(--panel-2); color:var(--ink); }
+  .seg-b:disabled{ cursor:not-allowed; color:var(--faint); }
+  input.txt{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:5px 8px; width:100%; color:var(--ink); font:inherit; min-width:0; }
+  .bd-list{ display:flex; flex-direction:column; gap:3px; margin-top:4px; max-height:150px; overflow-y:auto; }
+  .bd-item{ display:flex; justify-content:space-between; gap:6px; padding:5px 8px; border-radius:5px; cursor:pointer; background:none; border:1px solid transparent;
+            color:var(--ink); font:inherit; text-align:left; }
+  .bd-item:hover{ background:var(--panel-2); }
+  .bd-item[aria-pressed="true"]{ background:var(--panel-2); border-color:var(--blue); }
+  .bd-item small{ color:var(--muted); }
+  .bd-presets{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .bd-preset{ display:flex; flex-direction:column; align-items:center; gap:4px; padding:8px 6px; border-radius:6px; background:var(--panel-2);
+              border:1px solid var(--line); color:var(--ink); cursor:pointer; font:inherit; font-size:12px; }
+  .bd-preset[aria-pressed="true"]{ border-color:var(--blue); box-shadow:0 0 0 1px var(--blue) inset; }
+  .bd-preset:disabled{ cursor:not-allowed; color:var(--faint); border-style:dashed; }
+  .bd-preset svg{ width:54px; height:44px; }
+  .bd-levels{ display:flex; flex-direction:column; gap:3px; }
+  .bd-lv{ display:grid; grid-template-columns:12px 1fr auto auto; align-items:center; gap:6px; padding:6px 6px; border-radius:5px;
+          background:var(--panel-2); border:1px solid var(--line); cursor:pointer; }
+  .bd-lv[aria-selected="true"]{ border-color:var(--blue); box-shadow:inset 2px 0 0 var(--blue); }
+  .bd-lv .sw{ width:12px; height:12px; border-radius:3px; border:1px solid rgba(0,0,0,.4); }
+  .bd-lv b{ font-weight:600; font-size:12.5px; }
+  .bd-lv small{ display:block; color:var(--muted); font-size:11px; }
+  .bd-lv small.warn{ color:var(--amber); }
+  .bd-lv button{ background:var(--field); border:1px solid var(--line); color:var(--ink); border-radius:4px; width:26px; height:24px; cursor:pointer; font-size:13px; padding:0; }
+  .bd-lv button:disabled{ color:var(--faint); cursor:not-allowed; }
+  .bd-plan{ border:1px solid var(--line); border-radius:6px; padding:6px; margin-top:6px; cursor:pointer; background:var(--field); }
+  .bd-plan[aria-selected="true"]{ border-color:var(--blue); }
+  .bd-plan .h{ display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px; }
+  .bd-plan .h small{ color:var(--muted); }
+  .bd-plan svg{ display:block; width:100%; }
+  .bd-plan .w{ color:var(--amber); font-size:11px; margin-top:3px; }
   /* an automatic placement (laid on the islands) has no rectangle: none of its settings */
   #plBox.auto .hand-only{ display:none; }
   .select-full{ margin:4px 0 10px; }
@@ -98,6 +142,7 @@
   .btn:disabled{ background:var(--panel-2); color:var(--faint); cursor:not-allowed; }
   .btn.secondary{ background:var(--panel-2); color:var(--ink); border:1px solid var(--line); }
   .btn.secondary:hover:not(:disabled){ border-color:var(--blue); }
+  .btn.secondary:disabled{ color:var(--faint); cursor:not-allowed; }
   .btn.red:not(:disabled){ background:var(--red); } .btn.green:not(:disabled){ background:var(--green); }
   .btn-row{ display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   .sky-list{ display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:2px 0 8px; }
@@ -322,6 +367,7 @@
     <button class="tab" role="tab" aria-selected="true" data-tab="train">Train</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="generate">Generate</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="view3d">3D</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="create">Dynamic creation</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="memory">Memory</button>
   </div>
   <div class="engine" title="Connection to the local Python server"><i></i>Engine not connected</div>
@@ -977,6 +1023,87 @@
     </section>
   </div>
 
+  <!-- ===================== DYNAMIC CREATION TAB ===================== -->
+  <div class="tabpane" id="pane-create" hidden>
+    <aside class="left">
+      <section class="panel">
+        <div class="panel-h">Building <small id="bdSaved"></small></div>
+        <div class="panel-b">
+          <div class="seg" role="group" aria-label="Create or import a building">
+            <button type="button" class="seg-b" aria-pressed="true">Create</button>
+            <button type="button" class="seg-b" disabled title="Importing a building comes later">Import <small>later</small></button>
+          </div>
+          <div class="field"><label for="bdName">Name</label><input id="bdName" class="txt" value="" placeholder="Building" disabled></div>
+          <div id="bdList" class="bd-list"></div>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnBdNew" title="A new building: pick a preset to start it">New building</button>
+            <button class="btn secondary" id="btnBdDelete" disabled title="Delete this building (an object made from it stays in the Objects panel)">Delete building</button>
+          </div>
+          <div class="note">Saved as you go, in the workspace.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Presets <small>its shape</small></div>
+        <div class="panel-b">
+          <div id="bdPresets" class="bd-presets"></div>
+          <div class="note">A preset decides the building's shape. Presets you import later will show here; for now every level is a box.</div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Levels <small id="bdLevelCount"></small></div>
+        <div class="panel-b">
+          <div id="bdLevels" class="bd-levels" aria-label="Levels, the top one first"></div>
+          <button class="btn" id="btnLvAdd" disabled title="A new level on top of the others (under the roof): then draw its rectangle in the viewport">Create floor level</button>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnLvDelete" disabled title="Delete the selected level: the levels above move down and are named again">Delete floor level</button>
+            <button class="btn secondary" id="btnRoof" disabled title="The roof: always the top level">Create roof</button>
+          </div>
+          <button class="btn secondary" id="btnBdUndo" disabled title="Undo the last change (Ctrl+Z)">Undo</button>
+          <div class="note">Levels are named by where they stand: the first is the ground floor, then the first floor, the second, and so on. ↑ and ↓ move a level up or down the building; the roof always stays on top, and a level made after it goes under it.</div>
+        </div>
+      </section>
+    </aside>
+    <section class="panel bd-view" style="overflow:hidden;position:relative">
+      <div id="bdView" style="position:absolute;inset:0"></div>
+      <div class="dc-modes" role="group" aria-label="What to create">
+        <button type="button" class="dc-mode" aria-pressed="true">Building</button>
+        <button type="button" class="dc-mode" disabled title="Comes later">Foliage <small>later</small></button>
+        <button type="button" class="dc-mode" disabled title="Comes later">Traffic <small>later</small></button>
+        <button type="button" class="dc-mode" disabled title="Comes later">Assets <small>later</small></button>
+      </div>
+      <div id="bdMsg" class="bd-msg" hidden></div>
+      <div class="vp-tools bd-tools"><button type="button" id="btnBdFit" title="Frame the building">Fit</button></div>
+    </section>
+    <aside class="right">
+      <section class="panel">
+        <div class="panel-h"><span id="bdLvTitle">No level selected</span> <small id="bdLvRange"></small></div>
+        <div class="panel-b" id="bdLvBox">
+          <div class="field"><label for="lvH">Height (m)</label><input type="number" id="lvH" step="0.1" min="0.1" disabled></div>
+          <div class="field"><label for="lvW">Width (m)</label><input type="number" id="lvW" step="0.5" min="0.5" disabled title="Across: along X"></div>
+          <div class="field"><label for="lvL">Length (m)</label><input type="number" id="lvL" step="0.5" min="0.5" disabled title="Front to back: along Z (the front faces the top of the map)"></div>
+          <div class="field"><label for="lvX">Position X (m)</label><input type="number" id="lvX" step="0.5" disabled title="Its middle, across"></div>
+          <div class="field"><label for="lvZ">Position Z (m)</label><input type="number" id="lvZ" step="0.5" disabled title="Its middle, front to back"></div>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnLvDraw" disabled title="Draw this level's rectangle again in the viewport">Draw rectangle</button>
+            <button class="btn secondary" id="btnLvSame" disabled title="The same rectangle as the level below">Same as below</button>
+          </div>
+          <div class="note" id="bdLvNote"></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Floor plans <small>the top level first</small></div>
+        <div class="panel-b" id="bdPlans"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-h">Use</div>
+        <div class="panel-b">
+          <button class="btn" id="btnBdObject" disabled title="Make this building an object layer in the Generate tab: place it, put it in a package, or lay it automatically on islands">Use as object</button>
+          <div class="note" id="bdObjNote">Its front, towards the top of the plans, is the object's front (+Y): the side that faces the street.</div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
   <!-- ===================== SHARED BOTTOM ===================== -->
   <div class="bottom">
     <section class="console">
@@ -1035,5 +1162,6 @@
 </script>
 <script type="module" src="view3d.js"></script>
 <script type="module" src="topview.js"></script>
+<script type="module" src="building.js"></script>
 </body>
 </html>

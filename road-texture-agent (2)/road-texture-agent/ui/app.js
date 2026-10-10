@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.09-auto1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.10-build1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -325,7 +325,9 @@ const UI_VERSION = '2026.10.09-auto1';   // must match VERSION in server.py
     $('#pane-generate').hidden = S.tab !== 'generate';
     $('#pane-memory').hidden = S.tab !== 'memory';
     $('#pane-view3d').hidden = S.tab !== 'view3d';
+    $('#pane-create').hidden = S.tab !== 'create';
     window.dispatchEvent(new CustomEvent('view3d', { detail: S.tab === 'view3d' }));   // ui/view3d.js draws only while showing
+    window.dispatchEvent(new CustomEvent('create-tab', { detail: S.tab === 'create' })); // and ui/building.js
     if(S.tab === 'memory') renderPairs2();
     $('#clickHint').hidden = true;
     renderInfo();
@@ -4174,6 +4176,8 @@ const UI_VERSION = '2026.10.09-auto1';   // must match VERSION in server.py
     if(!K.foliage) $('#btnAutoObj').disabled = $(K.add).disabled;
   }
 
+  // a building made an object in the Dynamic creation tab (ui/building.js): the lists again
+  window.addEventListener('objects-changed', () => loadObjects());
   async function loadObjects(){
     try{
       S.gen.objects = (await api('/api/objects')).objects;
