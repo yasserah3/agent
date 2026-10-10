@@ -404,6 +404,32 @@ def load(path):
                    "triangles": int(sum(len(p["faces"]) for p in parts)), "parts": len(parts)}
 
 
+# a file's front, as Blender shows its axes (Z up), to this app's (+Y, the green arrow): the turn
+# about the up axis (degrees, counter-clockwise seen from above) that brings it there
+FRONT_TURN = {"+y": 0.0, "+x": 90.0, "-y": 180.0, "-x": -90.0}
+FRONT_NAME = {"+y": "+Y", "+x": "+X", "-y": "-Y", "-x": "-X"}
+
+
+def face_front(parts, front):
+    """
+    An object whose front faces `front` in its file turned so its front is +Y (-Z here, the
+    top of the map at rotation 0), then centred again: its new width, depth and height.
+    """
+    th = math.radians(FRONT_TURN.get(front, 0.0))
+    if th:
+        c, s = math.cos(th), math.sin(th)
+        R = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])      # about +Y (up)
+        for p in parts:
+            p["pos"] = p["pos"] @ R.T
+    allp = np.vstack([p["pos"] for p in parts])
+    lo, hi = allp.min(axis=0), allp.max(axis=0)
+    shift = np.array([(lo[0] + hi[0]) / 2, lo[1], (lo[2] + hi[2]) / 2])
+    for p in parts:
+        p["pos"] = p["pos"] - shift
+    size = hi - lo
+    return {"width_m": round(float(size[0]), 3), "depth_m": round(float(size[2]), 3), "height_m": round(float(size[1]), 3)}
+
+
 def save(parts, folder):
     """Store normalised parts: one npz for geometry, one PNG per textured part."""
     folder.mkdir(parents=True, exist_ok=True)

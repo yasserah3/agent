@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.10-build2';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1024,21 +1024,30 @@ const UI_VERSION = '2026.10.10-build2';   // must match VERSION in server.py
 
   // Download 3D model: a window in the middle of the screen for the format (GLB, FBX,
   // OBJ) and what is combined; the choices are kept in this browser
-  const EXPORT = (() => { try{ return { format: 'glb', ground: false, objects: false, ...JSON.parse(localStorage.getItem('rta.export') || '{}') }; }
-                          catch(_){ return { format: 'glb', ground: false, objects: false }; } })();
+  const EXPORT = (() => { try{ return { format: 'glb', ground: false, objects: false, front: '+y', ...JSON.parse(localStorage.getItem('rta.export') || '{}') }; }
+                          catch(_){ return { format: 'glb', ground: false, objects: false, front: '+y' }; } })();
+  const FRONT_NAME = { '+y': '+Y', '+x': '+X', '-y': '-Y', '-x': '-X' };
+  // the objects' front in the file: their own axes turned, every copy where it stood
+  const exportFrontNote = () => { $('#exFrontNote').textContent = (EXPORT.front === '+y'
+      ? 'Each object\'s own front is +Y, as it is here (Blender\'s green arrow). '
+      : `Each object's own axes are turned so its front is ${FRONT_NAME[EXPORT.front]}; every object still stands where it is, facing its street. `)
+    + (EXPORT.format === 'obj' ? 'OBJ keeps no object axes (every copy is written in place), so this changes nothing there.'
+      : EXPORT.front === '+x' ? 'In Unreal, check once which way an imported object faces: its importer can turn files too (Force Front XAxis, Convert Scene).' : ''); };
   const exportNote = () => { $('#exNote').textContent = EXPORT.format === 'glb'
     ? 'GLB: one file with its textures inside. Opens in Blender, Unreal, Unity and three.js.'
     : `${EXPORT.format.toUpperCase()}: a zip with the model and a textures folder it refers to; unzip it before opening. Metres, Y up.`; };
   function openExport(){
     if(!S.gen.result) return;
     $('#exFormat').value = EXPORT.format; $('#exGround').checked = EXPORT.ground; $('#exObjects').checked = EXPORT.objects;
-    exportNote(); $('#exportPop').hidden = false; $('#exFormat').focus();
+    $('#exFront').value = EXPORT.front;
+    exportNote(); exportFrontNote(); $('#exportPop').hidden = false; $('#exFormat').focus();
   }
   const closeExport = () => { $('#exportPop').hidden = true; };
-  ['#exFormat', '#exGround', '#exObjects'].forEach(id => $(id).addEventListener('change', () => {
+  ['#exFormat', '#exGround', '#exObjects', '#exFront'].forEach(id => $(id).addEventListener('change', () => {
     EXPORT.format = $('#exFormat').value; EXPORT.ground = $('#exGround').checked; EXPORT.objects = $('#exObjects').checked;
+    EXPORT.front = $('#exFront').value;
     try{ localStorage.setItem('rta.export', JSON.stringify(EXPORT)); }catch(_){}
-    exportNote();
+    exportNote(); exportFrontNote();
   }));
   $('#exClose').addEventListener('click', closeExport);
   $('#exCancel').addEventListener('click', closeExport);
@@ -1105,16 +1114,18 @@ const UI_VERSION = '2026.10.10-build2';   // must match VERSION in server.py
           + `${(res.file_bytes/1048576).toFixed(1)} MB.`, 'ok');
       }
       let url = res.url;
-      if(choice.format !== 'glb' || choice.ground || choice.objects){
+      const front = choice.front || '+y';
+      if(choice.format !== 'glb' || choice.ground || choice.objects || front !== '+y'){
         status(`Writing ${choice.format.toUpperCase()}…`);
         const cv = await api('/api/export3d/convert', { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ generation: S.gen.result.id, format: choice.format, combine_ground: choice.ground, combine_objects: choice.objects }) });
+          body: JSON.stringify({ generation: S.gen.result.id, format: choice.format, combine_ground: choice.ground, combine_objects: choice.objects, front }) });
         url = cv.url;
         log(`  ${choice.format.toUpperCase()}: ${cv.objects} object(s)`
           + (choice.ground ? ', the streets, sidewalks and kerbs as one ("Streets")' : '')
           + (choice.objects ? ', every placed object as one ("Objects")' : cv.copies ? `, ${cv.copies.toLocaleString()} object copies each on their own` : '')
           + (cv.file_bytes ? `, ${(cv.file_bytes / 1048576).toFixed(1)} MB` : '')
           + (choice.format === 'glb' ? '.' : ': a zip with the model and its textures folder; unzip it, then import the model.'), 'ok');
+        if(front !== '+y' && choice.format !== 'obj') log(`  Objects' front: ${FRONT_NAME[front]}. Each object's own axes are turned so its front is ${FRONT_NAME[front]}; every object stands where it was, facing its street.`, 'ok');
       }
       log(choice.format === 'fbx' ? '  Units are metres, Y up. Blender: File > Import > FBX. Unreal: drag the .fbx into the Content Browser (its textures come along).'
         : choice.format === 'obj' ? '  Units are metres, Y up. Blender: File > Import > Wavefront (.obj). Unreal: drag the .obj into the Content Browser.'
@@ -4270,14 +4281,17 @@ const UI_VERSION = '2026.10.10-build2';   // must match VERSION in server.py
         const inp = document.createElement('input');
         inp.type = 'file'; inp.accept = '.glb,.obj,.fbx'; inp.multiple = true;
         inp.addEventListener('change', async () => {
-          for(const f of inp.files){
+          const files = [...inp.files]; if(!files.length) return;
+          const front = await askFront(files, `into ${pk.name}`);
+          if(!front){ log('Import cancelled.'); return; }
+          for(const f of files){
             status('Importing object…'); log(`Importing ${f.name} into ${pk.name}…`);
             try{
-              const fd = new FormData(); fd.append('file', f); fd.append('package', pk.id);
+              const fd = new FormData(); fd.append('file', f); fd.append('package', pk.id); fd.append('front', front);
               const r = await fetch(API + '/api/objects/import', { method:'POST', body: fd });
               const res = await r.json();
               if(!r.ok) throw new Error(res.detail || 'import failed');
-              log(`Imported ${res.name} into ${pk.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m.`, 'ok');
+              log(`Imported ${res.name} into ${pk.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m.${frontNote(res, front)}`, 'ok');
               if(Math.max(res.width_m, res.depth_m, res.height_m) > 60)
                 log('  That is very large for an object: the file\'s units were probably off. Set its scale (for example 0.01).', 'bad');
             }catch(e){ log('Import failed: ' + e.message, 'bad'); }
@@ -4313,20 +4327,48 @@ const UI_VERSION = '2026.10.10-build2';   // must match VERSION in server.py
 
   // a new foliage placement: no random transform until its ranges are set
   const newFoliage = () => ({ foliage: true, jitter: { seed: (Math.random() * 4294967296) >>> 0, scale: [1, 1], rotate: [0, 0], offset: [0, 0], overlap: true } });
+  // Importing: which way the file's front faces (+Y as here, +X as Unreal's, -Y, -X), asked each
+  // time, the last answer ready; the object is turned so its front is +Y like every object here
+  let frontAsked = null;
+  function askFront(files, what){
+    $('#importTitle').textContent = `Import ${what}`;
+    $('#imFiles').textContent = files.length === 1 ? files[0].name : `${files.length} files: ${files.map(f => f.name).join(', ')}`;
+    let last = '+y';
+    try{ last = localStorage.getItem('rta.import.front') || '+y'; }catch(_){}
+    $$('input[name="imFront"]').forEach(r => { r.checked = r.value === last; });
+    $('#importPop').hidden = false;
+    $('#imGo').focus();
+    return new Promise(res => { frontAsked = res; });
+  }
+  function answerFront(ok){
+    if(!frontAsked) return;
+    const pick = ($$('input[name="imFront"]').find(r => r.checked) || {}).value || '+y', done = frontAsked;
+    frontAsked = null; $('#importPop').hidden = true;
+    if(ok) try{ localStorage.setItem('rta.import.front', pick); }catch(_){}
+    done(ok ? pick : null);
+  }
+  $('#imGo').addEventListener('click', () => answerFront(true));
+  ['#imCancel', '#imClose'].forEach(id => $(id).addEventListener('click', () => answerFront(false)));
+  $('#importPop').addEventListener('pointerdown', e => { if(e.target === $('#importPop')) answerFront(false); });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && !$('#importPop').hidden) answerFront(false); });
+  const frontNote = (res, front) => front && front !== '+y' ? ` Its front was ${FRONT_NAME[front]} in the file: turned to face +Y like every object here.` : '';
+
   [['#btnImportObj', KIND.objects], ['#btnImportFol', KIND.foliage]].forEach(([id, K]) => $(id).addEventListener('click', () => {
     const inp = document.createElement('input');
     inp.type = 'file'; inp.accept = '.glb,.obj,.fbx';
     inp.addEventListener('change', async () => {
       const f = inp.files[0]; if(!f) return;
+      const front = await askFront([f], K.word);
+      if(!front){ log(`Import of ${f.name} cancelled.`); return; }
       status(`Importing ${K.word}…`); log(`Importing ${f.name}…`);
       try{
-        const fd = new FormData(); fd.append('file', f);
+        const fd = new FormData(); fd.append('file', f); fd.append('front', front);
         if(K.foliage) fd.append('foliage', '1');
         const r = await fetch(API + '/api/objects/import', { method:'POST', body: fd });
         const res = await r.json();
         if(!r.ok) throw new Error(res.detail || 'import failed');
         S.gen.objects.push(res); S.gen[K.sel] = res.id;
-        log(`Imported ${res.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m, ${res.triangles.toLocaleString()} triangles.`, 'ok');
+        log(`Imported ${res.name}: ${res.width_m} × ${res.depth_m} × ${res.height_m} m, ${res.triangles.toLocaleString()} triangles.${frontNote(res, front)}`, 'ok');
         if(res.frame) log(`  Kept ${res.frame}: the arrow on the map points to its +Y.`);
         if(Math.max(res.width_m, res.depth_m, res.height_m) > 60)
           log('  That is very large for an object: the file\'s units were probably off. Set its scale (for example 0.01).', 'bad');

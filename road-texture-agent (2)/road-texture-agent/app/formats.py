@@ -18,6 +18,14 @@ same model.
 
 Units are metres, Y up, as in the GLB. FBX and OBJ come in a zip with their
 pictures in textures/, which the files refer to by relative path.
+
+- front: which way every placed object's own front faces in the file, as Blender
+  shows the axes once imported (Z up): "+y" as made here (Blender's green arrow),
+  or "+x" (Unreal Engine's), "-y" or "-x". Each object's mesh is turned so its
+  front is along that axis and each copy turned back by as much, so every object
+  stands exactly where it stood, facing its street; only its own axes change. The
+  streets and the rest have no front and do not move. OBJ keeps no object axes
+  (every copy is written in place), so there it changes nothing.
 """
 import io
 import json
@@ -90,6 +98,41 @@ def read_glb(path):
                           "material": p.get("material", 0)})
         objects.append({"name": m.get("name") or f"Mesh_{mi}", "prims": prims, "places": places.get(mi)})
     return {"materials": materials, "images": images, "objects": objects}
+
+
+# ------------------------------------------------------------------ the objects' front
+# the turn about the up axis (degrees, counter-clockwise seen from above; Y up here, Z up
+# in Blender) that takes an object's front from +Y (Blender's, -Z in glTF) to each axis
+FRONT_TURN = {"+y": 0.0, "+x": -90.0, "-y": 180.0, "-x": 90.0}
+
+
+def _qmul(a, b):
+    """Quaternions (x, y, z, w) multiplied: a then b in a's frame (the rotation a·b)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz])
+
+
+def face_front(model, front):
+    """
+    Every placed object's own front along `front` ("+y", "+x", "-y", "-x"): its mesh turned
+    about the up axis, each copy turned back as much, so the world stays exactly as it was.
+    """
+    th = math.radians(FRONT_TURN.get(front, 0.0))
+    if not th:
+        return model
+    c, s = math.cos(th), math.sin(th)
+    R = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])          # about +Y (up)
+    back = np.array([0.0, math.sin(-th / 2), 0.0, math.cos(-th / 2)])
+    objs = []
+    for o in model["objects"]:
+        if o["places"]:
+            o = dict(o, prims=[dict(p, positions=p["positions"] @ R.T,
+                                    normals=None if p["normals"] is None else p["normals"] @ R.T) for p in o["prims"]],
+                     places=[(t, _qmul(q, back), sc) for t, q, sc in o["places"]])
+        objs.append(o)
+    return dict(model, objects=objs)
 
 
 # ------------------------------------------------------------------ combining
@@ -633,9 +676,9 @@ def write_fbx_zip(model, path, stem):
     return path
 
 
-def convert(glb_path, out_path, fmt, stem, combine_ground=False, combine_objects=False):
-    """The model at glb_path written as fmt ("glb", "fbx" or "obj"), combined as asked."""
-    model = combine(read_glb(glb_path), combine_ground, combine_objects)
+def convert(glb_path, out_path, fmt, stem, combine_ground=False, combine_objects=False, front="+y"):
+    """The model at glb_path written as fmt ("glb", "fbx" or "obj"), its objects' front along front, combined as asked."""
+    model = combine(face_front(read_glb(glb_path), front), combine_ground, combine_objects)
     if fmt == "fbx":
         write_fbx_zip(model, out_path, stem)
     elif fmt == "obj":

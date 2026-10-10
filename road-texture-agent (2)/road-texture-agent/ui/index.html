@@ -205,8 +205,14 @@
                box-shadow:0 18px 48px rgba(0,0,0,.5); padding:14px 16px 16px; }
   .modal-card .mp-h{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:15px; }
   .modal-card .mp-x{ background:none; border:none; color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
-  .modal-card .field{ margin-top:6px; }
+  .modal-card .field{ margin-top:6px; grid-template-columns:1fr 230px; }
   .modal-card .note{ margin:2px 0 8px; }
+  .fronts{ display:flex; flex-direction:column; gap:4px; margin-bottom:6px; }
+  .front-opt{ display:grid; grid-template-columns:18px 1fr; gap:8px; align-items:start; padding:7px 8px; border:1px solid var(--line);
+              border-radius:6px; background:var(--panel-2); cursor:pointer; font-size:12.5px; color:var(--muted); }
+  .front-opt b{ color:var(--ink); margin-right:4px; }
+  .front-opt:has(input:checked){ border-color:var(--blue); box-shadow:0 0 0 1px var(--blue) inset; }
+  .front-opt input{ margin-top:2px; accent-color:var(--blue); }
   .isl-box{ border:1px solid var(--line); border-radius:6px; padding:8px; margin:4px 0 8px; background:rgba(255,255,255,.015); }
   .isl-box .isl-h{ display:flex; justify-content:space-between; align-items:baseline; font-size:12.5px; font-weight:600; }
   .isl-box .isl-h span{ font-weight:400; color:var(--muted); font-size:11.5px; }
@@ -499,7 +505,7 @@
         <div class="panel-h">Objects <small id="objCount"></small></div>
         <div class="panel-b">
           <button class="btn secondary" id="btnImportObj">Import object (GLB, OBJ, FBX)</button>
-          <div class="note" style="color:var(--amber);margin-top:6px">Before importing: the object's front must face the +Y axis (Blender's green arrow). Use ↻ on a layer to turn an object that faces another way. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
+          <div class="note" style="color:var(--amber);margin-top:6px">Importing asks which way the object's front faces in its file (+Y as Blender's green arrow, +X as Unreal's, -Y or -X): it is turned so its front is +Y here, the arrow on the map. ↻ on a layer still turns it a quarter turn. Sizes are read in metres; check the size shown and fix it with the scale if the file's units were off.</div>
           <div id="objList" style="margin-top:8px"></div>
           <button class="btn secondary" id="btnAddObj" disabled>Add selected object to the map</button>
           <button class="btn secondary" id="btnAutoObj" disabled title="Lay the selected object on the islands by rule: one in the middle of each side, its front (+Y) to the street, as many per side as the weight and the side's length allow">Place automatically on islands</button>
@@ -1151,10 +1157,36 @@
     <div class="note">On: the streets, sidewalks and kerbs are one object (each keeps its materials). The blocks and islands and the markings stay objects of their own. Off: each is separate.</div>
     <div class="field"><label for="exObjects">Combine objects</label><input type="checkbox" id="exObjects" style="justify-self:start;accent-color:var(--blue)"></div>
     <div class="note">On: every placed object is one object. Off: each copy is its own object (in GLB and FBX the copies share one mesh; OBJ writes each out).</div>
+    <div class="field"><label for="exFront">Objects' front</label>
+      <select id="exFront" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
+        <option value="+y">+Y (Blender's green arrow, as here)</option>
+        <option value="+x">+X (Unreal Engine)</option>
+        <option value="-y">-Y</option>
+        <option value="-x">-X</option>
+      </select></div>
+    <div class="note" id="exFrontNote"></div>
     <div class="note" id="exNote"></div>
     <div class="btn-row">
       <button type="button" class="btn secondary" id="exCancel">Cancel</button>
       <button type="button" class="btn" id="exGo">Download</button>
+    </div>
+  </div>
+</div>
+<div id="importPop" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="importTitle">
+  <div class="modal-card">
+    <div class="mp-h"><b id="importTitle">Import object</b><button type="button" class="mp-x" id="imClose" title="Cancel (Esc)">×</button></div>
+    <div class="note" id="imFiles"></div>
+    <div style="font-weight:600;margin:6px 0 4px">Which way does its front face in the file?</div>
+    <div class="fronts" role="radiogroup" aria-label="Its front in the file">
+      <label class="front-opt"><input type="radio" name="imFront" value="+y"><span><b>+Y</b> Blender's green arrow: this app's front. Models made for this app, and most from Blender, Maya, 3ds Max and Unity set up this way</span></label>
+      <label class="front-opt"><input type="radio" name="imFront" value="+x"><span><b>+X</b> Unreal Engine's front: models made for or exported from Unreal</span></label>
+      <label class="front-opt"><input type="radio" name="imFront" value="-y"><span><b>-Y</b> What Blender's Front view looks at: many characters and store models</span></label>
+      <label class="front-opt"><input type="radio" name="imFront" value="-x"><span><b>-X</b></span></label>
+    </div>
+    <div class="note">As Blender shows the file's axes once imported (Z up). The object is turned so its front is this app's front (+Y, the arrow on the map), so every object faces its street the same way. The choice is remembered for the next import.</div>
+    <div class="btn-row">
+      <button type="button" class="btn secondary" id="imCancel">Cancel</button>
+      <button type="button" class="btn" id="imGo">Import</button>
     </div>
   </div>
 </div>

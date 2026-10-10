@@ -114,6 +114,21 @@ result. A window in the middle of the screen asks first:
   one object, "Objects". Off, each copy is its own object: in GLB and FBX the
   copies share one mesh (instances, small files; Blender makes them linked
   duplicates); OBJ has no instances, so each copy is written out.
+- **Objects' front**: which way every placed object's own front faces in the
+  file, as Blender shows the axes once imported (Z up): **+Y** as made here
+  (Blender's green arrow), **+X** (Unreal Engine's front), **-Y** or **-X**.
+  Each object's mesh is turned so its front is along that axis, and each copy
+  is turned back by as much, so every object still stands exactly where it
+  stood, facing its street: only the object's own axes change, and the streets
+  and everything else stay as they are. In FBX the file stays Y up as before,
+  its -Z being Blender's +Y. OBJ keeps no object axes (each copy is written in
+  place), so there the choice changes nothing. Checked in Blender 4.2 with a
+  test model at 30° on the map, written with each front in GLB, FBX and OBJ:
+  in all twelve files it faces the same way in the world, and in GLB and FBX
+  its front lies along the object's own axis chosen. Unreal's importers can
+  turn a file on the way in too (FBX: Convert Scene, Force Front XAxis): check
+  once which way an imported object faces there, and pick the front that
+  makes it +X.
 
 The choices are kept in this browser. The model itself is built once and
 shared (the Top view and the 3D tab use it); the format is written from it
@@ -1393,9 +1408,18 @@ a full path, so it is found wherever the workspace now is.
 
 In the Generate tab, **Objects** sits above **Foliage** (below) and Bridges.
 
-- **Import** a GLB, OBJ or FBX. Model it with its **front facing +Y** (Blender's
-  green arrow). The **↻** button on a layer turns an object a quarter turn
-  within its rectangle, for objects modelled facing another way.
+- **Import** a GLB, OBJ or FBX. A window asks which way its **front** faces in
+  the file, as Blender shows the axes once imported (Z up): **+Y** (Blender's
+  green arrow, this app's front), **+X** (Unreal Engine's), **-Y** (what
+  Blender's Front view looks at, as many characters and store models) or
+  **-X**. The object is turned so its front is +Y here, the arrow on the map,
+  so every object faces its street the same way whatever program it came
+  from; the console says when it was turned. The last answer is ready the
+  next time; Cancel imports nothing. The same question comes for plants and
+  for objects imported into a package (one answer for all the files picked).
+  Checked with test models made in Blender facing +Y, +X and -Y, as GLB and
+  FBX: each came in facing +Y. The **↻** button on a layer still turns an
+  object a quarter turn within its rectangle.
 - Objects keep **their own axes**, the ones Blender shows on the object
   (Transform orientation: Local), whatever the object was rotated to in its
   scene. The white arrow on the map points to the object's own +Y, and at

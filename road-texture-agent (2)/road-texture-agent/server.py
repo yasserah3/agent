@@ -65,7 +65,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.10-build2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.10-front1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1087,13 +1087,19 @@ def _bridge_list(raw):
 
 # ------------------------------------------------------------------ objects
 @app.post("/api/objects/import")
-async def import_object(file: UploadFile = File(...), package: str = Form(""), foliage: str = Form("")):
+async def import_object(file: UploadFile = File(...), package: str = Form(""), foliage: str = Form(""),
+                        front: str = Form("+y")):
     """
     Import a GLB, OBJ or FBX object: normalised to metres, footprint centred,
     base at 0. With a package, the object becomes a new slot of that package
     instead of a layer of its own. Plants (foliage) are imported the same way,
-    marked foliage, or into a foliage package.
+    marked foliage, or into a foliage package. front: which way its front faces in
+    the file ("+y", "+x", "-y", "-x", as Blender shows the axes): it is turned so
+    its front is this app's, +Y.
     """
+    front = str(front).strip().lower()
+    if front not in OB.FRONT_TURN:
+        raise HTTPException(400, "front must be +y, +x, -y or -x")
     name = Path(file.filename or "object").name
     ext = name.lower().rsplit(".", 1)[-1]
     if ext not in ("glb", "obj", "fbx"):
@@ -1115,8 +1121,10 @@ async def import_object(file: UploadFile = File(...), package: str = Form(""), f
         import shutil
         shutil.rmtree(folder, ignore_errors=True)
         raise HTTPException(400, "could not read %s: %s" % (name, e))
+    if front != "+y":
+        info.update(OB.face_front(parts, front))                # its front made +Y, as every object here
     OB.save(parts, folder)
-    meta = {"name": Path(name).stem, "file": name, "format": ext, "scale": 1.0, "turn": 0, **info}
+    meta = {"name": Path(name).stem, "file": name, "format": ext, "scale": 1.0, "turn": 0, "front": front, **info}
     if (pk.get("foliage") if pk is not None else foliage.strip().lower() in ("1", "true", "yes")):
         meta["foliage"] = True
     if pk is not None:
@@ -2726,13 +2734,16 @@ def export3d_convert(payload: dict):
     rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"]) if art else None
     stem = Path(rec["name"]).stem + "_roads" if rec else "roads"
     cg, co = bool(payload.get("combine_ground")), bool(payload.get("combine_objects"))
-    if fmt == "glb" and not cg and not co:
-        return {"ok": True, "url": f"/api/download/{gid}_glb?name={stem}.glb", "format": "glb", "objects": None}
-    tag = f"{fmt}_{int(cg)}{int(co)}"
+    front = str(payload.get("front") or "+y").lower()
+    if front not in FMT.FRONT_TURN:
+        raise HTTPException(400, "front must be +y, +x, -y or -x")
+    if fmt == "glb" and not cg and not co and front == "+y":
+        return {"ok": True, "url": f"/api/download/{gid}_glb?name={stem}.glb", "format": "glb", "objects": None, "front": front}
+    tag = f"{fmt}_{int(cg)}{int(co)}" + ("" if front == "+y" else "_" + {"+x": "px", "-y": "ny", "-x": "nx"}[front])
     out = ARTIFACTS / f"gen_{gid}_{tag}.{'glb' if fmt == 'glb' else 'zip'}"
     part = out.with_name(out.stem + f".{uuid.uuid4().hex[:8]}.part{out.suffix}")
     try:
-        info = FMT.convert(glb["path"], part, fmt, stem, cg, co)
+        info = FMT.convert(glb["path"], part, fmt, stem, cg, co, front)
         os.replace(part, out)
     except BaseException:
         part.unlink(missing_ok=True)
@@ -2740,7 +2751,7 @@ def export3d_convert(payload: dict):
     mem.add_artifact(f"{gid}_{tag}", f"model_{fmt}", out, {"generation": gid, **info})
     name = f"{stem}.glb" if fmt == "glb" else f"{stem}_{fmt}.zip"
     return {"ok": True, "url": f"/api/download/{gid}_{tag}?name={name}", "format": fmt, "file_bytes": out.stat().st_size,
-            "objects": info["count"], "names": info["objects"], "copies": info["copies"]}
+            "objects": info["count"], "names": info["objects"], "copies": info["copies"], "front": front}
 
 
 @app.get("/api/download/{artifact_id}")
