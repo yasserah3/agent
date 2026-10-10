@@ -23,7 +23,14 @@ const COLOURS = { ground: 0xccb08c, floors: [0xdbd9d1, 0xc2c9d4], roof: 0x737880
 const colourOf = (lv, i) => lv[i].kind === 'roof' ? COLOURS.roof : i === 0 ? COLOURS.ground : COLOURS.floors[(i - 1) % 2];
 const hex = c => '#' + c.toString(16).padStart(6, '0');
 const HEIGHT = { ground: 4, floor: 3, roof: 1 };            // a new level's height (m): shops on the ground floor
-const SNAP_M = 0.5, EDGE_SNAP_M = 0.6, MIN_M = 1;
+const SNAP_M = 0.5, MIN_M = 1;
+// Snapping while drawing, kept in this browser: to the edges of the floor below (within reach,
+// metres) and to the half-metre grid. Ctrl or Alt held while drawing: free, to the centimetre
+const SNAP = { below: true, reach: 1.0, grid: true };
+try{ Object.assign(SNAP, JSON.parse(localStorage.getItem('rta.building.snap') || '{}')); }catch(_){}
+const saveSnap = () => { try{ localStorage.setItem('rta.building.snap', JSON.stringify(SNAP)); }catch(_){} };
+const SIDES = { x0: 'left', x1: 'right', z0: 'front', z1: 'back' };
+const free = e => e.altKey || e.ctrlKey;                      // Alt or Ctrl held: no snapping
 const hasRoof = lv => lv.length > 0 && lv[lv.length - 1].kind === 'roof';
 const baseOf = (lv, i) => lv.slice(0, i).reduce((s, l) => s + l.h, 0);
 const m = v => `${+(Math.round(v * 100) / 100).toFixed(2)}`;
@@ -111,6 +118,12 @@ function showDrawGrid(y, around){
 const belowLine = new THREE.LineLoop(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xd9a441 }));
 belowLine.visible = false;
 scene.add(belowLine);
+// the edges of the rectangle being drawn that sit on the floor below's edges: bright green strips,
+// seen through the boxes (a line would hide under the new box and is one pixel wide)
+const snapLines = new THREE.Group();
+snapLines.visible = false;
+scene.add(snapLines);
+const snapMat = new THREE.MeshBasicMaterial({ color: 0x4fe08a, depthTest: false, transparent: true, opacity: 0.95 });
 const levelsGroup = new THREE.Group();
 scene.add(levelsGroup);
 
@@ -187,6 +200,24 @@ function fit(){
   scene.fog.near = r * 4; scene.fog.far = r * 4 + 160;
 }
 $('#btnBdFit').addEventListener('click', fit);
+function renderSnap(){
+  $('#btnSnap').setAttribute('aria-pressed', SNAP.below ? 'true' : 'false');
+  $('#snapBelow').checked = SNAP.below; $('#snapGrid').checked = SNAP.grid;
+  if(document.activeElement !== $('#snapReach')) $('#snapReach').value = SNAP.reach;
+  $('#snapReach').disabled = !SNAP.below;
+}
+function setSnap(key, v){
+  SNAP[key] = v; saveSnap(); renderSnap(); renderMsg();
+  if(key === 'below') say(v ? `Snap on: a rectangle's edges within ${m(SNAP.reach)} m of the floor below's edges go onto them.` : 'Snap off: rectangles are drawn without the floor below\'s edges.');
+}
+$('#btnSnap').addEventListener('click', () => setSnap('below', !SNAP.below));
+$('#snapBelow').addEventListener('change', () => setSnap('below', $('#snapBelow').checked));
+$('#snapGrid').addEventListener('change', () => setSnap('grid', $('#snapGrid').checked));
+$('#snapReach').addEventListener('input', () => {
+  const v = parseFloat($('#snapReach').value);
+  if(Number.isFinite(v)){ SNAP.reach = Math.min(20, Math.max(0.05, v)); saveSnap(); renderMsg(); }
+});
+renderSnap();
 
 // ----------------------------------------------------------------- drawing a level's rectangle
 const ray = new THREE.Raycaster();
@@ -201,11 +232,41 @@ function onPlane(e, y){
   const p = new THREE.Vector3();
   return ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -y), p) ? p : null;
 }
-// to the half metre, or to an edge of the level below within reach (to draw the same rectangle)
-function snap(v, edges){
-  for(const e of edges) if(Math.abs(v - e) <= EDGE_SNAP_M) return e;
-  return Math.round(v / SNAP_M) * SNAP_M;
+// a coordinate snapped: to the nearest edge of the floor below within reach (Snap to the floor
+// below), else to the half metre (Snap to the grid), else to the centimetre; Ctrl or Alt held: free
+function snap(v, edges, free){
+  if(!free && SNAP.below){
+    let best = null;
+    for(const [key, e] of edges) if(Math.abs(v - e) <= SNAP.reach && (!best || Math.abs(v - e) < Math.abs(v - best[1]))) best = [key, e];
+    if(best) return { v: best[1], edge: best[0] };
+  }
+  return { v: !free && SNAP.grid ? Math.round(v / SNAP_M) * SNAP_M : Math.round(v * 100) / 100, edge: null };
 }
+// the sides of the rectangle on the floor below's edges, and those edges lit in the viewport
+function showSnapped(d, y){
+  const r = B.cur.levels[d.i].rect, below = belowOf(B.cur.levels, d.i);
+  d.snapped = [];
+  if(r && below){
+    const a = rectBox(r), b = rectBox(below.rect), on = (u, v) => Math.abs(u - v) < 1e-6;
+    for(const k of ['x0', 'x1', 'z0', 'z1']) if(on(a[k], b[k])) d.snapped.push(k);
+  }
+  snapLines.children.forEach(o => o.geometry.dispose());
+  snapLines.clear();
+  if(r && d.snapped.length){
+    const a = rectBox(r), t = Math.max(0.08, Math.max(r.w, r.l) / 120);    // thick enough to see at any size
+    d.snapped.forEach(k => {
+      const alongX = k[0] === 'z', len = alongX ? a.x1 - a.x0 : a.z1 - a.z0;
+      const strip = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len + t : t, t, alongX ? t : len + t), snapMat);
+      strip.position.set(alongX ? (a.x0 + a.x1) / 2 : a[k], y + t / 2, alongX ? a[k] : (a.z0 + a.z1) / 2);
+      strip.renderOrder = 10;
+      snapLines.add(strip);
+    });
+  }
+  snapLines.visible = snapLines.children.length > 0;
+}
+const snappedText = (d, belowName) => !d.snapped || !d.snapped.length ? ''
+  : d.snapped.length === 4 ? `the same rectangle as the ${belowName}`
+  : `on the ${belowName}'s ${d.snapped.map(k => SIDES[k]).join(d.snapped.length === 2 ? ' and ' : ', ')} edge${d.snapped.length > 1 ? 's' : ''}`;
 function startDraw(i){
   const lv = B.cur.levels;
   B.draw = { i, start: null, before: null };
@@ -220,14 +281,17 @@ function startDraw(i){
   belowLine.visible = !!bc;
   renderAll();
 }
-function endDraw(){ B.draw = null; showDrawGrid(null); belowLine.visible = false; renderAll(); }
+function endDraw(){ B.draw = null; showDrawGrid(null); belowLine.visible = false; snapLines.visible = false; renderAll(); }
 function drawMessage(){
   if(!B.draw) return null;
   const lv = B.cur.levels, i = B.draw.i, name = levelName(lv, i), below = i > 0 ? levelName(lv, i - 1) : null;
-  const r = lv[i].rect;
-  if(B.draw.start && r) return `${name}: ${m(r.w)} × ${m(r.l)} m. Let go to keep it.`;
+  const r = lv[i].rect, fb = belowOf(lv, i);
+  if(B.draw.start && r){
+    const on = fb ? snappedText(B.draw, levelName(lv, fb.k)) : '';
+    return `${name}: ${m(r.w)} × ${m(r.l)} m${on ? ', ' + on + ' (green)' : ''}. Let go to keep it${SNAP.below || SNAP.grid ? '; hold Ctrl or Alt to draw freely' : ''}.`;
+  }
   return i === 0 ? `Draw the ${name}: press and drag on the ground. Esc to stop.`
-    : `Draw the ${name}: press and drag on the top of the ${below}${belowOf(lv, i) ? ' (its outline in orange; corners snap to it)' : ''}. Esc to stop.`;
+    : `Draw the ${name}: press and drag on the top of the ${below}${fb ? ` (its outline in orange${SNAP.below ? `; edges within ${m(SNAP.reach)} m snap to it` : ''})` : ''}. Esc to stop.`;
 }
 host.addEventListener('pointerdown', e => {
   if(!B.cur || e.button !== 0 || e.target.closest('.dc-modes, .vp-tools')) return;
@@ -236,8 +300,8 @@ host.addEventListener('pointerdown', e => {
     if(!p) return;
     e.stopPropagation(); e.preventDefault();                      // not a turn of the view
     const below = belowOf(lv, B.draw.i), bc = below && rectBox(below.rect);
-    B.draw.edges = bc ? { x: [bc.x0, bc.x1, below.rect.x], z: [bc.z0, bc.z1, below.rect.z] } : { x: [], z: [] };
-    B.draw.start = [snap(p.x, B.draw.edges.x), snap(p.z, B.draw.edges.z)];
+    B.draw.edges = bc ? { x: [['x0', bc.x0], ['x1', bc.x1]], z: [['z0', bc.z0], ['z1', bc.z1]] } : { x: [], z: [] };
+    B.draw.start = [snap(p.x, B.draw.edges.x, free(e)).v, snap(p.z, B.draw.edges.z, free(e)).v];
     B.draw.before = lv[B.draw.i].rect ? { ...lv[B.draw.i].rect } : null;
     pushUndo();
     return;
@@ -249,10 +313,10 @@ window.addEventListener('pointermove', e => {
   if(!d || !d.start) return;
   const lv = B.cur.levels, p = onPlane(e, baseOf(lv, d.i));
   if(!p) return;
-  const x = snap(p.x, d.edges.x), z = snap(p.z, d.edges.z);
+  const x = snap(p.x, d.edges.x, free(e)).v, z = snap(p.z, d.edges.z, free(e)).v;
   const [x0, x1] = [Math.min(d.start[0], x), Math.max(d.start[0], x)], [z0, z1] = [Math.min(d.start[1], z), Math.max(d.start[1], z)];
   lv[d.i].rect = { x: (x0 + x1) / 2, z: (z0 + z1) / 2, w: Math.max(0.01, x1 - x0), l: Math.max(0.01, z1 - z0) };
-  build(); renderMsg();
+  build(); showSnapped(d, baseOf(lv, d.i)); renderMsg();
 });
 window.addEventListener('pointerup', e => {
   const d = B.draw;
@@ -265,9 +329,9 @@ window.addEventListener('pointerup', e => {
       build(); renderMsg();
       return;
     }
-    const first = !d.before;
+    const first = !d.before, fb = belowOf(lv, d.i), on = fb ? snappedText(d, levelName(lv, fb.k)) : '';
     endDraw(); changed();
-    say(`${name}: ${m(r.w)} × ${m(r.l)} m, ${m(lv[d.i].h)} m high${first && d.i === 0 ? '. Create floor level adds the First floor on top of it' : ''}.`, 'ok');
+    say(`${name}: ${m(r.w)} × ${m(r.l)} m, ${m(lv[d.i].h)} m high${on ? ', ' + on : ''}${first && d.i === 0 ? '. Create floor level adds the First floor on top of it' : ''}.`, 'ok');
     if(first && B.cur.levels.filter(l => l.rect).length === 1) fit();
     return;
   }

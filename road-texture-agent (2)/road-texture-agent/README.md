@@ -2162,7 +2162,17 @@ blue arrow on the ground in the viewport: the side that faces the street.
 
 In the viewport: drag to turn round the building, right-drag to move, wheel to
 zoom, **Fit** to frame it; click a box to select its level; Esc stops drawing.
-Snapping: to the half metre, and to the edges of the level below within 0.6 m.
+
+**Snap** (the button beside Fit, and **Snapping** on the right): while you draw a
+floor, each edge of its rectangle that comes within **Snap within** (1 m to start)
+of an edge of the floor below goes exactly onto it, the nearest one when two are
+close. The edges that snap light up green while you drag, and the message and the
+console say which (left, right, front, back, as on the floor plans; all four: the
+same rectangle as the floor below). Edges further away go to the half metre
+(**Snap to the half metre**), or to the centimetre with that off. Snap off: no
+edges of the floor below, only the half metre. Hold **Ctrl** or **Alt** while
+drawing to draw freely, whatever the settings. The settings are kept in this
+browser.
 
 **Saved and used.** A building is saved as it changes (in the workspace's
 buildings folder) and listed under Building: click one to open it. **Use as
