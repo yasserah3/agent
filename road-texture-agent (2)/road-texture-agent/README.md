@@ -875,12 +875,12 @@ machine:
   outline or line; the handles (bridges, the markings area, the street being
   set) are as before.
 - **Top view**: it is the whole 3D model drawn from above, and on a city that
-  model takes 20 minutes or more. When the estimate (about 45 s for every km² of
-  road, from the measurements above) is over a minute, it is no longer built by
-  itself after Generate texture or a change: its layer button says *click to
-  build*, and a click draws it from the model's 1 km patches (below): the
-  whole map flat first, then each patch drawn into its square as it is built.
-  Smaller maps work as before.
+  model takes 20 minutes or more. When the estimate (*How long a whole model
+  takes*, below) is over a minute, it is no longer built by itself after
+  Generate texture or a change: its layer button says *click to build*, and a
+  click draws it from the model's 1 km patches (below): the whole map flat
+  first, then each patch drawn into its square as it is built. Smaller maps
+  work as before.
 - **Generate 3D scene** on such a map builds it in patches (below).
 
 ### Big maps in 1 km patches
@@ -889,8 +889,32 @@ A city's 3D model as one piece took 23 minutes and 10.6 GB on the 6 m a pixel
 map above. On the same city at 2.5 m a pixel (4780 × 3584 px, 12 × 9 km) it
 had used 12.5 GB after 17.5 minutes and was stopped, with 15 GB in the machine:
 it does not fit. So when a map's model would take more than a minute (the same
-estimate as the Top view), the 3D tab and Download 3D model build it in
-**patches of 1 km × 1 km** instead:
+estimate as the Top view, below), the 3D tab builds it in **patches of 1 km ×
+1 km** instead (and Download 3D model, when the road's area alone says so):
+
+**How long a whole model takes** (the estimate, from the mask before Generate
+texture and from the generation after): the larger of 45 s for every km² of
+road (the city above) and **5 s + 0.376 s for each junction + 20.3 s for every
+km² of road**. A junction costs far more than its area (its crossings, corners,
+kerbs and sidewalks), so a map of narrow streets takes much longer than its
+road's area says. Measured with the current code on seven maps (4 cores;
+sidewalks, blocks and junction markings), each within 6%:
+
+| Map | Junctions | Road | Measured | Estimate | Road's area alone |
+| --- | --- | --- | --- | --- | --- |
+| Test map, 0.25 m a pixel | 9 | 0.022 km² | 8.7 s | 8.8 s | 1.0 s |
+| 2000 × 1500 map, a 377 px crop, 1.1 m | 41 | 0.043 km² | 21.2 s | 21.3 s | 1.9 s |
+| 4780 map, an 800 px crop, 1 m | 39 | 0.163 km² | 24.5 s | 23.0 s | 7.3 s |
+| the same crop at 2.5 m | 39 | 1.016 km² | 40.1 s | 40.3 s | 45.7 s |
+| 4780 map, a 1000 px crop, 1 m | 66 | 0.228 km² | 34.7 s | 34.5 s | 10.3 s |
+| 4780 map, a 1500 px crop, 1 m | 188 | 0.531 km² | 82.4 s | 86.5 s | 23.9 s |
+| 2000 × 1500 map, 1.1 m (2.2 × 1.7 km) | 1,079 | 0.82 km² | 433 s | 428 s | 37 s |
+
+The last map was built as one model (37 s by the road's area alone) and took
+7.2 minutes, the view empty until the end; in its 6 patches the part in view
+came in 81 s and the whole map in 2.2 minutes (three at a time). Download 3D
+model still gives such a map as one file (GLB, FBX or OBJ), as before: only
+maps whose road's area alone says over a minute download as patches.
 
 - **What every patch shares is worked out once** for the whole map (about
   40 s on the city): the cleaned mask and its road coverage, the junctions and

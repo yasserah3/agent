@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.11-tjunctions2';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -945,13 +945,26 @@ const UI_VERSION = '2026.10.11-tjunctions2';   // must match VERSION in server.p
   // city, about 45 s and 0.35 GB for every km² of road (23 min, 10.6 GB). Past BIG_MODEL_S its Top
   // view is built only when asked for (its layer button), never by itself after Generate texture or
   // a change, so the whole city is not being built while you work in 2D; Generate 3D scene asks first.
+  // The time grows with the junctions (each one's crossings, corners, kerbs and sidewalks) more than
+  // with the road's area: measured on seven maps (4 cores, sidewalks, blocks and junction markings),
+  // 5 s + 0.376 s a junction + 20.3 s a km² of road, each within 6% (a 2.2 x 1.7 km map of narrow
+  // streets, 1,079 junctions on 0.82 km² of road: 433 s, where the road's area alone said 37 s).
+  // The larger of the two is taken. Past BIG_MODEL_S the 3D tab and the Top view build it in 1 km
+  // patches (the part in view first); Download 3D model still gives one file while the road's area
+  // alone says under BIG_MODEL_S (oneFile), as before.
   const BIG_MODEL_S = 60;
+  const junctionCount = () => {
+    const r = S.gen.result && S.gen.result.summary, j = S.gen.junctions && S.gen.junctions.summary;
+    return r && r.junctions != null ? r.junctions : j && j.junctions != null ? j.junctions : null;
+  };
   function modelCost(){
     const m = S.gen.mask;
     if(!m) return null;
     const mpp = mppMask(), roadPx = m.road_px || m.width * m.height * 0.28;
-    const roadKm2 = roadPx * mpp * mpp / 1e6, s = 45 * roadKm2;
-    return { s, big: s > BIG_MODEL_S, km: [m.width * mpp / 1000, m.height * mpp / 1000], roadKm2,
+    const roadKm2 = roadPx * mpp * mpp / 1e6, byArea = 45 * roadKm2, nj = junctionCount();
+    const s = nj == null ? byArea : Math.max(byArea, 5 + 0.376 * nj + 20.3 * roadKm2);
+    return { s, big: s > BIG_MODEL_S, oneFile: byArea <= BIG_MODEL_S, junctions: nj,
+             km: [m.width * mpp / 1000, m.height * mpp / 1000], roadKm2,
              gb: 0.5 + 0.35 * roadKm2,
              text: s < 90 ? `about ${Math.max(5, Math.round(s / 5) * 5)} s` : `about ${Math.round(s / 60)} min` };
   }
@@ -966,7 +979,8 @@ const UI_VERSION = '2026.10.11-tjunctions2';   // must match VERSION in server.p
     S.gen.topStale = gid;
     $('#lp-top').innerHTML = `<div class="ph">${had ? 'out of date:<br>click to build again' : 'click to build'}<br>(${c.text})</div>`;
     log(had ? `Top view out of date: click its layer to build it again (${c.text}).`
-      : `Top view not built by itself: this map is ${kmText(c)}, too big for one 3D model; click the Top view layer `
+      : `Top view not built by itself: this map is ${kmText(c)}${c.junctions != null ? ` with ${c.junctions.toLocaleString()} junctions` : ''}, `
+        + `its whole 3D model would take ${c.text}; click the Top view layer `
         + 'to draw it from the model\'s 1 km patches as they are built (the 3D tab\'s).');
   }
   async function buildTopView(gid, stay = false){
@@ -1010,8 +1024,8 @@ const UI_VERSION = '2026.10.11-tjunctions2';   // must match VERSION in server.p
   // the whole map flat first, then each patch drawn into its square as it is built
   async function buildTopViewPatches(gid, stay, c){
     $('#lp-top').innerHTML = '<div class="ph">building…</div>';
-    log(`Top view: this map is ${kmText(c)}, so it is drawn from its 3D model's patches of 1 km as they are built `
-      + '(the same patches as the 3D tab\'s; the whole model at once would not fit in memory).');
+    log(`Top view: this map is ${kmText(c)} (its whole 3D model would take ${c.text}), so it is drawn from its 3D model's patches of 1 km as they are built `
+      + '(the same patches as the 3D tab\'s, the middle first).');
     const built = JSON.stringify(exportSettings());
     const job = trackJob('Top view from the 3D patches');
     let painter = null;
@@ -1111,9 +1125,11 @@ const UI_VERSION = '2026.10.11-tjunctions2';   // must match VERSION in server.p
 
   async function download3d(choice){
     if(!S.gen.result) return;
+    // one file as before, unless the road's area alone says the map is too big for one model
     const big = modelCost();
-    if(big && big.big) return downloadPatches(big);
+    if(big && !big.oneFile) return downloadPatches(big);
     $('#btn3d').disabled = true; status('Building 3D model…');
+    if(big && big.big) log(`Building the whole map as one 3D model to download: ${big.text}.`);
     log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
     try{
       const res = await api('/api/export3d', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Building the 3D model',
