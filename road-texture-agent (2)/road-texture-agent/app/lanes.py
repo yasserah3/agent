@@ -28,6 +28,15 @@ All lanes are equal across the road; the lines between them are dashed. From
 22 m, with lanes on both sides, the island lies between the two sides, and a
 solid line runs along both kerbs and along both sides of the island.
 
+Two sets of rules for the lines (rules=):
+- "simple" (as before): every line between two lanes is dashed alike.
+- "guide" (the road marking guide, UTTIPEC Delhi 2009, after IRC 35): the line
+  between the two directions is the centre line: broken with one lane each way
+  ("cdash"), a single solid line with two ("csolid"), a double solid line from
+  three ("cdouble"); the lines between lanes going the same way stay dashed
+  lane lines ("dash"). One-way streets and roads with an island have no centre
+  line. app/roadmarks.py has the sizes and colours of each kind.
+
 Positions are across the road, in metres from its centre: from -width/2 (side
 1's kerb) to +width/2 (side 2's). Side 1 is the left of the street's canonical
 direction (canonical()), so every picture picks the same side.
@@ -74,17 +83,31 @@ def sides_for(width_m, want=None):
     return a, b, cut
 
 
-def layout(width_m, sides=None):
+CENTRE_KINDS = ("cdash", "csolid", "cdouble")
+SOLID_KINDS = ("solid", "csolid", "cdouble")      # laid whole, not dashed
+
+
+def centre_kind(a, b):
+    """The guide's centre line for a lanes each way and b the other: broken, solid, or double solid."""
+    m = max(a, b)
+    return "cdash" if m <= 1 else "csolid" if m == 2 else "cdouble"
+
+
+def layout(width_m, sides=None, rules="simple", edge_inset=None):
     """
     The lines (and island) of a road width_m wide, with sides = (side 1, side 2)
     lanes or None for even: {"width_m", "limit", "sides", "even", "cut",
-    "lanes", "lane_m", "lines": [(x, "dash" or "solid")], "island": (x0, x1) or
-    None, "kind": "none", "road" or "highway"}; x across, metres from the centre.
+    "lanes", "lane_m", "lines": [(x, kind)], "island": (x0, x1) or None,
+    "kind": "none", "road" or "highway"}; x across, metres from the centre.
+    kind: "dash" (a lane line) or "solid" (an edge line), and with the guide's
+    rules the centre line, "cdash", "csolid" or "cdouble". edge_inset: an edge
+    line's middle from the kerb or the island (EDGE_INSET_M when None).
     """
     W = float(width_m)
     half = W / 2
     a, b, cut = sides_for(W, sides)
     lanes = a + b
+    ei = EDGE_INSET_M if edge_inset is None else float(edge_inset)
     out = {"width_m": W, "limit": limit(W), "sides": (a, b), "even": sides is None, "cut": cut, "lanes": lanes}
     if lanes < 2:
         return dict(out, lane_m=W, kind="none", lines=[], island=None)
@@ -93,11 +116,102 @@ def layout(width_m, sides=None):
         i0 = a * s                                         # the island, from side 1's kerb
         lines = [(s * k - half, "dash") for k in range(1, a)]
         lines += [(i0 + ISLAND_M + s * k - half, "dash") for k in range(1, b)]
-        lines += [(x - half, "solid") for x in (EDGE_INSET_M, i0 - EDGE_INSET_M,
-                                                 i0 + ISLAND_M + EDGE_INSET_M, W - EDGE_INSET_M)]
+        lines += [(x - half, "solid") for x in (ei, i0 - ei, i0 + ISLAND_M + ei, W - ei)]
         return dict(out, lane_m=s, kind="highway", lines=sorted(lines), island=(i0 - half, i0 + ISLAND_M - half))
     s = W / lanes
+    if rules == "guide" and a >= 1 and b >= 1:
+        lines = [(s * k - half, "dash" if k != a else centre_kind(a, b)) for k in range(1, lanes)]
+        return dict(out, lane_m=s, kind="road", lines=lines, island=None)
     return dict(out, lane_m=s, kind="road", lines=[(s * k - half, "dash") for k in range(1, lanes)], island=None)
+
+
+def lane_spans(lay):
+    """
+    Each side's lanes across the road, (x0, x1) in metres from the centre, side
+    1's from its kerb to the middle, side 2's from the middle to its kerb, and
+    where the two directions meet (the centre line's x, or the island's (x0,
+    x1)): {"side1", "side2", "centre"}. A road with no lanes (too narrow for
+    lines) counts as one lane each way, half the road each.
+    """
+    W = lay["width_m"]
+    half = W / 2
+    a, b = lay["sides"]
+    if lay["kind"] == "none":
+        return {"side1": [(-half, 0.0)], "side2": [(0.0, half)], "centre": 0.0}
+    s = lay["lane_m"]
+    s1 = [(-half + k * s, -half + (k + 1) * s) for k in range(a)]
+    if lay["island"]:
+        x0 = lay["island"][1]
+        s2 = [(x0 + k * s, x0 + (k + 1) * s) for k in range(b)]
+        return {"side1": s1, "side2": s2, "centre": tuple(lay["island"])}
+    s2 = [(-half + (a + k) * s, -half + (a + k + 1) * s) for k in range(b)]
+    return {"side1": s1, "side2": s2, "centre": (-half + a * s) if a and b else None}
+
+
+def end_setbacks(path_xy, ends, default_px, px):
+    """
+    How far short of each end a street's lines stop (pixels along it, at its
+    first point and its last): where a junction's markings ask (ends: [{"x",
+    "y" (the junction edge, this picture's pixels), "ox", "oy" (out of the
+    junction, along the street), "m" (metres out from the edge the lines stop
+    at), "reach_m" (how far out from the edge the street's end may lie),
+    "half_m" (the road's half width there)}]), else
+    default_px. An end belongs to the street end it lies within reach of and
+    faces along. Below 0: the lines run on past the street's end (into the
+    junction's circle) to the stop line.
+    """
+    import numpy as np
+    P = np.asarray(path_xy, float)
+    out = []
+    for i, j in ((0, min(len(P) - 1, 4)), (len(P) - 1, max(0, len(P) - 5))):
+        p0 = P[i]
+        t = P[j] - p0                                         # into the street from this end
+        n = float(np.hypot(*t)) or 1.0
+        t = t / n
+        best = None
+        for e in ends or ():
+            if e["ox"] * t[0] + e["oy"] * t[1] < 0.8:
+                continue                                      # not along this street
+            # this end must lie on the approach: out from the edge along it, and across it
+            # no further than the road's half width (a stub of centreline beside it is not it)
+            dx, dy = p0[0] - e["x"], p0[1] - e["y"]
+            fwd = dx * e["ox"] + dy * e["oy"]
+            side_ = abs(-dx * e["oy"] + dy * e["ox"])
+            if not (-2.0 / px <= fwd <= e.get("reach_m", 30.0) / px) or side_ > (e.get("half_m", 6.0) + 1.0) / px:
+                continue
+            # the stop point, measured along the street from this end
+            d = (e["x"] + e["ox"] * e["m"] / px - p0[0]) * t[0] + (e["y"] + e["oy"] * e["m"] / px - p0[1]) * t[1]
+            if best is None or side_ < best[0]:
+                best = (side_, d)
+        out.append(best[1] if best else default_px)
+    return out[0], out[1]
+
+
+def extend_ends(P, a_px, b_px):
+    """
+    A line (N x 2 points) run on straight past its first point by a_px and past
+    its last by b_px (along its direction there), a point every pixel (so
+    smoothing it treats the new part as it treats the rest): (points, before,
+    after), before and after the distances of the points added at each end
+    from the old end (before: from the furthest to the nearest).
+    """
+    import numpy as np
+    P = np.asarray(P, float)
+    none = np.zeros(0)
+    if len(P) < 2:
+        return P, none, none
+    out, before, after = [P], none, none
+    if a_px > 0:
+        t = P[0] - P[min(4, len(P) - 1)]
+        t = t / (np.hypot(*t) or 1.0)
+        before = np.linspace(a_px, 0.0, int(math.ceil(a_px)) + 1)[:-1]
+        out.insert(0, P[0] + t * before[:, None])
+    if b_px > 0:
+        t = P[-1] - P[max(0, len(P) - 5)]
+        t = t / (np.hypot(*t) or 1.0)
+        after = np.linspace(0.0, b_px, int(math.ceil(b_px)) + 1)[1:]
+        out.append(P[-1] + t * after[:, None])
+    return np.vstack(out), before, after
 
 
 def line_width(width_m, ratio, fixed_m):

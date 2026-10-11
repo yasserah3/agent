@@ -180,6 +180,62 @@
   .matPop .mp-foot{ margin-top:8px; }
   .btn-row.three{ grid-template-columns:1fr 1fr 1fr; }
   .dc-layer{ border:1px solid var(--line); border-radius:6px; padding:6px 8px 8px; margin-top:6px; background:rgba(255,255,255,.015); }
+  /* road markings: the guide's values, the chain, the warning */
+  .rm-box{ border:1px solid var(--line); border-radius:6px; padding:8px; margin:10px 0 8px; background:rgba(255,255,255,.015); }
+  .rm-h{ display:flex; align-items:flex-start; gap:8px; font-weight:600; font-size:13px; margin-bottom:6px; }
+  .rm-h .rm-src{ display:block; font-weight:400; font-size:11px; color:var(--faint); }
+  .rm-presets .rm-src{ font-weight:400; font-size:11px; color:var(--faint); }
+  .rm-h .rm-chain{ margin-left:auto; }
+  .rm-l{ display:block; font-size:11.5px; color:var(--muted); margin-top:6px; }
+  .rm-l select, .rm-l .seg{ margin-top:3px; }
+  .rm-l .seg{ margin-bottom:0; }
+  .rm-kind{ margin-top:8px; }
+  .rm-kn{ font-size:12px; color:var(--ink); }
+  .rm-kn small{ color:var(--faint); font-size:10.5px; }
+  .rm-3{ display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:4px; margin-top:3px; }
+  .rm-in span{ font-size:10.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .rm-chain{ display:inline-flex; align-items:center; gap:5px; background:var(--field); border:1px solid var(--line); color:var(--muted);
+             border-radius:5px; padding:3px 8px; font:inherit; font-size:11.5px; cursor:pointer; }
+  .rm-chain svg{ width:14px; height:14px; }
+  .rm-chain[aria-pressed="true"]{ color:var(--blue-ink); border-color:var(--blue); background:rgba(61,123,224,.14); }
+  .rm-box select, .rm-presets select, .rm-card select{ background:var(--field); border:1px solid var(--line); border-radius:4px;
+             padding:5px 8px; width:100%; color:var(--ink); font:inherit; }
+  .rm-grid{ width:100%; border-collapse:collapse; margin-top:6px; font-size:11.5px; }
+  .rm-grid th{ color:var(--faint); font-weight:500; text-align:left; padding:2px 3px; font-size:10.5px; }
+  .rm-grid td{ padding:2px 3px; vertical-align:top; }
+  .rm-grid td:first-child{ color:var(--muted); width:38%; padding-top:6px; }
+  .rm-grid td:first-child small{ display:block; color:var(--faint); font-size:10px; }
+  .rm-in{ display:flex; flex-direction:column; gap:1px; min-width:0; }
+  .rm-in input{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:3px 5px; color:var(--ink);
+                width:100%; font:inherit; font-variant-numeric:tabular-nums; }
+  .rm-in small{ font-size:9.5px; color:var(--faint); white-space:nowrap; }
+  .rm-in.off input{ border-color:var(--amber); }
+  .rm-in.off small{ color:var(--amber); }
+  .rm-in.flash input{ animation:rmflash .9s ease-out; }
+  @keyframes rmflash{ from{ background:rgba(61,123,224,.45); } to{ background:var(--field); } }
+  .rm-ok{ font-size:11px; color:var(--muted); margin:6px 0 2px; }
+  .rm-ok b{ color:var(--green); font-weight:500; }
+  .rm-warn{ font-size:11.5px; line-height:1.45; color:var(--ink); background:rgba(217,164,65,.12); border:1px solid rgba(217,164,65,.55);
+            border-radius:5px; padding:6px 8px; margin:6px 0 2px; }
+  .rm-warn b{ color:var(--amber); }
+  .rm-warn ul{ margin:3px 0 4px 16px; padding:0; }
+  .rm-warn button{ margin-top:2px; }
+  .rm-stale{ font-size:11.5px; color:var(--blue-ink); margin-top:6px; }
+  .rm-foot{ display:flex; gap:6px; align-items:center; margin-top:6px; }
+  .rm-foot .btn{ margin:0; }
+  .rm-presets{ border:1px solid var(--line); border-radius:6px; padding:8px; margin-bottom:8px; }
+  .rm-presets > label{ font-size:12.5px; font-weight:500; }
+  .rm-add{ display:grid; grid-template-columns:1fr auto; gap:6px; margin:6px 0 4px; }
+  .rm-add .btn{ margin:0; }
+  .rm-card .dc-head{ grid-template-columns:52px minmax(0, 1fr) auto; }
+  .rm-card .dc-thumb{ width:52px; height:52px; background:#4a4d52; }
+  .rm-card .rm-row{ display:flex; align-items:center; gap:6px; margin-top:6px; }
+  .rm-card .rm-row select{ flex:1; }
+  .rm-fields{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:5px 8px; margin-top:6px; }
+  .rm-fields .rm-in span{ white-space:normal; line-height:1.25; }
+  .rm-card .rm-note{ font-size:11px; color:var(--faint); margin-top:5px; line-height:1.4; }
+  .rm-on{ font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:5px; cursor:pointer; margin-left:auto; }
+  .rm-on input{ accent-color:var(--blue); margin:0; }
   .dc-head{ display:grid; grid-template-columns:44px 1fr auto; gap:8px; align-items:center; }
   .dc-thumb{ width:44px; height:44px; border-radius:4px; object-fit:contain; border:1px solid var(--line);
              background:repeating-conic-gradient(#3a3d42 0% 25%, #2a2c30 0% 50%) 50% / 12px 12px; }
@@ -647,6 +703,11 @@
       <section class="panel">
         <div class="panel-h">Decals <small id="decalCount"></small></div>
         <div class="panel-b">
+          <div class="rm-presets">
+            <label for="rmPreset">Road marking presets <span class="rm-src">by the guide</span></label>
+            <div class="rm-add"><select id="rmPreset"></select><button type="button" class="btn secondary" id="btnAddPreset">Add</button></div>
+            <div class="note">Drawn to the road marking guide's measurements and laid where each junction needs them: crossings, stop and give way lines, an arrow in each lane, at junctions and roundabout entries. Each is a layer you can change; add the same one again for a second layer.</div>
+          </div>
           <button class="btn secondary" id="btnImportDecal">Import decal (PNG)</button>
           <div class="note" style="margin-top:6px">A picture laid on the streets: an arrow, a crossing, a manhole cover, a stain. A PNG with a transparent background; the top of the picture is its front, its width goes across the road. Each decal is a layer with where it goes. How they lie in the 3D model: 3D model, Decals.</div>
           <div id="decalList" style="margin-top:4px"></div>
@@ -677,14 +738,7 @@
           <div class="field"><label for="noiseAmt">Wear amount</label><input type="range" id="noiseAmt" min="0" max="100" value="50"></div>
           <div class="field"><label for="matchMat">Match my material colour</label><input type="checkbox" id="matchMat" style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="field"><label for="seed">Variation seed</label><input type="number" id="seed" value="7" step="1" min="1"></div>
-          <div class="field"><label for="cycleM">Dash cycle (m)</label><input type="number" id="cycleM" value="9" step="0.5" min="1" title="One dash and the gap after it, in metres. Lane lines repeat every 9 to 12 m in most countries (3 m dash and 6 m gap in European towns, 3 m and 9 m in the US and the Gulf). In pixels: metres ÷ the scale (m per px); keep it above about 6 px or the dashes run into a solid line"></div>
-          <div class="field"><label for="dashM">Dash length (m)</label><input type="number" id="dashM" value="" step="0.5" min="0" placeholder="learned" title="How long each painted dash is, in metres (the rest of the cycle is the gap). Empty: as measured from your training line image, or 60% of the cycle. Typical: 3 m"></div>
-          <div class="field"><label for="lineMode">Line width</label>
-            <select id="lineMode" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
-              <option value="learned">Learned from training</option>
-              <option value="fixed">Fixed, in metres</option>
-            </select></div>
-          <div class="field"><label for="markW">Fixed width (m)</label><input type="number" id="markW" value="0.15" step="0.05" min="0.02" disabled></div>
+          <div class="rm-box" id="rmBox"><div class="note">Loading the road marking guide…</div></div>
           <div style="margin-top:12px;font-weight:600;font-size:13px">Lanes</div>
           <div class="note" id="lanesNote" style="margin:2px 0 6px">Every street's lanes are split evenly between its two sides, as many as its width holds (3 m a lane at least). Generate texture, then Set lanes and click a street to choose its own; Done lays just that street's lines on the texture (no new texture).</div>
           <div class="lanes-bar"><button type="button" id="btnLanes" aria-pressed="false" disabled>Set lanes on the map</button>

@@ -31,10 +31,13 @@ from app import progress as prog
 from app import placements as PL
 from app import islands as ISL
 from app import decals as DC
+from app import roadmarks as RMK
 from app import lanes as LN
 from scipy import ndimage as ndi
 
 MAX_TEXTURE = 8192          # the largest texture Unreal accepts without extra settings
+DASHED = ("dash", "cdash")  # the kinds of line laid as dashes (app/lanes.py), the rest whole
+YELLOW_RGB = RMK.YELLOW     # the guide's yellow paint
 
 
 # ------------------------------------------------------------------ outline
@@ -739,17 +742,17 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         mark_tex = []                # (class info, picture)
         mark_own = {}                # class -> the marked texture's own maps (library street material)
         E = None
-        mark_size = None
+        mark_size = {}
+        dmarks = (dash_cfg or {}).get("marks") or {}
+        rules = dmarks.get("rules", "simple")
+        cycle0 = float((dash_cfg or {}).get("cycle_m", 9.0))
         if painted:
             # a street the markings area cuts keeps its dashes as strips (only those inside it)
             dashed = {sid: st for sid, st in mesh.streets.items()
-                      if st.get("dash") and any(k == "dash" for _, k in st["dash"]["lines"])
+                      if st.get("dash") and any(k in DASHED for _, k in st["dash"]["lines"])
                       and not st["dash"].get("clipped")}
             if dashed:
-                cycle = float((dash_cfg or {}).get("cycle_m", 9.0))
-                share = float((dash_cfg or {}).get("dash_share", 0.6))
                 E = math.ceil(2 * max(st["half_width_m"] for st in dashed.values()) * 1.15 / tile_m) * tile_m
-                mark_size = (cycle, E)                         # what a marked texture covers, along and across
                 # at most three line widths, each a group of streets with similar
                 # widths: many short pieces would otherwise each want a texture
                 ws = np.sort([st["dash"]["width_m"] * 100 for st in dashed.values()])
@@ -757,21 +760,26 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                 centres = sorted({max(5, int(round(float(np.median(g)) / 5)) * 5) for g in groups_w if len(g)})
                 # then streets of the same line width and number of lines, whose widths are
                 # close enough that their lines lie within a few centimetres of each other's
-                by = {}
+                by, exact = {}, {}
                 for sid, st in dashed.items():
                     d = st["dash"]
                     wc = min(centres, key=lambda c: abs(c - d["width_m"] * 100))
-                    by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k == "dash"),
-                                   tuple(d["sides"]) if d.get("sides") else None), []).append((d["street_m"], sid))
+                    # a street's dashes are of one kind (lane lines, or a broken centre line), with
+                    # its own dash and gap (app/roadmarks.py) and colour: one texture each
+                    look = (round(d.get("cycle_m", cycle0), 4), round(d["share"], 4), bool(d.get("yellow")))
+                    exact.setdefault(look, (float(d.get("cycle_m", cycle0)), float(d["share"])))
+                    by.setdefault((wc, d["kind"], sum(1 for _, k in d["lines"] if k in DASHED),
+                                   tuple(d["sides"]) if d.get("sides") else None, look), []).append((d["street_m"], sid))
                 tol = 0.6
                 while True:
                     classes = []
-                    for (wc, kind, nd, sides), items in sorted(by.items(), key=lambda kv: str(kv[0])):
+                    for (wc, kind, nd, sides, look), items in sorted(by.items(), key=lambda kv: str(kv[0])):
                         items = sorted(items)
                         run = []
                         for w, sid in items + [(math.inf, None)]:
                             if run and (sid is None or (nd > 1 and w - run[0][0] > tol)):
-                                classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run], sides))
+                                classes.append((wc, float(np.median([r[0] for r in run])), [r[1] for r in run], sides,
+                                                look))
                                 run = []
                             if sid is not None:
                                 run.append((w, sid))
@@ -780,13 +788,16 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                     if len(classes) <= 8 or tol >= 1.2:
                         break
                     tol = 1.2
-                for ci, (wc, w_m, sids, sides) in enumerate(classes):
-                    xs = [x for x, k in LN.layout(w_m, sides)["lines"] if k == "dash"]
-                    img = marked_texture(tiles["open"][0]["path"], tile_m, cycle, share, E, wc / 100.0, paint_rgb, xs)
+                for ci, (wc, w_m, sids, sides, look) in enumerate(classes):
+                    (cyc, shr), yel = exact[look], look[2]
+                    xs = [x for x, k in LN.layout(w_m, sides, rules=rules)["lines"] if k in DASHED]
+                    img = marked_texture(tiles["open"][0]["path"], tile_m, cyc, shr, E, wc / 100.0,
+                                         YELLOW_RGB if yel else paint_rgb, xs)
                     marked[ci] = len(mark_tex)
-                    mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids)},
-                                     img))
-                    mark_own[ci] = marked_maps(tiles["open"][0], tile_m, cycle, E)
+                    mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids),
+                                      "cycle_m": cyc, "yellow": yel}, img))
+                    mark_own[ci] = marked_maps(tiles["open"][0], tile_m, cyc, E)
+                    mark_size[ci] = (cyc, E)                   # what a marked texture covers, along and across
                     for sid in sids:
                         mark_of[sid] = ci
 
@@ -835,7 +846,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                 info_m = mark_tex[marked[vk]][0]
                 tile_material(f"Road_marked_{info_m['lines']}x{info_m['width_cm']}cm_{vk + 1}", mark_tex[marked[vk]][1],
                               images, materials,
-                              mark_size, "asphalt", 0.9, surface, own=mark_own.get(vk))
+                              mark_size[vk], "asphalt", 0.9, surface, own=mark_own.get(vk))
             else:
                 tile_material(f"Road_{'street' if part == 'open' else part}_{vk + 1}",
                               Image.open(tiles[part][vk]["path"]), images, materials,
@@ -1003,16 +1014,18 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         if painted:
             prims, rr = road_prims(imgs, mats)
             ms.append({"name": "Road", "primitives": prims, "into": "front"})
-        # dashes: their own mesh, a centimetre above the road so they never flicker into it
-        dpos, dcol, didx = [], [], []
+        # dashes: their own mesh, a centimetre above the road so they never flicker into it;
+        # white and the guide's yellow apart, each with its paint
+        paints = {False: ([], [], []), True: ([], [], [])}
         painted_dashes = 0
         for di, strip in enumerate(mesh.dashes):
-            base_i = len(dpos)
             owner = mesh.dash_owner[di] if di < len(mesh.dash_owner) else None
             solid = di < len(mesh.dash_solid) and mesh.dash_solid[di]
             if painted and not solid and owner is not None and rr["mark_class"](owner) in rr["marked"]:
                 painted_dashes += 1
                 continue                                        # painted into the road texture
+            dpos, dcol, didx = paints[bool(di < len(mesh.dash_yellow) and mesh.dash_yellow[di])]
+            base_i = len(dpos)
             pts = [(x, y) for (lx, ly, rx, ry) in strip for (x, y) in ((lx, ly), (rx, ry))]
             dl = BR.dash_lift(mesh, plans, output_scale, owner, pts) if plans else np.zeros(len(pts))
             P_ = np.asarray(pts, float)
@@ -1036,13 +1049,17 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                     didx.append(t if n_y > 0 else (t[0], t[2], t[1]))
         island_info = _lane_island_mesh(mesh, plans, output_scale, mpp_out, W, H, tiles, tile_m, imgs, mats, ms,
                                         surface)
-        if didx:
-            mats.append({"name": "RoadMarkings", "doubleSided": True,
-                         "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in paint_rgb] + [1.0],
-                                                  "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
-            ms.append({"name": "Markings", "primitives": [{
-                "positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
-                "colors": np.array(dcol), "indices": np.array(didx), "material": len(mats) - 1}]})
+        mprims = []
+        for yel, (dpos, dcol, didx) in paints.items():
+            if not didx:
+                continue
+            mats.append({"name": "RoadMarkingsYellow" if yel else "RoadMarkings", "doubleSided": True,
+                         "pbrMetallicRoughness": {"baseColorFactor": [c / 255 for c in (YELLOW_RGB if yel else paint_rgb)]
+                                                  + [1.0], "metallicFactor": 0.0, "roughnessFactor": SF.PAINT_ROUGH}})
+            mprims.append({"positions": np.array(dpos), "normals": np.tile([0, 1, 0], (len(dpos), 1)),
+                           "colors": np.array(dcol), "indices": np.array(didx), "material": len(mats) - 1})
+        if mprims:
+            ms.append({"name": "Markings", "primitives": mprims})
         return (ms, mats, imgs), {
             "quads": int(rr["road_quads"]), "dashes": len(mesh.dashes),
             "markings": ("painted" if painted and rr["marked"] else "strips"),
@@ -1094,7 +1111,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         The model with some of its parts built again from new inputs, changes:
         {part: its input} ("paving": the island slots, "objects": the objects,
         "decals": the decals, "lanes": {"picks": the Lanes tool's choices,
-        "area": the markings area}), everything else
+        "area": the markings area, "ends": where junction markings stop the
+        lines}), everything else
         as built: the whole model to glb_path, and to part_path the parts a view
         needs alone (send: their names; None: those built again; nothing written
         when they come to nothing). Returns (report, those parts' names), or None
@@ -1104,10 +1122,12 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         lanes_changed = None
         if "lanes" in changes:
             ch = changes["lanes"]
-            lanes_changed, flipped = (QM.relane(mesh, ch["picks"], ch.get("area")) if isinstance(ch, dict)
-                                      else QM.relane(mesh, ch))
-            if flipped and painted:
-                return None
+            ends_before = mesh.line_ends
+            lanes_changed, flipped = (QM.relane(mesh, ch["picks"], ch.get("area"),
+                                                **({"ends": ch["ends"]} if "ends" in ch else {}))
+                                      if isinstance(ch, dict) else QM.relane(mesh, ch))
+            if painted and (flipped or (mesh.line_ends or None) != (ends_before or None)):
+                return None             # painted lines whose runs moved: their road quads were built for the old ones
         for name, fn in parts:
             if name in changes:
                 built[name] = fn(changes[name])

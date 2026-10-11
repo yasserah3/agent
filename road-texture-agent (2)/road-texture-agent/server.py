@@ -58,6 +58,7 @@ from app import streets as ST
 from app import islands as ISL
 from app import formats as FMT
 from app import decals as DC
+from app import roadmarks as RM
 from app import lanes as LN
 from app.generation import prepare_mask as _prep
 from app import routing as R
@@ -65,7 +66,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.10-front1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.11-marks1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1716,6 +1717,12 @@ def generate(payload: dict):
     cycle_m = float(payload.get("cycle_m", 9.0))
     if payload.get("dash_m") and cycle_m > 0:
         dash_share = float(np.clip(float(payload["dash_m"]) / cycle_m, 0.05, 0.95))
+    # the Road markings settings (app/roadmarks.py): each kind of line's dash, gap, width and
+    # colour; a page from before them sends the dash cycle and width (every line dashed alike)
+    marks = (RM.lines_config(payload["marks"], (dash_px / (dash_px + gap_px)) if dash_px and gap_px else None,
+                             dash.get("width_ratio")) if isinstance(payload.get("marks"), dict) else None)
+    if marks is not None:
+        cycle_m, dash_share = marks["kinds"]["dash"]["cycle"], marks["kinds"]["dash"]["share"]
 
     gid = uuid.uuid4().hex[:12]
     # inner streets drawn between objects become streets in a copy of the mask,
@@ -1733,7 +1740,16 @@ def generate(payload: dict):
     lane_picks = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base))
     # the markings area: lines (and decals) only inside it; sent with the request, else the one kept
     mark_area = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base))
+    # the junction markings (the Decals panel's presets) the lines stop at
+    line_ends, jplan = None, None
+    presets = _preset_layers(_layers_checked(_decal_layers()))
+    if presets:
+        prog.stage("junction_marks", "where the junction markings go")
+        _, line_ends, jplan = _junction_marks(rec["path"], float(payload.get("scale", 0.25)), lane_picks,
+                                              streets["nomark"], marks, presets, _bridges_of(base, rec))
     res = G.generate(rec["path"], libraries, {
+        "marks": marks,
+        "line_ends": line_ends,
         "lane_picks": lane_picks,
         "mark_area": mark_area,
         "nomark": streets["nomark"],
@@ -1758,7 +1774,7 @@ def generate(payload: dict):
     # what a street's lanes need to be laid again on their own (the Lanes tool's Done), and the
     # choices the texture has now
     mem.add_artifact(f"{gid}_lanes", "generation_lanes", lanes_path, {"mask": rec["id"], "picks": lane_picks,
-                                                                      "area": mark_area})
+                                                                      "area": mark_area, "ends": line_ends})
 
     prog.stage("saving", "saving")
     urls = {}
@@ -1783,11 +1799,12 @@ def generate(payload: dict):
                       "soft_edges": bool(payload.get("soft_edges", True)),
                       "nomark": streets["nomark_path"], "scale": float(payload.get("scale", 0.25)),
                       "output_scale": int(res.get("output_scale", 1)),
-                      "dashes": {"cycle_m": float(payload.get("cycle_m", 9.0)),
+                      "dashes": {"cycle_m": cycle_m if marks is not None else float(payload.get("cycle_m", 9.0)),
                                  "dash_share": dash_share,
                                  "width_ratio": res["markings"].get("width_ratio"),
                                  "width_m": float(payload.get("marking_width_m", 0.15)),
-                                 "setback_m": float(payload.get("setback_m", 2.0))}})
+                                 "setback_m": float(payload.get("setback_m", 2.0)),
+                                 "marks": marks, "ends": line_ends}})
     mem.record("generate",
                f"generated {res['size'][0]} x {res['size'][1]} from {rec['name']}: "
                f"{res['junctions']} junctions, {res['markings']['dashes']} dashes",
@@ -1798,7 +1815,15 @@ def generate(payload: dict):
             "routes": routes, "inner_streets": streets["report"],
             "dash_share": round(dash_share, 3),
             "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
-            "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks, "mark_area": mark_area}
+            "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks, "mark_area": mark_area,
+            "marks": _marks_out(marks), "junction_marks": jplan}
+
+
+def _marks_out(marks):
+    """The lines' settings a texture was made with, as the page compares them with its own."""
+    if not marks:
+        return None
+    return {"opts": marks["opts"], "values": marks["values"]}
 
 
 def _street_material(payload):
@@ -2091,6 +2116,32 @@ def lanes_repaint(payload: dict):
     texture, its markings layer, the texture under painted decals and the
     roads + islands picture all take the change; nothing else is touched.
     """
+    return _lanes_repaint(payload)
+
+
+_SAME = object()
+
+
+def _ends_json(ends):
+    return json.dumps(ends or None, sort_keys=True)
+
+
+def _relay_line_ends(gid, ends):
+    """
+    The junction markings stop the lane lines somewhere else now (the presets
+    changed): lay those streets' lines again (repaint_lanes), and keep where
+    they stop for the 3D model. Returns how many streets, or None.
+    """
+    lanes = mem.artifact(f"{gid}_lanes")
+    if not lanes or not Path(lanes["path"]).exists():
+        return None
+    if _ends_json((lanes["meta"] or {}).get("ends")) == _ends_json(ends):
+        return None
+    out = _lanes_repaint({"generation": gid, "lane_picks": (lanes["meta"] or {}).get("picks") or []}, ends or None)
+    return {"streets": len(out["changed"]), "seconds": out["seconds"]}
+
+
+def _lanes_repaint(payload, new_ends=_SAME):
     gid = payload.get("generation")
     art, result, markings = mem.artifact(f"{gid}_lanes"), mem.artifact(f"{gid}_result"), mem.artifact(f"{gid}_markings")
     if not result or not markings:
@@ -2115,10 +2166,19 @@ def lanes_repaint(payload: dict):
             places = mem.artifact(f"{gid}_decals")
             decals = (np.asarray(Image.open(dec["path"]).convert("RGBA")),
                       bool(places and (places["meta"] or {}).get("mode") == "painted"))
+        old_ends = (art["meta"] or {}).get("ends")
+        ends = old_ends if new_ends is _SAME else new_ends
         out = G.repaint_lanes(art["path"], (art["meta"] or {}).get("picks") or [], picks, files, decals,
-                              old_area=old_area, new_area=area)
-        meta = dict(art["meta"] or {}, picks=picks, area=area)
+                              old_area=old_area, new_area=area, old_ends=old_ends, new_ends=ends)
+        meta = dict(art["meta"] or {}, picks=picks, area=area, ends=ends)
         mem.add_artifact(f"{gid}_lanes", "generation_lanes", Path(art["path"]), meta)
+        if _ends_json(ends) != _ends_json(old_ends):
+            # the 3D model lays its lines from the generation's settings: where they stop now
+            gm = mem.artifact(f"{gid}_map")
+            if gm:
+                gmeta = dict(gm["meta"] or {})
+                gmeta["dashes"] = dict(gmeta.get("dashes") or {}, ends=ends)
+                mem.add_artifact(f"{gid}_map", gm["kind"], Path(gm["path"]), gmeta)
         st = mem.artifact(f"{gid}_streets")
         if out["changed"] and st and Path(st["path"]).exists():
             # the Lanes tool's streets: each with the lanes it has now
@@ -2134,7 +2194,8 @@ def lanes_repaint(payload: dict):
     if out["changed"]:
         mem.record("lanes_repaint", f"lanes laid again on {len(out['changed'])} street(s) in {secs} s",
                    {"generation": gid, "changed": out["changed"]})
-    return {"ok": True, "changed": out["changed"], "area_streets": out.get("area_streets", 0), "seconds": secs,
+    return {"ok": True, "changed": out["changed"], "area_streets": out.get("area_streets", 0),
+            "ends_streets": out.get("ends_streets", 0), "seconds": secs,
             "urls": {"result": f"/api/artifact/{gid}_result?v={v}", "markings": f"/api/artifact/{gid}_markings?v={v}",
                      **({"full": f"/api/artifact/{gid}_full?v={v}"} if files["full"] else {})}}
 
@@ -2267,12 +2328,87 @@ def _decal_layers():
     return json.loads(f.read_text()) if f.exists() else []
 
 
+def _layers_checked(raw):
+    """
+    The decal layers as the page sends them, checked, in their order: pictures
+    (app/decals.py) and road marking presets (app/roadmarks.py) alike.
+    """
+    known = {d["id"] for d in _decal_index()}
+    out = []
+    for item in (raw or [])[:64]:
+        if isinstance(item, dict) and item.get("preset"):
+            L = RM.layer_check(item)
+            if L:
+                out.append(L)
+        else:
+            out += DC.layer_list([item], known)
+    return out
+
+
+def _preset_layers(layers):
+    """[(index, layer)] of the road marking presets that are on."""
+    return [(i, L) for i, L in enumerate(layers) if L.get("preset") and not L.get("off")]
+
+
+def _bridges_of(base, rec):
+    art = mem.artifact(f"bridges_{(base or rec)['id']}")
+    if art and Path(art["path"]).exists():
+        return _bridge_list(json.loads(Path(art["path"]).read_text()))
+    return None
+
+
+def _junction_marks(mask_path, mpp, picks, nomark, marks, presets, bridges=None, overrides=None):
+    """
+    Where the road marking presets go on a mask (app/roadmarks.py): their
+    placements, where they stop the lines (mask pixels) and how many junctions
+    of each kind there are. marks: the lines' settings (None: as before).
+    overrides: the drive side and colours as set now (they need no new texture).
+    """
+    gray = np.array(Image.open(mask_path).convert("L"))
+    det = DC._detect(gray)
+    nm = nomark
+    if isinstance(nm, (str, Path)):
+        nm = np.array(Image.open(nm).convert("L")) > 127 if Path(nm).exists() else None
+    found = G.street_paths(det, mpp, nm)
+    chosen = G.lane_choices(found, LN.picks_list(picks), mpp)
+    cfg = dict(marks or RM.legacy_config(9.0, 0.6, 0.15, None, 2.0))
+    for k in ("drive", "colours"):
+        if (overrides or {}).get(k):
+            cfg[k] = overrides[k]
+    pl, ends, P = RM.place(det, mpp, presets, found, chosen, cfg, bridges)
+    return pl, ends, RM.summary(P)
+
+
+@app.get("/api/marks/spec")
+def marks_spec():
+    """The road marking guide's values: the lines' and every preset's, with their ranges and links."""
+    return RM.spec()
+
+
+@app.post("/api/marks/preview")
+def marks_preview(payload: dict):
+    """A preset layer's picture as it is set (its usual variant), for its card in the Decals panel."""
+    L = RM.layer_check(payload.get("layer") or {})
+    if not L:
+        raise HTTPException(400, "not a road marking preset")
+    colours = payload.get("colours") if payload.get("colours") in ("guide", "white") else "guide"
+    o = L["opts"]
+    var = {"zebra": "n7", "stop": "double" if o.get("double") else "single", "giveway": "n4",
+           "arrows": "SR" if o.get("type", "auto") == "auto" else o["type"], "stopword": "STOP", "cycle": "c",
+           "box": "b8x6"}[L["preset"]]
+    im = RM.picture(L, var, colours)
+    import io
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return Response(buf.getvalue(), media_type="image/png")
+
+
 @app.get("/api/decals")
 def list_decals():
     idx = _decal_index()
     # layers saved before the four kinds of place come back in them (Place randomly: intersections or streets)
     return {"decals": [{**d, "url": f"/api/decals/{d['id']}/image"} for d in idx],
-            "layers": DC.layer_list(_decal_layers(), {d["id"] for d in idx})}
+            "layers": _layers_checked(_decal_layers())}
 
 
 @app.post("/api/decals/import")
@@ -2319,7 +2455,7 @@ def delete_decal(did: str):
 @app.post("/api/decals/layers")
 def save_decal_layers(payload: dict):
     DECALS.mkdir(parents=True, exist_ok=True)
-    layers = DC.layer_list(payload.get("layers"), {d["id"] for d in _decal_index()})
+    layers = _layers_checked(payload.get("layers"))
     _write_json(DECALS / "layers.json", layers)
     return {"ok": True, "layers": len(layers)}
 
@@ -2358,18 +2494,33 @@ def apply_decals(payload: dict):
     area = LN.area_check(payload["mark_area"] if "mark_area" in payload
                          else _load_area(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])))
     return _lay_decals(gid, payload.get("layers"), "painted" if payload.get("mode") == "painted" else "separate",
-                       int(payload.get("seed", 7)), area, bool(payload.get("whole")))
+                       int(payload.get("seed", 7)), area, bool(payload.get("whole")),
+                       _marks_overrides(payload.get("marks")))
 
 
-def _lay_decals(gid, raw_layers, mode, seed, area, whole=False):
-    """Lay a generation's decals (apply_decals): only what changed since last time, unless whole."""
+def _marks_overrides(raw):
+    """The drive side and colours as the page has them now (the rest of the lines' settings need a new texture)."""
+    if not isinstance(raw, dict):
+        return None
+    c = RM.lines_config(raw)
+    return {"drive": c["drive"], "colours": c["colours"]}
+
+
+def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
+    """
+    Lay a generation's decals (apply_decals): only what changed since last time,
+    unless whole. Road marking presets among the layers are laid where their
+    junctions call for them (app/roadmarks.py); when they stop the lane lines
+    somewhere else than the texture has them, those streets' lines are laid
+    again first (repaint_lanes).
+    """
     t0 = time.time()
     art, result = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_result")
     if not art or not result:
         raise HTTPException(400, "unknown generation: run Generate texture first")
     rec = mem.image(art["meta"]["mask"])
     idx = _decal_index()
-    layers = DC.layer_list(raw_layers, {d["id"] for d in idx})
+    layers = _layers_checked(raw_layers)
     base = ARTIFACTS / f"gen_{gid}_result_base.png"
     if not base.exists():
         import shutil
@@ -2381,12 +2532,27 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False):
     base_mask = mem.artifact(f"bridges_{art['meta'].get('base_mask') or rec['id']}")
     if base_mask and Path(base_mask["path"]).exists():
         bridges = _bridge_list(json.loads(Path(base_mask["path"]).read_text()))
-    placements = DC.place(gray, mpp, layers, sizes, seed, bridges)
+    # the pictures' layers on their own (app/decals.py numbers them among themselves), then the presets
+    pic = [i for i, L in enumerate(layers) if not L.get("preset")]
+    placements = DC.place(gray, mpp, [layers[i] for i in pic], sizes, seed, bridges)
+    for p in placements:
+        p["layer"] = pic[p["layer"]]
+    presets = _preset_layers(layers)
+    dashes = art["meta"].get("dashes") or {}
+    lanes_art = mem.artifact(f"{gid}_lanes")
+    colours = (overrides or {}).get("colours") or (dashes.get("marks") or {}).get("colours", "white")
+    ends, jplan = None, None
+    if presets:
+        pl2, ends, jplan = _junction_marks(rec["path"], mpp, (lanes_art["meta"] or {}).get("picks") if lanes_art else [],
+                                           art["meta"].get("nomark"), dashes.get("marks"), presets, bridges, overrides)
+        placements += pl2
+    lanes_moved = _relay_line_ends(gid, ends)
     if area:
         # the markings area: a decal is laid when its middle lies inside
         keep = LN.in_area(LN.area_scaled(area, 1), [p["x"] for p in placements], [p["y"] for p in placements])
         placements = [p for p, k in zip(placements, np.atleast_1d(keep)) if k]
     pics = DC.load_pictures(idx, DECALS)
+    pics.update({k: v for k, v in RM.pictures(placements, layers, colours).items()})
     base_rgb = np.asarray(Image.open(base).convert("RGB"))
     _, coverage = _prep_cached(rec["path"], gray, s) if s else (None, None)
     if coverage.shape != base_rgb.shape[:2]:
@@ -2436,11 +2602,13 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False):
     mem.add_artifact(f"{gid}_decalimg", "generated_decals", layer_png, {"generation": gid})
     mem.add_artifact(f"{gid}_decals", "decal_places", ARTIFACTS / f"gen_{gid}_decals.json",
                      {"generation": gid, "count": len(placements), "mode": mode, "seed": seed, "area": area,
-                      "layers": layers})
+                      "layers": layers, "colours": colours})
     names = {d["id"]: d["name"] for d in idx}
+    names.update(RM.names())
     v = uuid.uuid4().hex[:6]
     return {"ok": True, "count": len(placements), "mode": mode, "layers": DC.summary(placements, layers, names),
-            "partial": partial, "seconds": round(time.time() - t0, 2),
+            "partial": partial, "seconds": round(time.time() - t0, 2), "junction_marks": jplan,
+            "lanes_moved": lanes_moved,
             "urls": {"decals": f"/api/artifact/{gid}_decalimg?v={v}", "result": f"/api/artifact/{gid}_result?v={v}",
                      "full": f"/api/artifact/{gid}_full?v={v}"}}
 
@@ -2453,8 +2621,14 @@ def _decals_for(gid, payload):
     placements = json.loads(Path(art["path"]).read_text()).get("placements") or []
     if not placements:
         return None
-    return {"placements": placements, "images": DC.load_pictures(_decal_index(), DECALS),
-            "names": {d["id"]: d["name"] for d in _decal_index()},
+    meta = art["meta"] or {}
+    layers = meta.get("layers") or []
+    images = DC.load_pictures(_decal_index(), DECALS)
+    names = {d["id"]: d["name"] for d in _decal_index()}
+    if any(p.get("rm") for p in placements) and layers:
+        images.update(RM.pictures(placements, layers, meta.get("colours", "white")))
+        names.update(RM.variant_names(placements, layers))
+    return {"placements": placements, "images": images, "names": names,
             "mode": "painted" if payload.get("decals") == "painted" else "separate"}
 
 
@@ -2511,7 +2685,7 @@ _models_lock = threading.Lock()
 MODELS_KEEP = 2
 
 
-def _model_keys(gid, payload, streets_sig, picks, area=None):
+def _model_keys(gid, payload, streets_sig, picks, area=None, ends=None):
     """A model's base key (all it is built from but its parts) and each part's key."""
     import hashlib
     skip = {"progress", "view"} | {f for fs in PART_FIELDS.values() for f in fs}
@@ -2522,7 +2696,7 @@ def _model_keys(gid, payload, streets_sig, picks, area=None):
     parts = {"paving": json.dumps(payload.get("island_slots"), sort_keys=True, default=str),
              "objects": json.dumps(payload.get("scatter"), sort_keys=True, default=str),
              "decals": json.dumps([payload.get("decals"), hashlib.sha1(dc.read_bytes()).hexdigest() if dc.exists() else None]),
-             "lanes": json.dumps([picks, area], sort_keys=True)}
+             "lanes": json.dumps([picks, area, ends], sort_keys=True)}
     return base, parts
 
 
@@ -2531,7 +2705,7 @@ def _sig(text):
     return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
-def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None):
+def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None, ends=None):
     """
     The model with only its changed parts built again, from a model built before
     with everything else the same, or None if there is none (or it cannot).
@@ -2546,7 +2720,7 @@ def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None
     changed = [n for n, k in part_keys.items() if e["parts"].get(n) != k]
     inputs = {}
     for n in changed:
-        inputs[n] = ({"picks": picks, "area": area} if n == "lanes" else _islands_for(gid, e["tileset"], payload) if n == "paving"
+        inputs[n] = ({"picks": picks, "area": area, "ends": ends} if n == "lanes" else _islands_for(gid, e["tileset"], payload) if n == "paving"
                      else _scatter_for_export(payload.get("scatter")) if n == "objects" else _decals_for(gid, payload))
     view = payload.get("view") if isinstance(payload.get("view"), dict) else {}
     send = None
@@ -2616,9 +2790,10 @@ def _export3d(payload):
             # the inner streets as they were drawn, laid exactly; the other roads from the mask without them
             inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
     rkey, part_keys = (_model_keys(gid, payload, [streets_now["sig"], stale is None], dash_cfg["lane_picks"],
-                                   dash_cfg["mark_area"]) if mode == "tiled" else (None, None))
+                                   dash_cfg["mark_area"], dash_cfg.get("ends")) if mode == "tiled" else (None, None))
     try:
-        info = (_rebuild_parts(gid, rkey, part_keys, payload, dash_cfg["lane_picks"], out, lanes_out, dash_cfg["mark_area"])
+        info = (_rebuild_parts(gid, rkey, part_keys, payload, dash_cfg["lane_picks"], out, lanes_out, dash_cfg["mark_area"],
+                               dash_cfg.get("ends"))
                 if rkey else None)
         if info is not None:
             pass                                          # only some parts changed: built again on their own

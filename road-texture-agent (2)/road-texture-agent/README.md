@@ -377,6 +377,108 @@ The viewer scales smoothly when zoomed in, and only shows hard pixel squares
 beyond 800%, for inspecting individual pixels. Zooming past 100% still enlarges
 the image rather than adding detail: for close-up work, generate at 2× or 4×.
 
+## Road markings by the guide
+
+The lines and the junction markings follow the **road marking guide**: UTTIPEC's
+*Guidelines for Road Markings* (Delhi Development Authority, November 2009),
+which follows IRC 35, the Indian Roads Congress's code of practice for road
+markings (`app/roadmarks.py`). Every value shows where it comes from: **guide**
+(the guide's text), **IRC 35** (where the guide's text gives no number), or
+**ours** (where neither does: our choice, said so).
+
+**Generate tab, Settings, Road markings** (it replaces Dash cycle, Dash length,
+Line width and Fixed width):
+
+| Option | Choices |
+| --- | --- |
+| Lines | **By the road marking guide** (default), or *Every line dashed alike (as before)* |
+| Traffic drives on the | **Right** (default) or Left: which half of each street the stop lines, give way lines and arrows cover |
+| Colours | **Guide colours** (the centre line yellow, as the yellow box), or *All white* |
+| Dash and line sizes | **As set below**, or *Learned from your training images* (widths and the dash's share, as before) |
+
+| Line | Dash | Gap | Width | Source |
+| --- | --- | --- | --- | --- |
+| Centre line (between the two directions) | 3 m | 4.5 m | 0.15 m | guide |
+| Double centre line (three lanes or more each way) | | 0.10 m between | two of 0.10 m | guide |
+| Lane lines (between lanes going the same way) | 1.5 m | 3 m | 0.10 m | guide (width IRC 35) |
+| Edge lines (beside the kerbs and the island of wide roads) | | | 0.15 m, 0.15 m from the kerb | guide |
+| Lines end before a junction with no stop line | 2 m | | | ours (as before) |
+
+Which centre line a street gets, by the guide: **broken** with one lane each
+way (yellow, 3 m dashes, 4.5 m gaps), **solid** with two each way, **double
+solid** from three each way. The lines between lanes going the same way are
+broken lane lines; one-way streets and roads with an island (from 22 m) have no
+centre line. The guide's dashes keep their length exactly; only the gaps
+stretch a little so a street starts and ends on a whole dash. The Lanes tool
+draws the same lines (yellow, solid or double) on the map.
+
+**The chain** (Linked, at the top, on by default): changing a length changes
+the other lengths, and a width the other widths, by the same factor from the
+guide's values, so the design keeps the guide's proportions (centre dash 6 m:
+its gap 9 m, the lane lines' 3 m and 6 m). Unlinked, each value changes on its
+own. Every value shows the guide's beside it, amber when it differs; while any
+differs, a warning lists them with the guide's values (*The guide's are the
+right ones; changed values can give a bad design*) and **Back to the guide's
+values** puts them back. The settings are kept in the browser. Changed after
+generating, the box says to press Generate texture; the drive side and the
+colours only need Update decals for the junction markings.
+
+### Junction and roundabout markings: the presets
+
+In **Decals**, **Road marking presets** adds markings drawn to the guide's
+measurements and laid where each junction needs them. Choose **The junction
+set** (crossing, stop line, give way, arrows) or one marking, and press
+**Add**; add the same one again for a second layer. Each is a layer card with:
+its picture, a list to turn it into another marking, Linked/Unlinked, its
+measurements (each with the guide's value and range), its options, **Laid on
+the map** (off keeps it without laying it), the same warning and *Back to the
+guide's values*.
+
+| Marking | Measurements | Where it goes |
+| --- | --- | --- |
+| Pedestrian crossing (zebra) | 0.5 m stripes and gaps, 3 m wide along the road (guide: 2 to 4 m) | across every street at its junction edge, kerb to kerb; at roundabout entries 5 m (a car length, ours) behind the give way line |
+| Stop line | 0.2 m; double: two 0.2 m lines 0.3 m apart; 2.5 m behind the crossing (2 to 3 m), 1 m with traffic lights | across the lanes coming in; every street, or only side streets |
+| Give way line | two broken lines, 0.6 m dashes, 0.3 m gaps, 0.2 m wide, 0.3 m apart | roundabout entries; side streets if asked |
+| Lane arrows | 3.5 m long (IRC 35, up to 50 km/h; 5 m above), first 15 m from the stop line, then every 15 m, four in each lane (guide) | in each lane coming in, the way it may go (below) |
+| STOP word | letters 1.25 m along the road (IRC 35), top 2.5 m before the stop line (2 to 3 m) | in each lane before a stop line |
+| Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side |
+| Yellow box (not in the guide) | 0.15 m lines, 1.5 m apart, ours | inside big open junctions (over 300 m² between their edges, or five streets or more), or every junction |
+
+How it finds where they go, from the mask:
+
+- **Each street into a junction** (its edge: where it meets the junction),
+  its **lanes** (as Lanes lays them, the Lanes tool's choices included) and
+  which way their traffic goes: with right-hand traffic the lanes coming in
+  are on the street's right as you drive in. A one-way street gets them only
+  at the end its traffic drives into.
+- **The main road**: the two streets most in line (within 35°), the widest such
+  pair; the others are side streets. Two equal roads crossing: no main road.
+- **Arrows**: the ways out of the junction, read from its other streets
+  (straight on, left, right; streets one-way towards the junction left out).
+  The left lane may also turn left, the right lane right, the others go
+  straight on; a junction with no way straight on splits its lanes left and
+  right; a single lane gets every way. Or choose one arrow for all lanes.
+- **Roundabouts (squares)**: a round island (2 to 60 m across its radius)
+  ringed by road. The streets coming in are **entries** (give way line,
+  crossing a car length back, arrows to the roundabout's other entries); the
+  ring itself gets no crossing and no stop line.
+- **Big open junctions** get the yellow box; their streets get the same
+  crossings, stop lines and arrows as any junction.
+- **The lane lines stop at the junction's markings**: at the stop or give way
+  line, or behind the crossing, running on past the street's end into the
+  junction's circle where the line is that close (the median island too).
+  Changing the presets after generating (Update decals) lays only the lines of
+  the streets whose ends moved again: the same pixels as generating anew
+  (within one grey level), in about 2 seconds on the test map.
+- In the 3D model the markings are the Decals object (or painted into the road
+  texture), one material each (*Decal_Crossing_9_stripes*,
+  *Decal_Arrows_SL*, ...), and the yellow lines a material of their own
+  (*RoadMarkingsYellow*).
+
+Not in it yet: chevrons and diagonals before islands, bus lane and bus stop
+words, the cycle symbol, and the shorter 3 m gaps the guide asks for on curves
+and approaches.
+
 ## Lane lines by road width
 
 Every street's lanes are **split evenly between its two sides**, as many as its
@@ -404,11 +506,12 @@ directions), and 0 below.
 | 32 m | 10 | 5 + 5, island | 3.1 m | 8 dashed + 4 solid |
 | 37 m | 12 | 6 + 6, island | 3.0 m | 10 dashed + 4 solid |
 
-- The lines between lanes are dashed (the line between the two sides too).
+- The lines between lanes are dashed; by the guide (Road markings, above) the
+  line between the two sides is the centre line: broken, solid or double.
 - **From 22 m**, with lanes on both sides, a **raised island** 1 m wide lies
   between the sides (in the middle when they are even), and a **solid line**
-  runs along both kerbs (30 cm in) and along both sides of the island (30 cm
-  from it).
+  runs along both kerbs and along both sides of the island (its middle 30 cm
+  in; by the guide, 0.15 m wide and 0.15 m from the kerb).
   - **The island** is a concrete strip 15 cm high with kerb faces, in the kerb
     stone's material, from the first dash to the last (it stops short of the
     junctions, as the lines do). In the 3D model it is a mesh of its own,
@@ -540,9 +643,10 @@ lines at that share of its own measured width, so main roads get wider lines
 and side streets narrower ones, and the proportion is the same at 1×, 2× and 4×
 and does not depend on the scale being exactly right.
 
-The Memory tab shows the learned share. Choosing *Fixed, in metres* in the
-Generate panel overrides it. If no training photo showed painted lines, the
-fixed width is used and the console says so.
+The Memory tab shows the learned share. It is used when Road markings, **Dash
+and line sizes** is *Learned from your training images*; *As set below* (the
+default) uses each kind of line's width. If no training photo showed painted
+lines, the set widths are used and the console says so.
 
 ## Surface grain and colour
 
@@ -581,24 +685,21 @@ with its reason.
 dividing by the scale (m per px): at 1.1 m per px, 12 m is 11 px and 15 cm is
 0.14 px.
 
-- **Dash cycle** (one dash and its gap): lane lines repeat every 9 to 12 m in
-  most countries (3 m dash + 6 m gap in European towns, 3 m + 9 m in the US and
-  the Gulf). Keep it above about 6 px, or the dashes run together into a solid
-  line. Generate says so when it is too short: a 1 m cycle at 1.1 m per px is
-  under a pixel, every street becomes one long line, and it lays tens of
-  thousands of dashes (slow).
-- **Dash length**: how long each painted dash is (the rest is the gap); empty
-  takes it from your training line image, or 60% of the cycle. Typical: 3 m.
-- **Line width** (fixed): real lane lines are 0.10 to 0.15 m (edge lines 0.15 to
-  0.20 m). A line narrower than a pixel is drawn one pixel wide but only as
+- **Dash and Gap** (Road markings): a dash and its gap together should be
+  above about 6 px, or the dashes run together into a solid line. The guide's
+  lane lines (1.5 m + 3 m) are 4 px at 1.1 m per px; Generate says so when they
+  are too short (and a 1 m repeat at 1.1 m per px is under a pixel: every
+  street becomes one long line, and it lays tens of thousands of dashes, slow).
+- **Width**: the guide's lines are 0.10 m (lane lines) and 0.15 m (centre and
+  edge lines). A line narrower than a pixel is drawn one pixel wide but only as
   strong as the share of the pixel it covers (a 15 cm line in a 1.1 m pixel at
   14%), the way an aerial photo at that height shows it, instead of being
   widened to a whole pixel (1.1 m, seven times too wide).
 - For crisp markings at a coarse scale, the 3D model's markings as strips are
   real geometry at their real size, whatever the texture's pixel size.
 
-Recommended at 1.1 m per px: Dash cycle 12, Dash length 3, Line width fixed
-0.15, Quality 1 (at this scale the patch joins Quality smooths are under a
+Recommended at 1.1 m per px: Lines *Every line dashed alike*, lane lines Dash
+3, Gap 9 (Unlinked), Width 0.15, Quality 1 (at this scale the patch joins Quality smooths are under a
 pixel; Quality 3 doubles the time for no visible change).
 
 **Speed.** Generate used to go over the whole picture once for every junction
@@ -1304,7 +1405,9 @@ their own, island by island:
 ## Decals
 
 Pictures laid on the streets: arrows, crossings, manhole covers, stains,
-patches. In the Generate tab, **Decals**, **Import decal (PNG)** adds one as a
+patches. (The road marking guide's crossings, stop lines, arrows and the rest
+are ready-made presets in the same panel: *Road markings by the guide*.) In
+the Generate tab, **Decals**, **Import decal (PNG)** adds one as a
 layer (a PNG with a transparent background; WebP and JPEG work too). The top
 of the picture is its front, its width goes across the road and its length
 along it, in proportion. A layer can use any of these four at once:

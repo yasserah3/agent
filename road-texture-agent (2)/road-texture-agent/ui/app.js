@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -124,7 +124,7 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
       renderMemory();
       try{ S.corrections = (await api('/api/corrections')).corrections; }catch(_){}
       loadMaterials();
-      loadDecals();
+      loadDecals(); loadMarks();
     }catch(e){
       $('.engine').innerHTML = '<i style="background:var(--red)"></i>Server not running';
       log('No server. Start it with: python server.py', 'bad');
@@ -865,18 +865,21 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
       const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the texture',
         body: JSON.stringify({ mask: S.gen.mask.id, scale: +$('#scale').value,
           wear: +$('#noiseAmt').value, seed: +$('#seed').value,
-          cycle_m: +$('#cycleM').value, marking_width_m: +$('#markW').value, dash_m: +$('#dashM').value || null,
+          marks: marksPayload(), cycle_m: MARKS.values['lane.dash_m'] + MARKS.values['lane.gap_m'],
+          marking_width_m: MARKS.values['lane.width_m'],
           quality: +$('#quality').value, align_lines: S.gen.alignLines || false,
           output_scale: +$('#outScale').value, soft_edges: $('#softEdges').checked,
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
-          line_width_mode: $('#lineMode').value,
+          line_width_mode: MARKS.opts.sizes === 'learned' ? 'learned' : 'fixed',
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks,
           mark_area: MAREA.area }) });
       S.gen.result = res;
+      S.gen.marksPainted = marksKey();                                     // the lines' settings the texture has
       S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
       MAREA.painted = JSON.stringify(res.mark_area || null);               // and its markings area
       renderMarea();
       S.gen.top = null; S.gen.decals = null;
+      renderMarks();
       await loadIslands(res);
       await loadStreets(res);
       $('#lp-decals').innerHTML = '<div class="ph">—</div>';
@@ -887,7 +890,8 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
       if(s.street_material) log(`  Streets: ${s.street_material}, laid at its real size; your material's lighter and darker areas kept on it.`);
       Object.entries(res.decisions || {}).forEach(([k,d]) => log(`  ${k}: ${d.label || 'none'}${d.rank ? ` (position ${d.rank})` : ''}${d.exhausted ? ', all rejected' : ''}`));
-      log(`  ${s.markings.dashes} dashes placed, cycle ${s.markings.cycle_px} px, lines ${s.markings.width_px} px wide${
+      log(`  Lines ${s.markings.rules === 'guide' ? 'by the road marking guide' : 'all dashed alike'}${s.markings.yellow ? ', centre lines yellow' : ''}: `
+        + `${s.markings.dashes} dashes placed, lines ${s.markings.width_px} px wide${
         s.markings.width_mode === 'learned' ? ` (${(s.markings.width_ratio*100).toFixed(1)}% of each street's width, learned)`
           : ' (fixed width)'}${s.markings.faint ? ': narrower than a pixel, so drawn faint, as a photo from this height shows them' : ''}.`);
       if(s.markings.lanes && Object.keys(s.markings.lanes).length)
@@ -897,7 +901,8 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
           .join(', ') + (s.markings.picked ? `; ${s.markings.picked} set in the Lanes tool` : '')
           + (s.markings.cut ? `, ${s.markings.cut} cut back to its limit` : '') + '.');
       if(s.markings.warning) log(`  Markings: ${s.markings.warning}.`, 'bad');
-      if($('#lineMode').value === 'learned' && s.markings.width_mode !== 'learned')
+      if(res.junction_marks) log('  ' + junctionMarksText(res.junction_marks) + ' The lane lines stop at their markings.');
+      if(MARKS.opts.sizes === 'learned' && s.markings.width_mode !== 'learned')
         log('  No line width has been learned yet: train on pairs whose photos show painted lines. Using the fixed width.', 'bad');
       (res.inner_streets || []).forEach(r => {
         if(r.problem){ log(`  Inner streets of placement ${r.placement} (${r.name}): ${r.problem}.`, 'bad'); return; }
@@ -1300,7 +1305,6 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
     $('#variation').disabled = mode !== 'tiled';
   });
   $('#variation').addEventListener('input', () => { $('#variationVal').textContent = $('#variation').value; });
-  $('#lineMode').addEventListener('change', () => { $('#markW').disabled = $('#lineMode').value !== 'fixed'; });
 
   function applyAdjustment(c){
     const adj = c.adjust || {};
@@ -1788,19 +1792,26 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
     while(a + b > lim){ if(a >= b) a--; else b--; cut = true; }
     return [a, b, cut];
   }
+  // with the road marking guide's rules (Road markings, Lines): the line between the two
+  // directions is the centre line, broken with one lane each way, solid with two, double from three
+  const laneRules = () => MARKS.opts.rules === 'guide' ? 'guide' : 'simple';
+  const centreKind = (a, b) => Math.max(a, b) <= 1 ? 'cdash' : Math.max(a, b) === 2 ? 'csolid' : 'cdouble';
   function laneLayout(W, want){
     const [a, b, cut] = laneSides(W, want), lanes = a + b, half = W / 2;
     const out = { limit: laneLimit(W), sides: [a, b], cut, lanes, lines: [], island: null, kind: 'none', lane_m: W };
     if(lanes < 2) return out;
+    const guide = laneRules() === 'guide';
+    const ei = guide && MARKS.values['edge.inset_m'] != null ? MARKS.values['edge.inset_m'] + MARKS.values['edge.width_m'] / 2 : LN.EDGE;
     if(laneHighway(W) && a >= 1 && b >= 1){
       const s = (W - LN.ISLAND) / lanes, i0 = a * s;
       for(let k = 1; k < a; k++) out.lines.push([s * k - half, 'dash']);
       for(let k = 1; k < b; k++) out.lines.push([i0 + LN.ISLAND + s * k - half, 'dash']);
-      [LN.EDGE, i0 - LN.EDGE, i0 + LN.ISLAND + LN.EDGE, W - LN.EDGE].forEach(x => out.lines.push([x - half, 'solid']));
+      [ei, i0 - ei, i0 + LN.ISLAND + ei, W - ei].forEach(x => out.lines.push([x - half, 'solid']));
+      out.lines.sort((p, q) => p[0] - q[0]);
       return Object.assign(out, { kind: 'highway', lane_m: s, island: [i0 - half, i0 + LN.ISLAND - half] });
     }
     const s = W / lanes;
-    for(let k = 1; k < lanes; k++) out.lines.push([s * k - half, 'dash']);
+    for(let k = 1; k < lanes; k++) out.lines.push([s * k - half, guide && a >= 1 && b >= 1 && k === a ? centreKind(a, b) : 'dash']);
     return Object.assign(out, { kind: 'road', lane_m: s });
   }
   // a street's line moved d mask pixels to its side (-ty, tx), as the texture and the model move it
@@ -1986,8 +1997,15 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
     });
     if(L.island) el('polygon', { points: pts(offsetLine(s.line, L.island[0] / LANES.mpp).concat(offsetLine(s.line, L.island[1] / LANES.mpp).reverse())),
                                 fill: 'rgba(200,196,186,.95)', stroke: 'rgba(90,88,84,.9)', 'stroke-width': Math.max(1, 0.1 * m2px) }, g);
-    L.lines.forEach(([x, kind]) => el('polyline', { points: pts(offsetLine(s.line, x / LANES.mpp)), fill: 'none',
-      stroke: '#fff', 'stroke-width': Math.max(1, 0.3 * m2px), 'stroke-dasharray': kind === 'dash' ? `${3 * m2px} ${6 * m2px}` : 'none' }, g));
+    // each line as it will be laid: dashed or whole, the centre line yellow with the guide's colours, double from three lanes
+    const yel = MARKS.opts.colours === 'guide' && laneRules() === 'guide';
+    L.lines.forEach(([x, kind]) => {
+      const centre = kind[0] === 'c', dashed = kind === 'dash' || kind === 'cdash';
+      const offs = kind === 'cdouble' ? [x - 0.15, x + 0.15] : [x];
+      offs.forEach(o => el('polyline', { points: pts(offsetLine(s.line, o / LANES.mpp)), fill: 'none',
+        stroke: centre && yel ? '#E8AC24' : '#fff', 'stroke-width': Math.max(1, 0.3 * m2px),
+        'stroke-dasharray': dashed ? `${3 * m2px} ${6 * m2px}` : 'none' }, g));
+    });
   }
   // every street's centre line and what it has (2|2, yellow when set in the tool), on the overlay
   function drawLanesOn(ctx, v){
@@ -2316,6 +2334,289 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
   });
   renderSlots();
 
+  /* ------------------------------------------------ road markings (app/roadmarks.py) */
+  // The road marking guide's values (UTTIPEC, Delhi 2009, after IRC 35): the lines'
+  // sizes and colours here (Generate texture lays them), the junction markings as
+  // presets of the Decals panel. Every value shows the guide's beside it; with the
+  // chain on, changing one sets the others of its group to the guide's values times
+  // the same factor (app/roadmarks.py's chain, these few lines again), so the design
+  // keeps the guide's proportions; off, each changes on its own.
+  const MARKS = { spec: null, opts: {}, values: {}, chain: true };
+  const LINK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">'
+    + '<path d="M6.3 9.7l3.4-3.4"/><path d="M7.2 4.6l1.1-1.1a2.7 2.7 0 0 1 3.8 3.8L11 8.4"/><path d="M8.8 11.4l-1.1 1.1a2.7 2.7 0 0 1-3.8-3.8L5 7.6"/></svg>';
+  const UNLINK_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">'
+    + '<path d="M7.2 4.6l1.1-1.1a2.7 2.7 0 0 1 3.8 3.8L11 8.4"/><path d="M8.8 11.4l-1.1 1.1a2.7 2.7 0 0 1-3.8-3.8L5 7.6"/><path d="M2.5 2.5l2 2M13.5 13.5l-2-2"/></svg>';
+  function guideOf(f, opts){
+    let v = f.guide;
+    Object.entries(f.guide_if || {}).forEach(([o, alt]) => { if((opts || {})[o]) v = alt; });
+    return v;
+  }
+  function rangeOf(f, opts){
+    let r = f.range || null;
+    Object.entries(f.range_if || {}).forEach(([o, alt]) => { if((opts || {})[o]) r = alt; });
+    return r;
+  }
+  const clampF = (f, v) => { v = Math.min(f.max, Math.max(f.min, +v)); return f.int ? Math.round(v) : Math.round(v * 10000) / 10000; };
+  const num = v => String(Math.round(v * 1000) / 1000);
+  // a value set, and with the chain on its group following it: [values, the keys that followed]
+  function chainSet(fields, values, key, v, opts, linked){
+    const out = { ...values }, f = fields.find(x => x.key === key), moved = [];
+    out[key] = clampF(f, v);
+    const base = guideOf(f, opts);
+    if(linked && f.link && base){
+      const k = out[key] / base;
+      fields.forEach(h => {
+        if(h.link === f.link && h.key !== key){ out[h.key] = clampF(h, guideOf(h, opts) * k); moved.push(h.key); }
+      });
+    }
+    return [out, moved];
+  }
+  const offGuide = (fields, values, opts) => fields.filter(f => Math.abs(+values[f.key] - guideOf(f, opts)) > 1e-6);
+  const outOfRange = (fields, values, opts) => fields.filter(f => {
+    const r = rangeOf(f, opts); return r && (+values[f.key] < r[0] - 1e-6 || +values[f.key] > r[1] + 1e-6);
+  });
+  function keepMarks(){
+    try{ localStorage.setItem('rta.marks', JSON.stringify({ opts: MARKS.opts, values: MARKS.values, chain: MARKS.chain })); }catch(_){}
+  }
+  const marksPayload = () => ({ ...MARKS.opts, values: { ...MARKS.values } });
+  // what decides the lines in the texture (the drive side only moves the junction markings)
+  const marksKey = () => JSON.stringify([MARKS.opts.rules, MARKS.opts.colours, MARKS.opts.sizes, MARKS.values]);
+  async function loadMarks(){
+    try{ MARKS.spec = await api('/api/marks/spec'); }
+    catch(e){ $('#rmBox').innerHTML = '<div class="note">The road marking guide could not be loaded: ' + esc(e.message) + '</div>'; return; }
+    let kept = null;
+    try{ kept = JSON.parse(localStorage.getItem('rta.marks') || 'null'); }catch(_){}
+    const L = MARKS.spec.lines;
+    L.opts.forEach(o => { MARKS.opts[o.key] = kept && kept.opts && o.choices.some(c => c[0] === kept.opts[o.key]) ? kept.opts[o.key] : o.default; });
+    L.fields.forEach(f => { MARKS.values[f.key] = kept && kept.values && isFinite(kept.values[f.key]) ? clampF(f, kept.values[f.key]) : f.guide; });
+    MARKS.chain = kept ? kept.chain !== false : true;
+    renderMarks(); renderPresetPick(); renderDecals();
+  }
+  const fieldOf = key => MARKS.spec.lines.fields.find(f => f.key === key);
+  // the lines' table: each kind of line, its dash, gap and width
+  const LINE_ROWS = [
+    ['Centre line', 'between the two directions', ['centre.dash_m', 'centre.gap_m', 'centre.width_m'], 'guide'],
+    ['Double centre line', 'three lanes or more each way', [null, 'double.gap_m', 'double.width_m'], 'guide'],
+    ['Lane lines', 'between lanes going the same way', ['lane.dash_m', 'lane.gap_m', 'lane.width_m'], 'all'],
+    ['Edge lines', 'beside the kerbs of wide roads', ['edge.inset_m', null, 'edge.width_m'], 'all'],
+  ];
+  const COLS = ['dash_m', 'gap_m', 'width_m'];
+  function chainButton(on, title){
+    return `<button type="button" class="rm-chain" aria-pressed="${on}" title="${esc(title)}">${on ? LINK_SVG + 'Linked' : UNLINK_SVG + 'Unlinked'}</button>`;
+  }
+  function warnBox(fields, values, opts, label, resetId){
+    const off = offGuide(fields, values, opts), bad = outOfRange(fields, values, opts);
+    const ours = fields.every(f => f.src === 'ours');
+    if(!off.length) return ours
+      ? '<div class="rm-ok"><b>✓</b> Our values: this marking is not in the guide, so these are common practice.</div>'
+      : '<div class="rm-ok"><b>✓</b> The guide\'s values: the right ones for a good design. Change them only if you need to.</div>';
+    const items = off.map(f => {
+      const r = rangeOf(f, opts), out = bad.includes(f), unit = f.int || f.key === 'big_m2' ? '' : ' m';
+      return `<li>${esc(label(f))}: ${num(values[f.key])}${unit} (${f.src === 'ours' ? 'ours' : 'the guide'}: ${num(guideOf(f, opts))}${unit}`
+        + `${r ? `, ${num(r[0])} to ${num(r[1])}` : ''})${out ? ' <b>outside the guide</b>' : ''}</li>`;
+    }).join('');
+    return `<div class="rm-warn"><b>⚠ Not the guide's values.</b> The guide's are the right ones; changed values can give a bad design:`
+      + `<ul>${items}</ul><button type="button" class="btn secondary" data-reset="${resetId}">Back to the guide's values</button></div>`;
+  }
+  function renderMarks(){
+    const box = $('#rmBox');
+    if(!MARKS.spec || !box) return;
+    const o = MARKS.opts, L = MARKS.spec.lines, guide = o.rules === 'guide', learned = o.sizes === 'learned';
+    const sel = (key) => {
+      const d = L.opts.find(x => x.key === key);
+      return `<select data-opt="${key}">${d.choices.map(([v, t]) => `<option value="${v}"${o[key] === v ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+    };
+    const COLNAME = { dash_m: 'Dash', gap_m: 'Gap', width_m: 'Width' };
+    const cell = (key, col) => {
+      if(!key) return '<div></div>';
+      const f = fieldOf(key), v = MARKS.values[key], g = guideOf(f), isOff = Math.abs(v - g) > 1e-6;
+      const name = key === 'setback_m' ? 'Distance' : key === 'edge.inset_m' ? 'From kerb'
+        : key.endsWith('.' + col) && key !== 'double.gap_m' ? COLNAME[col] : f.label;
+      const dis = learned && key.endsWith('width_m') ? ' disabled' : '';
+      return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
+        + `<span>${esc(name)} (m)</span>`
+        + `<input type="number" step="${f.min < 0.1 ? 0.01 : 0.1}" min="${f.min}" max="${f.max}" value="${num(v)}"${dis}>`
+        + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}</small></label>`;
+    };
+    const rows = LINE_ROWS.filter(r => guide || r[3] === 'all').map(([name, sub, keys]) =>
+      `<div class="rm-kind"><div class="rm-kn">${esc(name)} <small>${esc(sub)}</small></div>`
+      + `<div class="rm-3">${keys.map((k, c) => cell(k, COLS[c])).join('')}</div></div>`).join('');
+    const sb = fieldOf('setback_m');
+    const fields = L.fields.filter(f => guide || !(f.group === 'centre' || f.group === 'double'));
+    const stale = S.gen.result && S.gen.marksPainted && S.gen.marksPainted !== marksKey();
+    box.innerHTML = `<div class="rm-h"><div>Road markings<span class="rm-src">UTTIPEC guide, Delhi 2009</span></div>
+        ${chainButton(MARKS.chain, MARKS.chain ? 'Linked: changing a length changes the other lengths, and a width the other widths, '
+          + 'in the guide\'s proportions. Press to change each on its own' : 'Unlinked: each value changes on its own. Press to keep the guide\'s proportions')}</div>
+      <label class="rm-l">Lines${sel('rules')}</label>
+      <div class="rm-l">Traffic drives on the<div class="seg" data-opt-seg="drive">
+        <button type="button" class="seg-b" data-v="right" aria-pressed="${o.drive === 'right'}">Right</button>
+        <button type="button" class="seg-b" data-v="left" aria-pressed="${o.drive === 'left'}">Left</button></div></div>
+      <label class="rm-l">Colours${sel('colours')}</label>
+      <label class="rm-l">Dash and line sizes${sel('sizes')}</label>
+      ${rows}
+      <div class="rm-kind"><div class="rm-kn">${esc(sb.label)}</div><div class="rm-3">${cell('setback_m', 'x')}<div></div><div></div></div></div>
+      ${!guide ? '<div class="note">Every line between two lanes is dashed alike, with the lane lines\' sizes, white (as before).</div>' : ''}
+      ${learned ? '<div class="note">Widths and the dash\'s share of dash + gap come from your training images; the dash and gap together stay as set.</div>' : ''}
+      ${warnBox(fields, MARKS.values, null, f => `${{ centre: 'Centre line', double: 'Double centre line', lane: 'Lane lines', edge: 'Edge lines', ends: 'Lines end' }[f.group]} ${f.label.toLowerCase()}`, 'lines')}
+      ${stale ? '<div class="rm-stale">These differ from the texture\'s lines: press Generate texture to lay them.</div>' : ''}`;
+    // events
+    $('.rm-chain', box).addEventListener('click', () => { MARKS.chain = !MARKS.chain; keepMarks(); renderMarks(); });
+    $$('select[data-opt]', box).forEach(s => s.addEventListener('change', () => {
+      MARKS.opts[s.dataset.opt] = s.value; keepMarks(); renderMarks(); marksMoved(s.dataset.opt);
+    }));
+    $$('[data-opt-seg] button', box).forEach(b => b.addEventListener('click', () => {
+      MARKS.opts.drive = b.dataset.v; keepMarks(); renderMarks(); marksMoved('drive');
+    }));
+    $$('.rm-in input', box).forEach(inp => inp.addEventListener('change', () => {
+      const key = inp.closest('.rm-in').dataset.k, v = parseFloat(inp.value);
+      if(!isFinite(v)){ renderMarks(); return; }
+      const [vals, moved] = chainSet(L.fields, MARKS.values, key, v, null, MARKS.chain);
+      MARKS.values = vals; keepMarks(); renderMarks();
+      moved.forEach(k => { const c = $(`.rm-in[data-k="${k}"]`, box); if(c) c.classList.add('flash'); });
+      if(moved.length) log(`Road markings: ${fieldLabel(key)} ${num(vals[key])} m; linked, so ${moved.map(k => `${fieldLabel(k)} ${num(vals[k])} m`).join(', ')} (the guide's proportions).`);
+      if(LANES.on) drawBridges();
+    }));
+    const rb = $('[data-reset="lines"]', box);
+    if(rb) rb.addEventListener('click', () => {
+      L.fields.forEach(f => { MARKS.values[f.key] = f.guide; });
+      keepMarks(); renderMarks(); log('Road markings: back to the guide\'s values.', 'ok');
+    });
+  }
+  const fieldLabel = key => {
+    const f = fieldOf(key);
+    return `${{ centre: 'centre line', double: 'double centre line', lane: 'lane lines', edge: 'edge lines', ends: 'lines end' }[f.group]} ${f.label.toLowerCase()}`;
+  };
+  // the drive side and the colours move or change the junction markings: lay them again
+  function marksMoved(what){
+    if(['drive', 'colours'].includes(what) && DEC.layers.some(L => L.preset) && S.gen.decals){
+      $('#btnPlaceDecals').classList.add('attention');
+      $('#decalNote').textContent = 'The road markings changed: press Update decals to lay the junction markings again.';
+    }
+    if(what === 'rules' && LANES.on) drawBridges();
+  }
+  // "54 junction approaches (...), 1 roundabout, 1 big junction"
+  function junctionMarksText(j){
+    const a = j.approaches || {}, n = Object.entries(a).reduce((s, [k, v]) => s + (k === 'ring' ? 0 : v), 0);
+    const parts = [];
+    if(a.major) parts.push(`${a.major} on main roads`);
+    if(a.minor) parts.push(`${a.minor} on side streets`);
+    if(a.equal) parts.push(`${a.equal} where no road is the main one`);
+    if(a.entry) parts.push(`${a.entry} roundabout entries`);
+    return `Junction markings: ${n} street ends at junctions (${parts.join(', ') || 'none'}), ${j.roundabouts} roundabout${j.roundabouts === 1 ? '' : 's'}`
+      + ` (its ring left clear), ${j.big_junctions} big open junction${j.big_junctions === 1 ? '' : 's'}.`;
+  }
+
+  // ---- the presets in the Decals panel
+  const PRESET_THUMB = new Map();                  // a layer as set -> its picture's URL
+  function renderPresetPick(){
+    const s = $('#rmPreset');
+    if(!MARKS.spec || !s) return;
+    const P = MARKS.spec.presets;
+    s.innerHTML = `<option value="set">The junction set: ${MARKS.spec.junction_set.map(k => P[k].short.toLowerCase()).join(', ')}</option>`
+      + `<optgroup label="One marking">${MARKS.spec.order.map(k => `<option value="${k}">${esc(P[k].label)}</option>`).join('')}</optgroup>`;
+  }
+  function newPreset(k){
+    const P = MARKS.spec.presets[k], values = {}, opts = {};
+    P.opts.forEach(o => { opts[o.key] = o.default; });
+    P.fields.forEach(f => { values[f.key] = guideOf(f, opts); });
+    return { preset: k, decal: 'preset:' + k, values, opts, chain: true, off: false };
+  }
+  $('#btnAddPreset').addEventListener('click', () => {
+    if(!MARKS.spec) return;
+    const v = $('#rmPreset').value, keys = v === 'set' ? MARKS.spec.junction_set : [v];
+    keys.forEach(k => DEC.layers.push(newPreset(k)));
+    log(`Road markings added: ${keys.map(k => MARKS.spec.presets[k].label).join(', ')}, at the guide's measurements. `
+      + (S.gen.result ? 'Press Update decals to lay them.' : 'Generate texture lays them.'), 'ok');
+    decalsChanged();
+  });
+  function presetWhere(L){
+    const o = L.opts, v = L.values, both = (a, b) => a && b ? 'every junction and roundabout entry' : a ? 'every junction' : b ? 'roundabout entries' : 'nowhere';
+    switch(L.preset){
+      case 'zebra': return `${num(v.length_m)} m wide, ${num(v.stripe_m)} m stripes; ${both(o.junctions, o.roundabouts)}`;
+      case 'stop': return `${o.double ? 'double' : 'single'}, ${num(v.dist_m)} m behind the crossing; ${o.minor_only ? 'side streets' : 'every street into a junction'}${o.signals ? ', traffic lights' : ''}`;
+      case 'giveway': return `${[o.roundabouts && 'roundabout entries', o.minor && 'side streets'].filter(Boolean).join(' and ') || 'nowhere'}`;
+      case 'arrows': return `${v.count} in each lane coming in, every ${num(v.every_m)} m, ${num(v.length_m)} m long; ${both(o.junctions, o.roundabouts)}`;
+      case 'stopword': return `in each lane, ${num(v.dist_m)} m before the stop line, letters ${num(v.height_m)} m`;
+      case 'cycle': return `${num(v.spacing_m)} m track beside the crossing; ${both(o.junctions, o.roundabouts)}`;
+      case 'box': return o.all ? 'inside every junction' : `inside big open junctions (over ${num(v.big_m2)} m²)`;
+    }
+    return '';
+  }
+  async function presetThumb(L, img){
+    const key = JSON.stringify([L.preset, L.values, L.opts, MARKS.opts.colours]);
+    if(PRESET_THUMB.has(key)){ img.src = PRESET_THUMB.get(key); return; }
+    try{
+      const r = await fetch(API + '/api/marks/preview', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ layer: L, colours: MARKS.opts.colours }) });
+      if(!r.ok) return;
+      const url = URL.createObjectURL(await r.blob());
+      PRESET_THUMB.set(key, url); img.src = url;
+    }catch(_){}
+  }
+  function presetCard(L, i, box){
+    if(!MARKS.spec) return;
+    const P = MARKS.spec.presets[L.preset];
+    if(!P) return;
+    const card = document.createElement('div'); card.className = 'dc-layer rm-card';
+    const fields = P.fields;
+    card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
+        <button type="button" class="dc-x" title="Remove this road marking layer">×</button></div>
+      <div class="rm-row"><select data-switch title="Which road marking this layer is">${MARKS.spec.order.map(k =>
+        `<option value="${k}"${k === L.preset ? ' selected' : ''}>${esc(MARKS.spec.presets[k].label)}</option>`).join('')}</select></div>
+      <div class="rm-row">${chainButton(L.chain !== false, L.chain !== false ? 'Linked: values that belong together keep the guide\'s proportions. Press to change each on its own'
+          : 'Unlinked: each value changes on its own. Press to keep the guide\'s proportions')}
+        <label class="rm-on" title="Lay this layer, or keep it without laying it"><input type="checkbox"${L.off ? '' : ' checked'}> Laid on the map</label></div>
+      <div class="rm-fields">${fields.map(f => {
+        const g = guideOf(f, L.opts), v = L.values[f.key], isOff = Math.abs(v - g) > 1e-6, r = rangeOf(f, L.opts);
+        return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${f.key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
+          + `<span>${esc(f.label)}${f.int ? '' : f.key === 'big_m2' ? '' : ' (m)'}</span>`
+          + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.05 : 0.5}" min="${f.min}" max="${f.max}" value="${num(v)}">`
+          + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}${r && (r[0] !== r[1]) ? ` (${num(r[0])}–${num(r[1])})` : ''}</small></label>`;
+      }).join('')}</div>
+      ${P.opts.map(o => o.choices
+        ? `<div class="rm-row"><select data-o="${o.key}" title="${esc(o.label)}">${o.choices.map(([v, t]) => `<option value="${v}"${L.opts[o.key] === v ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></div>`
+        : `<label class="dc-chk"><input type="checkbox" data-o="${o.key}"${L.opts[o.key] ? ' checked' : ''}> ${esc(o.label)}</label>`).join('')}
+      ${warnBox(fields, L.values, L.opts, f => f.label, 'p' + i)}
+      <div class="rm-note">${esc(P.note)}</div>`;
+    $('b', card).textContent = P.label;
+    $('small', card).textContent = L.off ? 'off: kept, not laid' : presetWhere(L);
+    presetThumb(L, $('.dc-thumb', card));
+    $('.dc-x', card).addEventListener('click', () => {
+      DEC.layers.splice(i, 1); log(`Road marking layer ${P.label} removed.`); decalsChanged();
+    });
+    $('.rm-on input', card).addEventListener('change', e => { L.off = !e.target.checked; decalsChanged(); });
+    $('[data-switch]', card).addEventListener('change', e => {
+      const n = newPreset(e.target.value); n.off = L.off; DEC.layers[i] = n;
+      log(`Road marking layer is now ${MARKS.spec.presets[n.preset].label}, at the guide's measurements.`); decalsChanged();
+    });
+    $('.rm-chain', card).addEventListener('click', () => { L.chain = L.chain === false; decalsChanged(); });
+    $$('.rm-in input', card).forEach(inp => inp.addEventListener('change', () => {
+      const key = inp.closest('.rm-in').dataset.k, v = parseFloat(inp.value);
+      if(!isFinite(v)){ renderDecals(); return; }
+      const [vals, moved] = chainSet(fields, L.values, key, v, L.opts, L.chain !== false);
+      L.values = vals;
+      if(moved.length) log(`${P.label}: ${fields.find(f => f.key === key).label.toLowerCase()} ${num(vals[key])}; linked, so `
+        + moved.map(k => `${fields.find(f => f.key === k).label.toLowerCase()} ${num(vals[k])}`).join(', ') + ' (the guide\'s proportions).');
+      decalsChanged();
+      moved.forEach(k => { const c = $$(`.rm-card .rm-in[data-k="${k}"]`)[0]; if(c) c.classList.add('flash'); });
+    }));
+    $$('[data-o]', card).forEach(c => c.addEventListener('change', () => {
+      const k = c.dataset.o, before = { ...L.opts };
+      L.opts[k] = c.type === 'checkbox' ? c.checked : c.value;
+      // a value whose guide depends on this choice (the stop line with traffic lights: 1 m) follows it, if it was the guide's
+      fields.forEach(f => {
+        if(f.guide_if && Math.abs(L.values[f.key] - guideOf(f, before)) < 1e-6) L.values[f.key] = guideOf(f, L.opts);
+      });
+      decalsChanged();
+    }));
+    const rb = $(`[data-reset="p${i}"]`, card);
+    if(rb) rb.addEventListener('click', () => {
+      fields.forEach(f => { L.values[f.key] = guideOf(f, L.opts); });
+      log(`${P.label}: back to the guide's values.`, 'ok'); decalsChanged();
+    });
+    box.appendChild(card);
+  }
+
   /* ------------------------------------------------ decals */
   // Pictures laid on the streets (app/decals.py). Each imported decal is a layer with
   // where it goes: randomly along the streets, or at the junctions' edges (a share
@@ -2351,6 +2652,7 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
   function renderDecals(){
     const box = $('#decalList'); box.innerHTML = '';
     DEC.layers.forEach((L, i) => {
+      if(L.preset){ presetCard(L, i, box); return; }
       const d = decalById(L.decal); if(!d) return;
       const card = document.createElement('div'); card.className = 'dc-layer';
       card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
@@ -2474,7 +2776,8 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
     status('Laying the decals…');
     try{
       const res = await api('/api/decals/apply', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value, mark_area: MAREA.area }) });
+        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value, mark_area: MAREA.area,
+                               marks: marksPayload() }) });
       if(!S.gen.result || S.gen.result.id !== gid) return;
       S.gen.decals = res; S.gen.decalVersion = Date.now();
       S.gen.result.urls.result = res.urls.result;
@@ -2486,6 +2789,9 @@ const UI_VERSION = '2026.10.10-front1';   // must match VERSION in server.py
         $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
         status('Ready.'); renderDecals(); return;
       }
+      if(res.lanes_moved) log(`Lane lines laid again on ${res.lanes_moved.streets} street(s) so they end at the junction markings `
+        + `(${res.lanes_moved.seconds.toFixed(1)} s).`, 'ok');
+      S.gen.decalDrive = MARKS.opts.drive;
       if(pt) log(`Decals updated in ${res.seconds.toFixed(1)} s: ${pt.changed - pt.gone} laid where they changed, ${pt.gone} taken away; `
         + `only their places were painted again (${(pt.share * 100).toFixed(1)}% of the texture), the rest stays as it was.`, 'ok');
       log(`Decals: ${res.count.toLocaleString()} laid, ${mode === 'painted' ? 'painted into the road texture and part of the road in the 3D model'
