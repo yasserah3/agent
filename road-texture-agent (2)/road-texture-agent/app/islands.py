@@ -165,9 +165,9 @@ def ground_field(w_m, h_m, seed, cell_m=2.0):
 
 
 def field_at(field, x_m, y_m, cell_m=2.0):
-    """The field at points in metres from the map's top left."""
-    return ndi.map_coordinates(field, [np.asarray(y_m, np.float64) / cell_m, np.asarray(x_m, np.float64) / cell_m],
-                               order=1, mode="nearest")
+    """The field at points in metres from the map's top left (one point too: then an array of one)."""
+    x, y = np.broadcast_arrays(np.atleast_1d(np.asarray(x_m, np.float64)), np.atleast_1d(np.asarray(y_m, np.float64)))
+    return ndi.map_coordinates(field, [y / cell_m, x / cell_m], order=1, mode="nearest")
 
 
 # ------------------------------------------------------------------ the ground pattern

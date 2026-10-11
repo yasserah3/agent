@@ -1548,7 +1548,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
             groups.setdefault(("paving", -1, frames.variant_of(k) % len(tiles["sidewalk"])), []).append((vs, None, k))
 
     prims = []
-    tone_all = None
+    tone_all = ground_all = None
     for (part, s, vk), polys in sorted(groups.items()):
         ground = False
         if part == "paving":
@@ -1564,6 +1564,8 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
         remap, pos, uvs, col, idx = {}, [], [], [], []
         if tone_all is None and frames.regions:
             tone_all = frames.tone(Wh[:, 0], Wh[:, 2])          # every vertex at once, not one by one
+        if ground and ground_all is None:
+            ground_all = frames.ground_tone(Wh[:, 0], Wh[:, 2])  # likewise the ground's light and dark
 
         def vid(vi, owner, k):
             key = (vi, owner, k)
@@ -1577,7 +1579,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                     uvs.append(frames.uv(k, Wh[vi, 0], Wh[vi, 2]))
                     c = float(tone_all[vi]) if frames.regions else 1.0 + (float(vfac[vi]) - 1.0) * 0.5
                     if ground:
-                        c *= float(frames.ground_tone(Wh[vi, 0], Wh[vi, 2])[0])
+                        c *= float(ground_all[vi])
                 col.append((c, c, c, 1.0))
             return remap[key]
 
