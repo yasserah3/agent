@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.11-highways2';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.11-tjunctions1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -2626,7 +2626,7 @@ const UI_VERSION = '2026.10.11-highways2';   // must match VERSION in server.py
     const o = L.opts, v = L.values, both = (a, b) => a && b ? 'every junction and roundabout entry' : a ? 'every junction' : b ? 'roundabout entries' : 'nowhere';
     switch(L.preset){
       case 'zebra': return `${num(v.length_m)} m wide, ${num(v.stripe_m)} m stripes; ${both(o.junctions, o.roundabouts)}`;
-      case 'stop': return `${o.double ? 'double' : 'single'}, ${num(v.dist_m)} m behind the crossing; ${o.minor_only ? 'side streets' : 'every street into a junction'}${o.signals ? ', traffic lights' : ''}`;
+      case 'stop': return `${o.double ? 'double' : 'single'}, ${num(v.dist_m)} m behind the crossing; ${o.minor_only ? 'side streets' : o.signals ? 'every street into a junction' : 'every street into a junction (at T-junctions the side street)'}${o.signals ? ', traffic lights' : ''}`;
       case 'giveway': return `${[o.roundabouts && 'roundabout entries', o.minor && 'side streets'].filter(Boolean).join(' and ') || 'nowhere'}`;
       case 'arrows': return `${v.count} in each lane coming in, every ${num(v.every_m)} m, ${num(v.length_m)} m long; ${both(o.junctions, o.roundabouts)}`;
       case 'stopword': return `in each lane, ${num(v.dist_m)} m before the stop line, letters ${num(v.height_m)} m`;

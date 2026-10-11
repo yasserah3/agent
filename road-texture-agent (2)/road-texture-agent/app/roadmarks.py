@@ -105,8 +105,9 @@ FRAME_NEAR_M = 12.0            # markings this near a junction's edge are laid s
 PRESETS = {
     "zebra": {
         "label": "Pedestrian crossing (zebra)", "short": "Crossing",
-        "note": "Across the street at every junction edge, kerb to kerb. At roundabouts a car length back from the "
-                "give way line.",
+        "note": "Across the street at every junction edge, kerb to kerb; at a T-junction only across the side street "
+                "(the street running straight on is left clear). At roundabouts a car length back from the give way "
+                "line. Two junctions close together each keep to their half of the street between them.",
         "fields": [
             {"key": "stripe_m", "label": "Stripe width", "guide": 0.5, "min": 0.1, "max": 2.0, "link": "stripe",
              "src": "guide", "note": "equally spaced white stripes, 500 mm"},
@@ -122,7 +123,8 @@ PRESETS = {
     },
     "stop": {
         "label": "Stop line", "short": "Stop line",
-        "note": "Across the lanes coming into the junction, behind the crossing.",
+        "note": "Across the lanes coming into the junction, behind the crossing. At a T-junction only on the side "
+                "street, unless the junctions have traffic lights.",
         "fields": [
             {"key": "width_m", "label": "Line width", "guide": 0.2, "min": 0.05, "max": 1.0, "link": "w",
              "src": "guide", "note": "200 mm"},
@@ -133,7 +135,8 @@ PRESETS = {
              "note": "2 to 3 m at junctions without traffic lights, 1 m with them"},
         ],
         "opts": [{"key": "double", "label": "Double line (junctions with a STOP sign)", "default": False},
-                 {"key": "signals", "label": "The junctions have traffic lights", "default": False},
+                 {"key": "signals", "label": "The junctions have traffic lights (T-junctions: markings on every arm)",
+                  "default": False},
                  {"key": "minor_only", "label": "Only on side streets (where a main road goes through)",
                   "default": False}],
     },
@@ -192,7 +195,8 @@ PRESETS = {
     },
     "cycle": {
         "label": "Cyclist crossing", "short": "Cycle crossing",
-        "note": "Two lines across the road beside the pedestrian crossing, as wide apart as the cycle track.",
+        "note": "Two lines across the road beside the pedestrian crossing, as wide apart as the cycle track: only "
+                "beside a crossing, where both fit.",
         "fields": [
             {"key": "width_m", "label": "Line width", "guide": 0.1, "min": 0.03, "max": 0.5, "src": "guide",
              "note": "two 100 mm white lines"},
@@ -795,7 +799,8 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
     in sees them], "half": (x0, x1) the lanes coming in, "moves": the ways out
     ("S", "L", "R"), "street": its _Street or None, "frame": the street's
     middle and way at the edge read from its kerbs (decals.kerb_frame), "canon":
-    whether coming in is the street's canonical way}], the roundabouts and
+    whether coming in is the street's canonical way, "tee_main": one of the two
+    arms of the street running straight on through a T-junction}], the roundabouts and
     junction boxes, and "chains": the highways' whole centrelines their lines are
     laid along (app/highways.py). hw: the highways' settings (app/lanes.py),
     None: none.
@@ -878,6 +883,9 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             # a highway running on through it: its lines go on, the side streets give way to it
             if through:
                 roles = ["through" if ai in through else "minor" for ai in range(len(edges))]
+        # a T-junction: a side street meeting a street that runs straight on (its two arms in line)
+        tee = (rb is None and not through and sum(1 for e in edges if e) == 3
+               and "major" in roles and "minor" in roles)
         # the junction's area between its edges: big open junctions get the yellow box
         corners = []
         for e in edges:
@@ -926,7 +934,8 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             lanes = sorted(lanes) if canon else sorted(lanes, key=lambda t: -t[0])
             half_span = (min(min(t) for t in lanes), max(max(t) for t in lanes)) if lanes else None
             approaches.append({"j": ji, "arm": ai, "x": x, "y": y, "ox": ox, "oy": oy, "road_m": road_m,
-                               "role": roles[ai], "rb": rb, "big": big, "lanes": lanes, "half": half_span,
+                               "role": roles[ai], "tee_main": tee and roles[ai] == "major",
+                               "rb": rb, "big": big, "lanes": lanes, "half": half_span,
                                "street": st, "frame": fr, "frame_m": inf.get("frame_m", 0.0), "canon": canon,
                                "lay": lay, "reach_m": j["r"] * px + road_m + 5.0, "exits": None})
     # the ways out of each approach
@@ -974,6 +983,45 @@ def _leaves(b, drive):
     return side > 0
 
 
+LINK_GAP_M = 1.0               # two junctions' markings along the street between them: at least this apart (ours)
+LINK_REACH_M = 80.0            # the junction an approach faces down its street: looked for this far
+LINK_FACING = 0.7              # facing back up the street: their ways out within about 45 degrees of opposite
+
+
+def _rooms(approaches, px, marked):
+    """
+    How far out along its street each approach's markings may reach, metres
+    (inf: as far as they like): up to the edge of the next junction facing it
+    down the street, half the way when that junction lays markings there too
+    (marked: which approaches do), else all of it but a gap. Two junctions close
+    together then never lay their crossings and lines on each other.
+    """
+    from scipy.spatial import cKDTree
+    rooms = [math.inf] * len(approaches)
+    if len(approaches) < 2:
+        return rooms
+    E = np.array([[a["x"], a["y"]] for a in approaches], float)
+    O = np.array([[a["ox"], a["oy"]] for a in approaches], float)
+    tree = cKDTree(E)
+    for i, a in enumerate(approaches):
+        best = None
+        for k in tree.query_ball_point(E[i], LINK_REACH_M / px):
+            b = approaches[k]
+            if k == i or b["j"] == a["j"] or float(O[i] @ O[k]) > -LINK_FACING:
+                continue                                       # its own junction, or not facing it
+            v = E[k] - E[i]
+            d = float(v @ O[i])                                # down the street
+            side = abs(float(v[0] * O[i][1] - v[1] * O[i][0]))  # and off it
+            if d <= 0 or side > max(a["road_m"], b["road_m"]) / 2 / px:
+                continue
+            if best is None or d < best[0]:
+                best = (d, k)
+        if best is not None:
+            d_m = best[0] * px
+            rooms[i] = (d_m - LINK_GAP_M) / 2 if marked[best[1]] else d_m - LINK_GAP_M / 2
+    return rooms
+
+
 def _ways(layers, preset):
     """The preset layers of a kind that are on, and the first of them (its values set the distances)."""
     ls = [(li, L) for li, L in layers if L["preset"] == preset and not L.get("off")]
@@ -999,10 +1047,14 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     P = plan(det, mpp, found, chosen, cfg.get("rules", "simple"), drive, cfg.get("edge_inset"),
              box0.get("big_m2", BIG_M2), box0.get("open_x", OPEN_X), cfg.get("highway"))
     placements, ends = [], []
-    # each layer's laid so far (none on another), in cells of the map so a marking
-    # checks only those near it: {layer: {"cells": {(i, j): [p]}, "w", "h" (the largest)}}
+    # each layer's laid so far, in cells of the map so a marking checks only those
+    # near it: {layer: {"cells": {(i, j): [p]}, "w", "h" (the largest)}}. None lies on
+    # another, of any layer (two junctions close together, a stop line on a crossing
+    # where the street bends); the yellow box (inside the junction) is checked only
+    # against boxes, as before.
     mine = {}
     cell = max(1.0, CELL_M / px)
+    preset_of = {li: L["preset"] for li, L in layers}
 
     def lay(li, L, variant, x, y, ux, uy, w, h, at):
         xi, yi = int(round(x)), int(round(y))
@@ -1013,15 +1065,19 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
              "x": round(float(x), 2), "y": round(float(y), 2), "ux": round(ux / n, 5), "uy": round(uy / n, 5),
              "w_m": round(float(w), 3), "h_m": round(float(h), 3), "at": at}
         c = DC._corners(p, mpp, 0.98)
+        ci, cj = int(p["x"] // cell), int(p["y"] // cell)
+        for lk, g in mine.items():
+            if lk != li and "box" in (preset_of.get(lk), preset_of.get(li)):
+                continue
+            reach = math.hypot(g["w"] + p["w_m"], g["h"] + p["h_m"]) / px  # the furthest one that could touch it
+            r = int(math.ceil(reach / cell))
+            for i in range(ci - r, ci + r + 1):
+                for j in range(cj - r, cj + r + 1):
+                    for q in g["cells"].get((i, j), ()):
+                        if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < math.hypot(q["w_m"] + p["w_m"], q["h_m"] + p["h_m"]) / px \
+                                and DC._overlap(c, DC._corners(q, mpp, 0.98)):
+                            return None
         g = mine.setdefault(li, {"cells": {}, "w": 0.0, "h": 0.0})
-        reach = math.hypot(g["w"] + p["w_m"], g["h"] + p["h_m"]) / px      # the furthest one that could touch it
-        ci, cj, r = int(p["x"] // cell), int(p["y"] // cell), int(math.ceil(reach / cell))
-        for i in range(ci - r, ci + r + 1):
-            for j in range(cj - r, cj + r + 1):
-                for q in g["cells"].get((i, j), ()):
-                    if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < math.hypot(q["w_m"] + p["w_m"], q["h_m"] + p["h_m"]) / px \
-                            and DC._overlap(c, DC._corners(q, mpp, 0.98)):
-                        return None
         g["cells"].setdefault((ci, cj), []).append(p)
         g["w"], g["h"] = max(g["w"], p["w_m"]), max(g["h"], p["h_m"])
         placements.append(p)
@@ -1054,9 +1110,16 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     arrows, _ = _ways(layers, "arrows")
     words, word0 = _ways(layers, "stopword")
     cycles, cyc0 = _ways(layers, "cycle")
-    for a in P["approaches"]:
-        if a["role"] in ("ring", "through"):
-            continue                                           # a roundabout's ring, a highway running on
+    # a T-junction: the street running straight on through it has the right of way and
+    # nothing is laid across it, only on the side street (with traffic lights, every arm)
+    tee_rule = not any(L["opts"].get("signals") for _, L in stops)
+    skip = [a["role"] in ("ring", "through") or (a.get("tee_main") and tee_rule) for a in P["approaches"]]
+    # how far out each approach may lay before the next junction's markings down its street
+    rooms = _rooms(P["approaches"], px, [not s for s in skip])
+    for ak, a in enumerate(P["approaches"]):
+        if skip[ak]:
+            continue                                           # a roundabout's ring, a highway or main road running on
+        reach = rooms[ak]
         rb = a["role"] == "entry"
         where = "roundabouts" if rb else "junctions"
         zs = [(li, L) for li, L in zebras if L["opts"][where]]
@@ -1066,6 +1129,8 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
         has_in = bool(a["lanes"])
 
         def across(items, d0, depth, kind):
+            """Markings kerb to kerb, d0 out from the edge and depth deep: whether any was laid."""
+            laid = False
             for li, L in items:
                 v = L["values"]
                 if kind == "zebra":
@@ -1074,10 +1139,11 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                 else:
                     w, var = max(0.5, a["road_m"] - 2 * KERB_MARGIN_M), "c"
                 x, y, ux, uy = spot(a, d0 + depth / 2, 0.0)
-                lay(li, L, var, x, y, ux, uy, w, depth, "intersection")
+                laid = lay(li, L, var, x, y, ux, uy, w, depth, "intersection") is not None or laid
+            return laid
 
         def line_in(items, d0, kind):
-            """A stop or give way line across the lanes coming in, d0 out from the edge."""
+            """A stop or give way line across the lanes coming in, d0 out from the edge (where it fits)."""
             if not a["half"]:
                 return None
             x0, x1 = a["half"]
@@ -1099,9 +1165,11 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                     depth = 2 * v["width_m"] + v["spacing_m"]
                     n, w = giveway_size(span, v)
                     var = f"n{n}"
+                if d0 + depth > reach:
+                    continue
                 x, y, ux, uy = spot(a, d0 + depth / 2, (lo + hi) / 2)
-                lay(li, L, var, x, y, ux, uy, w, depth, "intersection")
-                depth_out = max(depth_out or 0.0, depth)
+                if lay(li, L, var, x, y, ux, uy, w, depth, "intersection") is not None:
+                    depth_out = max(depth_out or 0.0, depth)
             return depth_out
 
         cursor = EDGE_GAP_M
@@ -1115,27 +1183,31 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
             start = (line_far or cursor) + (zs[0][1]["values"]["rb_back_m"] if zs else 0.0)
             if zs:
                 ln = zs[0][1]["values"]["length_m"]
-                across(zs, start, ln, "zebra")
-                far = max(far, start + ln)
-                start += ln
-            if cs:
-                v = cs[0][1]["values"]
-                d0 = start + v["gap_m"]
-                across(cs, d0, v["spacing_m"] + v["width_m"], "cycle")
-                far = max(far, d0 + v["spacing_m"] + v["width_m"])
+                if start + ln <= reach and across(zs, start, ln, "zebra"):
+                    far = max(far, start + ln)
+                    # the cyclist crossing: beside the zebra, where it fits
+                    if cs:
+                        v = cs[0][1]["values"]
+                        d0 = start + ln + v["gap_m"]
+                        dep = v["spacing_m"] + v["width_m"]
+                        if d0 + dep <= reach and across(cs, d0, dep, "cycle"):
+                            far = max(far, d0 + dep)
         else:
-            if cs:
-                v = cs[0][1]["values"]
-                across(cs, cursor, v["spacing_m"] + v["width_m"], "cycle")
-                cursor += v["spacing_m"] + v["width_m"] + v["gap_m"]
-                far = max(far, cursor - v["gap_m"])
             crossing = False
             if zs:
                 ln = zs[0][1]["values"]["length_m"]
-                across(zs, cursor, ln, "zebra")
-                cursor += ln
-                far = max(far, cursor)
-                crossing = True
+                cv = cs[0][1]["values"] if cs else None
+                cdep = cv["spacing_m"] + cv["width_m"] + cv["gap_m"] if cv else 0.0
+                # the cyclist crossing (between the zebra and the junction) only beside a zebra,
+                # and only when both fit before the next junction's markings
+                with_cycle = cv is not None and cursor + cdep + ln <= reach
+                z0 = cursor + (cdep if with_cycle else 0.0)
+                if z0 + ln <= reach and across(zs, z0, ln, "zebra"):
+                    crossing = True
+                    if with_cycle and across(cs, cursor, cv["spacing_m"] + cv["width_m"], "cycle"):
+                        far = max(far, cursor + cv["spacing_m"] + cv["width_m"])
+                    cursor = z0 + ln
+                    far = max(far, cursor)
             minor = a["role"] == "minor"
             gw = [(li, L) for li, L in gws if L["opts"]["minor"] and minor]
             st = [(li, L) for li, L in stops if not L["opts"]["minor_only"] or minor]
@@ -1152,6 +1224,8 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                             if L["opts"]["minor_only"] and not minor:
                                 continue
                             v = L["values"]
+                            if line_far + v["dist_m"] + v["height_m"] > reach:
+                                continue
                             for (l0, l1) in a["lanes"]:
                                 if abs(l1 - l0) < v["width_m"] * 0.8:
                                     continue
@@ -1164,7 +1238,7 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
             room = (st.length_m + (st.P[0][0] - a["x"]) * a["ox"] * px + (st.P[0][1] - a["y"]) * a["oy"] * px
                     if st is not None else 30.0)
             one_way = a["lay"]["kind"] != "none" and 0 in a["lay"]["sides"]
-            room = room - 5.0 if one_way else room / 2
+            room = min(room - 5.0 if one_way else room / 2, reach)
             for li, L in arrows:
                 if not L["opts"]["roundabouts" if rb else "junctions"]:
                     continue

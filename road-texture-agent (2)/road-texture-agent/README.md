@@ -437,12 +437,12 @@ guide's values*.
 
 | Marking | Measurements | Where it goes |
 | --- | --- | --- |
-| Pedestrian crossing (zebra) | 0.5 m stripes and gaps, 3 m wide along the road (guide: 2 to 4 m) | across every street at its junction edge, kerb to kerb; at roundabout entries 5 m (a car length, ours) behind the give way line |
-| Stop line | 0.2 m; double: two 0.2 m lines 0.3 m apart; 2.5 m behind the crossing (2 to 3 m), 1 m with traffic lights | across the lanes coming in; every street, or only side streets |
+| Pedestrian crossing (zebra) | 0.5 m stripes and gaps, 3 m wide along the road (guide: 2 to 4 m) | across every street at its junction edge, kerb to kerb (at a T-junction only the side street, below); at roundabout entries 5 m (a car length, ours) behind the give way line |
+| Stop line | 0.2 m; double: two 0.2 m lines 0.3 m apart; 2.5 m behind the crossing (2 to 3 m), 1 m with traffic lights | across the lanes coming in; every street (at a T-junction only the side street, unless the junctions have traffic lights), or only side streets |
 | Give way line | two broken lines, 0.6 m dashes, 0.3 m gaps, 0.2 m wide, 0.3 m apart | roundabout entries; side streets if asked |
 | Lane arrows | 3.5 m long (IRC 35, up to 50 km/h; 5 m above), first 15 m from the stop line, then every 15 m, four in each lane (guide) | in each lane coming in, the way it may go (below) |
 | STOP word | letters 1.25 m along the road (IRC 35), top 2.5 m before the stop line (2 to 3 m) | in each lane before a stop line |
-| Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side |
+| Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side; only beside a crossing that was laid, where both fit |
 | Yellow box (not in the guide) | 0.15 m lines, 1.5 m apart, ours | inside big open junctions (below), or every junction |
 
 How it finds where they go, from the mask:
@@ -463,6 +463,23 @@ How it finds where they go, from the mask:
   no crossing, stop line, give way line, arrow or STOP word, and its lines do
   not stop. The side streets there keep their crossing and their stop line
   (they give way to it), and the junction gets no yellow box.
+- **T-junctions**: where a side street meets a street that runs straight on
+  (three streets, two of them in line within 35°), the street running through
+  has the right of way and nothing is laid across it: no crossing, cyclist
+  crossing, stop line, give way line, arrow or STOP word (its lines end at the
+  junction as anywhere without a stop line). The side street gets its crossing and its stop line (or give way
+  line). With *The junctions have traffic lights* (Stop line), every arm gets
+  its markings, as before. (Before, a long street with a side street every
+  40 m got a crossing and a stop line on both sides of every one.)
+- **Two junctions close together** never lay on each other: each street into a
+  junction looks down the street for the next junction's edge facing it (up
+  to 80 m); its markings keep to its half of the street between them (less
+  0.5 m), or to all of it (less 0.5 m) when the other end lays nothing there
+  (a T-junction's through street). A crossing that does not fit is left out
+  (its cyclist crossing with it), and the stop line moves up to 1 m from the
+  edge, if it fits. No marking is laid on another one, of any kind (before,
+  a short street between a crossroads and a T-junction got two crossings back
+  to back, and each junction's stop line lay on the other's crossing).
 - **Each street into a junction** (its edge: where it meets the junction),
   its **lanes** (as Lanes lays them, the Lanes tool's choices included) and
   which way their traffic goes: with right-hand traffic the lanes coming in
