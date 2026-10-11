@@ -141,6 +141,8 @@ class Mesh:
         self.lane_mpp = 1.0
         self.mark_area = None   # the markings area (app/lanes.py), mask pixels: lines only inside it
         self.line_ends = None   # where junction markings stop the lines (app/roadmarks.py), mask pixels
+        self.chains = []        # the highways' whole centrelines among them (app/highways.py)
+        self.chain_index = None
         self.kerb_owner = []   # per kerb face: its street, junction or connector
         self.streets = {}      # street id -> centreline, rows and sidewalk rows, for bridges
         self.jinfo = {}        # junction id -> centre and the street ends that meet there
@@ -339,6 +341,7 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     mesh.lane_mpp = mpp
     mesh.mark_area = LN.area_scaled(LN.area_check((dashes or {}).get("mark_area")), 1)
     mesh.line_ends = (dashes or {}).get("ends") or None
+    _set_chains(mesh, mpp)
     if dashes:
         have = [k for k in range(1, n_seg + 1) if len(seg_px[k])]
         if have:
@@ -537,6 +540,9 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     # edges stay straight in the kerb line and sidewalks, with their markings
     # along their centrelines. A marked one also gets a strip of road of its own
     # down the middle, a street like the others, so its markings can be painted
+    # the highways' whole centrelines: their lines (their own streets lay none)
+    if dashes and mesh.chains:
+        _chain_lanes(mesh, picks, mpp, scale, dashes, window)
     # into it or laid as strips, whichever the export uses
     exact_n = 0
     if exact:
@@ -844,7 +850,48 @@ def _inner_lanes(mesh, picks, mpp):
     return out
 
 
-def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None):
+def _set_chains(mesh, mpp):
+    """The highways' centrelines among the lines' ends (app/highways.py), and where they run."""
+    mesh.chains = LN.chains_of(mesh.line_ends)
+    mesh.chain_index = LN.ChainIndex(mesh.chains, mpp) if mesh.chains else None
+
+
+def _chain_picks(mesh, picks):
+    """The Lanes tool's choices on highways, {chain: (a, b)}: each for the centreline nearest its point, if on it."""
+    out = {}
+    if not picks or not mesh.chains or mesh.chain_index is None or not mesh.chain_index.ok:
+        return out
+    ci = mesh.chain_index
+    which = np.concatenate([np.full(len(c["pts"]), k) for k, c in enumerate(mesh.chains) if len(c["pts"])])
+    for p in picks:
+        d, i = ci.tree.query(p["pt"])
+        if d <= ci.W[i] / 2 / ci.px + 1.0:
+            out[int(which[i])] = tuple(p["sides"])
+    return out
+
+
+def _chain_lanes(mesh, picks, mpp, scale, dashes, window):
+    """Each highway's lines along its whole centreline (only those reaching into the window, if any)."""
+    chosen = _chain_picks(mesh, picks)
+    for k, c in enumerate(mesh.chains):
+        P = np.asarray(c["pts"], float)
+        if len(P) < 3:
+            continue
+        if window is not None:
+            m = max(c["w"]) / mpp + 2
+            if (P[:, 0].max() < window[0] - m or P[:, 0].min() > window[2] + m or
+                    P[:, 1].max() < window[1] - m or P[:, 1].min() > window[3] + m):
+                continue
+        tg = np.gradient(P, axis=0)
+        tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
+        side = np.column_stack([-tg[:, 1], tg[:, 0]])
+        arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+        w = np.asarray(c["w"], float)
+        _lanes(mesh, LN.CHAIN_ID + k, ("chain", k), (P, side, arc, w / 2 / mpp, mpp, scale, dashes),
+               sides=chosen.get(k), widths=w)
+
+
+def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None, widths=None):
     """
     A street's lane lines (_dash_strips), with its owner on each line and island,
     and the call kept (mesh.lane_calls), so relane can lay them again. owns:
@@ -852,13 +899,17 @@ def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None):
     if it had lines when it was built).
     """
     n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
-    layout = _dash_strips(mesh, *args, island=island, sides=sides, use_ends=key[0] == "street")
+    if key[0] in ("street", "connector") and mesh.chain_index is not None and mesh.chain_index.share(args[0]) >= 0.5:
+        layout = None                                        # on a highway: its whole centreline lays the lines
+    else:
+        layout = _dash_strips(mesh, *args, island=island, sides=sides, use_ends=key[0] in ("street", "chain"),
+                              widths=widths)
     mesh.dash_owner.extend([owner] * (len(mesh.dashes) - n0))
     mesh.island_owner.extend([owner] * (len(mesh.lane_islands) - i0))
     if owns is None:
         owns = key[0] == "street" or (key[0] == "inner" and layout is not None)
     mesh.lane_calls.append({"owner": owner, "key": key, "args": args, "island": island, "layout": layout,
-                            "owns": owns})
+                            "owns": owns, "widths": widths})
     return layout
 
 
@@ -880,17 +931,20 @@ def relane(mesh, picks, area=_KEEP, ends=_KEEP):
         mesh.mark_area = LN.area_scaled(LN.area_check(area), 1)
     if ends is not _KEEP:
         mesh.line_ends = ends or None
+        _set_chains(mesh, mesh.lane_mpp)
     lane_of = _street_lanes(mesh, picks)
     inner = _inner_lanes(mesh, picks, mesh.lane_mpp)
+    chain_of = _chain_picks(mesh, picks)
     mesh.dashes, mesh.dash_solid, mesh.dash_owner, mesh.dash_yellow = [], [], [], []
     mesh.lane_islands, mesh.island_owner = [], []
     calls, mesh.lane_calls = mesh.lane_calls, []
     changed, flipped = set(), False
     for c in calls:
         kind = c["key"][0]
-        sides = lane_of.get(c["key"][1]) if kind == "street" else inner.get(c["key"][1:]) if kind == "inner" else None
+        sides = (lane_of.get(c["key"][1]) if kind == "street" else inner.get(c["key"][1:]) if kind == "inner"
+                 else chain_of.get(c["key"][1]) if kind == "chain" else None)
         old = c["layout"]
-        new = _lanes(mesh, c["owner"], c["key"], c["args"], c["island"], sides, c["owns"])
+        new = _lanes(mesh, c["owner"], c["key"], c["args"], c["island"], sides, c["owns"], c.get("widths"))
         if (old is None) != (new is None):
             flipped = True
         if any((old or {}).get(k) != (new or {}).get(k) for k in ("lines", "island", "kept", "setback_m",
@@ -902,26 +956,31 @@ def relane(mesh, picks, area=_KEEP, ends=_KEEP):
 
 
 def _line_strip(pts, side, arc, a, b, off, halfw, scale):
-    """A line's quads from arc a to b (mask pixels along), off to the side, halfw each way of it."""
+    """
+    A line's quads from arc a to b (mask pixels along), off to the side (one
+    value, or one for each centreline point), halfw each way of it.
+    """
     inside = (arc > a) & (arc < b)
     ts = np.concatenate([[a], arc[inside], [b]])
     cx = np.interp(ts, arc, pts[:, 0]); cy = np.interp(ts, arc, pts[:, 1])
     sx = np.interp(ts, arc, side[:, 0]); sy = np.interp(ts, arc, side[:, 1])
     nrm = np.hypot(sx, sy); nrm[nrm == 0] = 1; sx, sy = sx / nrm, sy / nrm
     hw = np.broadcast_to(halfw, ts.shape)
-    return [((cx[k] + sx[k] * (off + hw[k])) * scale, (cy[k] + sy[k] * (off + hw[k])) * scale,
-             (cx[k] + sx[k] * (off - hw[k])) * scale, (cy[k] + sy[k] * (off - hw[k])) * scale)
+    of = np.broadcast_to(np.interp(ts, arc, off) if np.ndim(off) else off, ts.shape)
+    return [((cx[k] + sx[k] * (of[k] + hw[k])) * scale, (cy[k] + sy[k] * (of[k] + hw[k])) * scale,
+             (cx[k] + sx[k] * (of[k] - hw[k])) * scale, (cy[k] + sy[k] * (of[k] - hw[k])) * scale)
             for k in range(len(ts))]
 
 
 def _at_arc(pts, side, arc, t, off):
-    """Points off to the side of a centreline, at arc positions t (mask pixels)."""
+    """Points off to the side of a centreline (one value, or one for each of its points), at arc positions t (mask pixels)."""
     t = np.atleast_1d(np.asarray(t, float))
     cx, cy = np.interp(t, arc, pts[:, 0]), np.interp(t, arc, pts[:, 1])
     sx, sy = np.interp(t, arc, side[:, 0]), np.interp(t, arc, side[:, 1])
     nrm = np.hypot(sx, sy)
     nrm[nrm == 0] = 1
-    return cx + sx / nrm * off, cy + sy / nrm * off
+    of = np.interp(t, arc, off) if np.ndim(off) else off
+    return cx + sx / nrm * of, cy + sy / nrm * of
 
 
 def _inside_at(pts, side, arc, t, off, area):
@@ -957,7 +1016,7 @@ def _inside_runs(pts, side, arc, a, b, off, area, mpp):
     return [(r0, r1) for r0, r1 in runs if r1 - r0 > 1e-6]
 
 
-def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=None, use_ends=True):
+def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=None, use_ends=True, widths=None):
     """
     A street's lane lines as their own thin quads, following its smoothed
     centreline: as many as its width calls for, where app/lanes.py puts them,
@@ -970,9 +1029,11 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     a whole number of cycles with the gaps stretched to fit, every lane's dashes
     side by side, a width that is either the learned share of the street's
     width or set, and the street read the canonical way. sides: the lanes on
-    each side (the Lanes tool's choice), None for even. Returns the layout
-    ("run_m": where the dashes run, in metres along the street as built), or
-    None for a street with no lines.
+    each side (the Lanes tool's choice), None for even. widths: a highway's
+    centreline (app/highways.py): its width in metres at each point, the lines
+    moving with it (a street on a highway lays none: _lanes). Returns the
+    layout ("run_m": where the dashes run, in metres along the street as
+    built), or None for a street with no lines.
     """
     from app import roadmarks as RM
     marks = cfg.get("marks") or RM.legacy_config(cfg.get("cycle_m", 9.0), cfg.get("dash_share", 0.6),
@@ -982,14 +1043,15 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     k = len(hw)
     inner = np.asarray(hw)[int(k * 0.15): max(int(k * 0.85), int(k * 0.15) + 1)]
     street_m = 2 * float(np.median(inner)) * mpp            # its width, away from the flared ends
-    lay = LN.layout(street_m, sides, rules=marks["rules"], edge_inset=marks.get("edge_inset"))
+    lay = LN.layout(street_m, sides, rules=marks["rules"], edge_inset=marks.get("edge_inset"), hw=marks.get("highway"))
     if not lay["lines"]:
         return None
     cycle, share = RM.main_cycle(marks, lay)
     canon = LN.canonical(pts[0], pts[-1])
     default = marks["setback_m"]
+    wid = None if widths is None else np.asarray(widths, float)
     if mesh.line_ends and use_ends:
-        a_px, b_px = LN.end_setbacks(pts, mesh.line_ends, default / mpp, mpp)
+        a_px, b_px = LN.end_setbacks(pts, mesh.line_ends, default / mpp, mpp, inside=wid is not None)
         sa, sb = a_px * mpp, b_px * mpp                      # at the first point as built, and the last
     else:
         sa = sb = default
@@ -1001,6 +1063,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
         pts = ext
         side = np.vstack([np.repeat(side[:1], len(before), 0), side, np.repeat(side[-1:], len(after), 0)])
         arc = np.concatenate([-before, arc, L_px + after])
+        if wid is not None:
+            wid = np.concatenate([np.full(len(before), wid[0]), wid, np.full(len(after), wid[-1])])
     sb0, sb1 = (sa, sb) if canon else (sb, sa)               # at the canonical start, and end
     usable = L - sb0 - sb1
     if usable < cycle * 0.6:
@@ -1018,15 +1082,21 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     run = (sb0 - gap, sb0 + n * step) if canon else (sb1, L - sb0 + gap)
     layout = {"setback_m": sb0, "setback_end_m": sb1, "step_m": step, "n": n, "share": share, "width_m": width_m,
               "street_m": street_m, "kind": lay["kind"], "lines": lay["lines"], "island": lay["island"],
-              "sides": None if lay["even"] else lay["sides"], "cut": lay["cut"],
-              "canon": canon, "length_m": L, "run_m": run, "cycle_m": cycle, "yellow": bool(styles[dk].get("yellow"))}
+              "sides": None if lay["even"] and not lay["hw"] else lay["sides"], "cut": lay["cut"],
+              "canon": canon, "length_m": L, "run_m": run, "cycle_m": cycle, "yellow": bool(styles[dk].get("yellow")),
+              "chain": wid is not None}
+    # each line's offset: one for the street, or along a highway one at each point
+    if wid is not None:
+        x_at, isl_at = LN.chain_offsets(lay, wid, marks["rules"], marks.get("edge_inset"))
+    else:
+        x_at, isl_at = [x for x, _ in lay["lines"]], None
     area = mesh.mark_area
     kept = 0
-    for x_m, kind in lay["lines"]:
+    for li_, (_, kind) in enumerate(lay["lines"]):
         stl = styles[kind]
         halfw = stl["width"] / 2 / mpp
         solid = kind in LN.SOLID_KINDS
-        offs = [sgn * x_m / mpp]
+        offs = [sgn * x_at[li_] / mpp]
         if kind == "cdouble":                                # two lines, a gap between them
             sep = (stl["width"] + stl.get("double_gap", 0.1)) / 2 / mpp
             offs = [offs[0] - sep, offs[0] + sep]
@@ -1059,7 +1129,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     layout["kept"] = kept
     if island and lay["island"]:
         a, b = sorted((to_arc(sb0) / mpp, to_arc(L - sb1) / mpp))
-        edges = [_line_strip(pts, side, arc, a, b, sgn * x / mpp, 0.0, scale) for x in lay["island"]]
+        xi = isl_at if isl_at is not None else list(lay["island"])
+        edges = [_line_strip(pts, side, arc, a, b, sgn * x / mpp, 0.0, scale) for x in xi]
         mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
                                   "height_m": LN.ISLAND_H_M})
     return layout

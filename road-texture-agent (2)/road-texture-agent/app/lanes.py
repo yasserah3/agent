@@ -24,6 +24,15 @@ Custom (a street picked in the Lanes tool): the lanes asked for on each side,
 cut back to the limit if they add up to more (one off the larger side at a
 time). A side may have none: a one-way road.
 
+Highways (Road markings, Highways; hw= {"min_m", "lanes"}): a street at least
+min_m wide (18 m: 3 + 3 lanes of 3 m) is a highway. Unless the Lanes tool gives
+it its own, a highway has lanes each way (3), however wide it is: the lanes
+widen to fill the road (a 30 m road: 3 + 3 lanes of 4.8 m around the island).
+Its lines run on through the junctions where it meets side streets and through
+T-junctions, laid along its whole centreline (app/highways.py), and stop only
+where it meets another highway at a crossroads. hw None: no highways (as
+before).
+
 All lanes are equal across the road; the lines between them are dashed. From
 22 m, with lanes on both sides, the island lies between the two sides, and a
 solid line runs along both kerbs and along both sides of the island.
@@ -50,10 +59,18 @@ ISLAND_M = 1.0              # the island's width
 ISLAND_H_M = 0.15           # and height above the road (a kerb's)
 EDGE_INSET_M = 0.3          # a solid edge line's centre from the kerb or the island
 LINE_REF_M = 9.0            # a learned line width (a share of the road's width) is taken of at most this
+HW_MIN_M = 18.0             # a street this wide or wider is a highway (Road markings, Highways)
+HW_LANES = 3                # and has this many lanes each way, unless the Lanes tool gives it its own
 
 
 def is_highway_width(width_m):
+    """Whether a road this wide has a raised island between its two directions (from 22 m)."""
     return float(width_m) >= HIGHWAY_M - TOL_M
+
+
+def is_highway(width_m, hw):
+    """Whether a street this wide is a highway under these settings (hw: {"min_m", "lanes"}, None: no highways)."""
+    return bool(hw) and float(width_m) >= float(hw["min_m"]) - TOL_M
 
 
 def limit(width_m):
@@ -63,14 +80,18 @@ def limit(width_m):
     return max(0, int(math.floor((W + TOL_M - isl) / LANE_M)))
 
 
-def sides_for(width_m, want=None):
+def sides_for(width_m, want=None, hw=None):
     """
-    The lanes on each side, (side 1, side 2, cut): even when want is None,
-    else want cut back to the limit (one lane off the larger side at a time);
-    cut says whether it had to be.
+    The lanes on each side, (side 1, side 2, cut): even when want is None
+    (on a highway, hw's lanes each way, as many as fit), else want cut back to
+    the limit (one lane off the larger side at a time); cut says whether it had
+    to be.
     """
     lim = limit(width_m)
     if want is None:
+        if is_highway(width_m, hw):
+            n = min(max(1, int(hw["lanes"])), lim // 2)
+            return n, n, False
         return lim // 2, lim // 2, False
     a, b = max(0, int(want[0])), max(0, int(want[1]))
     cut = False
@@ -93,25 +114,30 @@ def centre_kind(a, b):
     return "cdash" if m <= 1 else "csolid" if m == 2 else "cdouble"
 
 
-def layout(width_m, sides=None, rules="simple", edge_inset=None):
+def layout(width_m, sides=None, rules="simple", edge_inset=None, hw=None, island=None):
     """
     The lines (and island) of a road width_m wide, with sides = (side 1, side 2)
     lanes or None for even: {"width_m", "limit", "sides", "even", "cut",
     "lanes", "lane_m", "lines": [(x, kind)], "island": (x0, x1) or None,
-    "kind": "none", "road" or "highway"}; x across, metres from the centre.
-    kind: "dash" (a lane line) or "solid" (an edge line), and with the guide's
-    rules the centre line, "cdash", "csolid" or "cdouble". edge_inset: an edge
-    line's middle from the kerb or the island (EDGE_INSET_M when None).
+    "kind": "none", "road" or "highway" (with a raised island), "hw": whether
+    it is a highway (hw's settings: its lanes each way when even)}; x across,
+    metres from the centre. kind: "dash" (a lane line) or "solid" (an edge
+    line), and with the guide's rules the centre line, "cdash", "csolid" or
+    "cdouble". edge_inset: an edge line's middle from the kerb or the island
+    (EDGE_INSET_M when None). island: True or False to have the island or not
+    whatever the width (a highway keeps its layout the length of it as its
+    width changes), None: from 22 m.
     """
     W = float(width_m)
     half = W / 2
-    a, b, cut = sides_for(W, sides)
+    a, b, cut = sides_for(W, sides, hw)
     lanes = a + b
     ei = EDGE_INSET_M if edge_inset is None else float(edge_inset)
-    out = {"width_m": W, "limit": limit(W), "sides": (a, b), "even": sides is None, "cut": cut, "lanes": lanes}
+    out = {"width_m": W, "limit": limit(W), "sides": (a, b), "even": sides is None, "cut": cut, "lanes": lanes,
+           "hw": is_highway(W, hw)}
     if lanes < 2:
         return dict(out, lane_m=W, kind="none", lines=[], island=None)
-    if is_highway_width(W) and a >= 1 and b >= 1:
+    if (is_highway_width(W) if island is None else island) and a >= 1 and b >= 1:
         s = (W - ISLAND_M) / lanes
         i0 = a * s                                         # the island, from side 1's kerb
         lines = [(s * k - half, "dash") for k in range(1, a)]
@@ -148,7 +174,7 @@ def lane_spans(lay):
     return {"side1": s1, "side2": s2, "centre": (-half + a * s) if a and b else None}
 
 
-def end_setbacks(path_xy, ends, default_px, px):
+def end_setbacks(path_xy, ends, default_px, px, inside=False):
     """
     How far short of each end a street's lines stop (pixels along it, at its
     first point and its last): where a junction's markings ask (ends: [{"x",
@@ -158,7 +184,9 @@ def end_setbacks(path_xy, ends, default_px, px):
     "half_m" (the road's half width there)}]), else
     default_px. An end belongs to the street end it lies within reach of and
     faces along. Below 0: the lines run on past the street's end (into the
-    junction's circle) to the stop line.
+    junction's circle) to the stop line. inside: the street may end inside the
+    junction, past the edge (a highway's centreline runs on to where the
+    crossing highway is): its lines still stop at the markings.
     """
     import numpy as np
     P = np.asarray(path_xy, float)
@@ -170,14 +198,15 @@ def end_setbacks(path_xy, ends, default_px, px):
         t = t / n
         best = None
         for e in ends or ():
-            if e["ox"] * t[0] + e["oy"] * t[1] < 0.8:
-                continue                                      # not along this street
+            if e.get("chain") or e["ox"] * t[0] + e["oy"] * t[1] < 0.8:
+                continue                                      # a highway's centreline, or not along this street
             # this end must lie on the approach: out from the edge along it, and across it
             # no further than the road's half width (a stub of centreline beside it is not it)
             dx, dy = p0[0] - e["x"], p0[1] - e["y"]
             fwd = dx * e["ox"] + dy * e["oy"]
             side_ = abs(-dx * e["oy"] + dy * e["ox"])
-            if not (-2.0 / px <= fwd <= e.get("reach_m", 30.0) / px) or side_ > (e.get("half_m", 6.0) + 1.0) / px:
+            lo = -e.get("reach_m", 30.0) / px if inside else -2.0 / px
+            if not (lo <= fwd <= e.get("reach_m", 30.0) / px) or side_ > (e.get("half_m", 6.0) + 1.0) / px:
                 continue
             # the stop point, measured along the street from this end
             d = (e["x"] + e["ox"] * e["m"] / px - p0[0]) * t[0] + (e["y"] + e["oy"] * e["m"] / px - p0[1]) * t[1]
@@ -212,6 +241,72 @@ def extend_ends(P, a_px, b_px):
         after = np.linspace(0.0, b_px, int(math.ceil(b_px)) + 1)[1:]
         out.append(P[-1] + t * after[:, None])
     return np.vstack(out), before, after
+
+
+# ---------------------------------------------------------------- highways' centrelines
+# A highway's lines are laid along its whole centreline (app/highways.py: a
+# chain, kept with the lines' ends as {"chain": True, "pts": [[x, y], ...],
+# "w": [width in metres at each point]}), past every side street and
+# T-junction, and its own street segments (cut up at every junction, and on a
+# busy highway mostly cut away) lay none. In the street lists a chain is the
+# street numbered CHAIN_ID plus its place among the chains.
+
+CHAIN_ID = 1_000_000
+
+
+def chains_of(ends):
+    """The highways' centrelines among the lines' ends."""
+    return [e for e in ends or () if e.get("chain")]
+
+
+class ChainIndex:
+    """Where the highways' centrelines run: which street points lie on a highway's carriageway."""
+
+    def __init__(self, chains, px):
+        import numpy as np
+        from scipy.spatial import cKDTree
+        P = [np.asarray(c["pts"], float) for c in chains if len(c["pts"])]
+        W = [np.asarray(c["w"], float) for c in chains if len(c["pts"])]
+        self.ok = bool(P)
+        if self.ok:
+            self.P, self.W = np.vstack(P), np.concatenate(W)
+            self.tree = cKDTree(self.P)
+        self.px = px
+
+    def along(self, pts_xy):
+        """Per point: whether it lies on a highway's carriageway (within half its width of its centreline)."""
+        import numpy as np
+        pts = np.asarray(pts_xy, float)
+        if not self.ok or not len(pts):
+            return np.zeros(len(pts), bool)
+        d, i = self.tree.query(pts)
+        return d <= np.maximum(1.5, 0.5 * self.W[i]) / self.px
+
+    def share(self, pts_xy):
+        """How much of a street's centreline runs along a highway's (0 to 1)."""
+        a = self.along(pts_xy)
+        return float(a.mean()) if len(a) else 0.0
+
+
+def chain_offsets(lay, widths, rules, edge_inset=None):
+    """
+    Each of a highway chain's lines' x (and its island's edges') at every
+    point, the road there as wide as widths says: its layout's lanes and island
+    kept the length of it, the lines moving with the width as layout() moves
+    them. Returns ([array per line], [array, array] or None).
+    """
+    import numpy as np
+    w = np.asarray(widths, float)
+    W0 = float(lay["width_m"])
+    isl = bool(lay["island"])
+    L1 = layout(W0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl)
+    L2 = layout(W0 + 1.0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl)
+    if [k for _, k in L1["lines"]] != [k for _, k in L2["lines"]] or bool(L1["island"]) != bool(L2["island"]):
+        return ([np.full(len(w), x) for x, _ in lay["lines"]],
+                [np.full(len(w), x) for x in lay["island"]] if lay["island"] else None)
+    xs = [x1 + (x2 - x1) * (w - W0) for (x1, _), (x2, _) in zip(L1["lines"], L2["lines"])]
+    il = ([a1 + (a2 - a1) * (w - W0) for a1, a2 in zip(L1["island"], L2["island"])] if L1["island"] else None)
+    return xs, il
 
 
 def line_width(width_m, ratio, fixed_m):

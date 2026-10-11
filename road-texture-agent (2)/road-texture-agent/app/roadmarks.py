@@ -6,8 +6,15 @@ the Indian Roads Congress's code of practice for road markings.
 Two things live here:
 
 - the lines' sizes and colours (the Generate tab's Road markings): the centre
-  line between the two directions, the lane lines, the edge lines, and where
-  lines stop before a junction (app/lanes.py has which line goes where);
+  line between the two directions, the lane lines, the edge lines, where
+  lines stop before a junction, and highways (app/lanes.py has which line goes
+  where): a street at least 18 m wide, 3 lanes each way, whose lines run on
+  through the junctions where side streets join it and through T-junctions,
+  with no crossing, stop line or arrow laid across it there (the side street
+  keeps its own);
+- every junction's approaches laid square to their kerbs: a crossing or a stop
+  line goes across the street where its kerbs say it runs (decals.kerb_frame),
+  not where its centre line, bending into the junction, points;
 - the markings the guide draws at junctions and roundabouts, as presets of the
   Decals panel: the pedestrian crossing, the stop line, the give way line, an
   arrow in each lane, the word STOP, the cyclist crossing, and a yellow box
@@ -64,6 +71,11 @@ LINE_FIELDS = [
      "link": "wid", "src": "guide", "note": "about 150 mm from the edge"},
     {"key": "setback_m", "group": "ends", "label": "Lines end before a junction with no stop line", "guide": 2.0,
      "min": 0.0, "max": 30.0, "src": "ours", "note": "where no preset stop line or crossing sets it"},
+    {"key": "highway.min_m", "group": "highway", "label": "From width", "guide": 18.0, "min": 6.0, "max": 200.0,
+     "src": "ours", "note": "a street at least this wide is a highway: 18 m holds 3 + 3 lanes of 3 m"},
+    {"key": "highway.lanes", "group": "highway", "label": "Lanes each way", "guide": 3, "min": 1, "max": 8,
+     "int": True, "src": "ours", "note": "a highway's lanes each way, widened to fill the road; the Lanes tool "
+                                         "gives a highway its own"},
 ]
 LINE_OPTS = [
     {"key": "rules", "label": "Lines", "default": "guide",
@@ -74,6 +86,9 @@ LINE_OPTS = [
      "choices": [["guide", "Guide colours (yellow centre line)"], ["white", "All white"]]},
     {"key": "sizes", "label": "Dash and line sizes", "default": "set",
      "choices": [["set", "As set below"], ["learned", "Learned from your training images"]]},
+    {"key": "highways", "label": "Highways", "default": "on",
+     "choices": [["on", "Lines run on past side streets and T-junctions"],
+                 ["off", "None: every junction stops the lines (as before)"]]},
 ]
 
 # ------------------------------------------------------------------ the presets
@@ -85,6 +100,7 @@ BIG_M2 = 300.0                 # a big open junction: more than this between its
 OPEN_X = 2.0                   # and this many times a plain crossing of its two widest streets (ours)
 BOX_ROAD_SHARE = 0.85          # a box only on a junction whose area is road (not one running off it)
 CELL_M = 20.0                  # placing: the markings already laid are looked up in cells this big
+FRAME_NEAR_M = 12.0            # markings this near a junction's edge are laid square to its kerbs
 
 PRESETS = {
     "zebra": {
@@ -300,7 +316,9 @@ def lines_config(raw, learned_share=None, learned_ratio=None):
     needs per kind of line: {"rules", "drive", "colours", "learned",
     "width_ratio", "edge_inset", "setback_m", "kinds": {kind: {"cycle",
     "share", "width", "yellow", "double_gap"}}, "values", "exact": dashes keep
-    their length and only the gaps stretch to fit a street}. learned_share,
+    their length and only the gaps stretch to fit a street, "highway": the
+    highways' settings for app/lanes.py ({"min_m", "lanes"}) or None (Highways
+    off)}. learned_share,
     learned_ratio: the dash's share of its cycle and the line's share of its
     street's width learned from training (sizes "learned").
     """
@@ -322,7 +340,9 @@ def lines_config(raw, learned_share=None, learned_ratio=None):
         "cdouble": {"width": None if learned and learned_ratio else v["double.width_m"], "yellow": yellow,
                     "double_gap": v["double.gap_m"]},
     }
-    return {"rules": o["rules"], "drive": o["drive"], "colours": o["colours"], "learned": learned,
+    highway = ({"min_m": float(v["highway.min_m"]), "lanes": int(v["highway.lanes"])}
+               if o["highways"] == "on" else None)
+    return {"rules": o["rules"], "drive": o["drive"], "colours": o["colours"], "learned": learned, "highway": highway,
             "width_ratio": learned_ratio if learned else None,
             "edge_inset": v["edge.inset_m"] + v["edge.width_m"] / 2 if o["rules"] == "guide" else None,
             "setback_m": v["setback_m"], "kinds": kinds, "values": v, "opts": o, "fixed_width_m": v["lane.width_m"],
@@ -334,7 +354,7 @@ def legacy_config(cycle_m, dash_share, width_m, width_ratio, setback_m):
     d = {"cycle": float(cycle_m), "share": float(dash_share), "width": None if width_ratio else float(width_m),
          "yellow": False}
     w = {"width": None if width_ratio else float(width_m), "yellow": False}
-    return {"rules": "simple", "drive": "right", "colours": "white", "learned": bool(width_ratio),
+    return {"rules": "simple", "drive": "right", "colours": "white", "learned": bool(width_ratio), "highway": None,
             "width_ratio": width_ratio, "edge_inset": None, "setback_m": float(setback_m),
             "kinds": {"dash": d, "cdash": dict(d), "solid": w, "csolid": dict(w), "cdouble": dict(w, double_gap=0.1)},
             "values": None, "opts": None, "legacy": True, "fixed_width_m": float(width_m)}
@@ -727,39 +747,110 @@ def _road_share(poly, road):
     return float(road[y0:y1, x0:x1][inside].sum()) / n if n else 0.0
 
 
-def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None, big_m2=BIG_M2, open_x=OPEN_X):
+THROUGH_IN_LINE = 35.0         # a junction's arm runs along a highway's centreline within this many degrees
+FRAME_M = (8.0, 30.0)          # a street's frame at a junction edge is read from this much of it (least, most)
+
+
+def _through_arms(j, edges, cidx, px):
+    """
+    The arms of a junction a highway runs on through (its centreline passes
+    the junction's middle, and the arm runs along it): nothing is laid across
+    them. A highway whose centreline stops here (a crossroads of highways) is
+    an ordinary arm.
+    """
+    if cidx is None or not cidx.ok:
+        return []
+    d, i = cidx.tree.query([j["cx"], j["cy"]])
+    if d > max(2.0, 0.5 * cidx.W[i]) / px:
+        return []
+    out = []
+    cos_in = math.cos(math.radians(THROUGH_IN_LINE))
+    for ai, e in enumerate(edges):
+        if e is None:
+            continue
+        x, y, ox, oy, _ = e
+        d, k = cidx.tree.query([x, y])
+        if d > max(2.0, 0.35 * cidx.W[k]) / px:
+            continue
+        # the centreline's way there
+        k0, k1 = max(0, k - 3), min(len(cidx.P) - 1, k + 3)
+        t = cidx.P[k1] - cidx.P[k0]
+        n = float(np.hypot(*t))
+        if n > 0 and abs(float(t @ np.array([ox, oy]))) / n >= cos_in:
+            out.append(ai)
+    return out
+
+
+def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None, big_m2=BIG_M2, open_x=OPEN_X,
+         hw=None):
     """
     Every junction's approaches, from the mask's junctions (app/junctions.py),
     their edges (app/decals.py) and the streets' lanes (found, chosen: as
     app/generation.py reads them, mask pixels): [{"j", "arm", "x", "y" (the
     edge, centred between the kerbs), "ox", "oy" (out along the street),
     "road_m" (its width there), "role": "major", "minor", "equal" (no main road),
-    "entry" (into a roundabout) or "ring" (the roundabout's own road), "big",
-    "lanes": [(x0, x1) across, left to right as the driver coming in sees
-    them], "half": (x0, x1) the lanes coming in, "moves": the ways out ("S",
-    "L", "R"), "street": its _Street or None, "canon": whether coming in is the
-    street's canonical way}] and the roundabouts and junction boxes.
+    "through" (a highway's arm where it runs on through the junction: nothing
+    laid on it), "entry" (into a roundabout) or "ring" (the roundabout's own
+    road), "big", "lanes": [(x0, x1) across, left to right as the driver coming
+    in sees them], "half": (x0, x1) the lanes coming in, "moves": the ways out
+    ("S", "L", "R"), "street": its _Street or None, "frame": the street's
+    middle and way at the edge read from its kerbs (decals.kerb_frame), "canon":
+    whether coming in is the street's canonical way}], the roundabouts and
+    junction boxes, and "chains": the highways' whole centrelines their lines are
+    laid along (app/highways.py). hw: the highways' settings (app/lanes.py),
+    None: none.
     """
     from app import decals as DC
     from app import lanes as LN
     from shapely.geometry import Polygon
     px = max(mpp, 1e-6)
+    road_mask = det["road"]
     junctions = [j for j in det["junctions"] if j["type"] != "interchange (flagged)"]
     rbs = roundabouts(det, mpp)
     # which street each segment is, and its lanes
-    lays = {s: LN.layout(w, chosen.get(s), rules=rules, edge_inset=edge_inset) for s, (_, w) in found.items()}
+    lays = {s: LN.layout(w, chosen.get(s), rules=rules, edge_inset=edge_inset, hw=hw) for s, (_, w) in found.items()}
     approaches, boxes = [], []
+    # the highways' whole centrelines: their lines run on through the junctions they pass
+    from app import highways as HWY
+    chains = HWY.chains(det, mpp, hw) if hw else []
+    cidx = LN.ChainIndex(chains, px) if chains else None
     for ji, j in enumerate(junctions):
         edges = []
         for ai, arm in enumerate(j["arms"]):
             e = DC._edge(j, arm, det) if not arm.get("off_image") else None
             edges.append(e)
+        # each arm's street: its centreline from the junction out, its lanes, and its frame
+        info = []
+        for ai, (arm, e) in enumerate(zip(j["arms"], edges)):
+            inf = {"seg": None, "street": None, "lay": None, "canon": True, "frame": None, "edge": e,
+                   "width_m": 0.0}
+            info.append(inf)
+            if e is None:
+                continue
+            x, y, ox, oy, half = e
+            s = arm.get("segment")
+            if s in found:
+                path = found[s][0]
+                pa = np.asarray(path, float)
+                first, last = pa[0][::-1], pa[-1][::-1]
+                near_last = math.hypot(last[0] - x, last[1] - y) < math.hypot(first[0] - x, first[1] - y)
+                st = _Street(path, near_last, px)
+                # the street's canonical way (app/lanes.py): coming in is it when its canonical end is here
+                inf.update(seg=s, street=st, lay=lays[s], canon=near_last == LN.canonical(first, last),
+                           width_m=float(found[s][1]))
+                room = float(st.arc[-1]) * 0.8
+            else:
+                room = FRAME_M[1] / px
+            length = min(max(3.0 * half, FRAME_M[0] / px), FRAME_M[1] / px, max(room, 4.0))
+            inf["frame"] = DC.kerb_frame(road_mask, x, y, ox, oy, half, length)
+            inf["frame_m"] = length * px
         # a roundabout's junction: its middle on the ring
         rb = None
         for ri, r in enumerate(rbs):
             if math.hypot(j["cx"] - r["cx"], j["cy"] - r["cy"]) <= r["R"] + 2.0 / px:
                 rb = ri
         roles = ["equal"] * len(j["arms"])
+        through = _through_arms(j, edges, cidx, px) if rb is None else []
         if rb is not None:
             r = rbs[rb]
             ru = _unit(j["cx"] - r["cx"], j["cy"] - r["cy"])
@@ -784,6 +875,9 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
                 tie = any(p[0] >= best[0] - 1.0 and {p[1], p[2]}.isdisjoint({best[1], best[2]}) for p in pairs[1:])
                 if not tie:
                     roles = ["major" if ai in (best[1], best[2]) else "minor" for ai in range(len(edges))]
+            # a highway running on through it: its lines go on, the side streets give way to it
+            if through:
+                roles = ["through" if ai in through else "minor" for ai in range(len(edges))]
         # the junction's area between its edges: big open junctions get the yellow box
         corners = []
         for e in edges:
@@ -801,34 +895,26 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             area_m2 = float(poly.area) * px * px
         # big: more than big_m2 and open_x times a plain crossing of its two widest streets (a
         # crossing of two wide streets is not big for being wide), or five streets or more; and
-        # mostly road (edges found across a wide road or the picture's edge can enclose blocks)
+        # mostly road (edges found across a wide road or the picture's edge can enclose blocks);
+        # never where a highway runs on through
         ws = sorted((2 * e[4] * px for e in edges if e), reverse=True)
         cross_m2 = ws[0] * ws[1] if len(ws) >= 2 else 0.0
-        on_road = _road_share(poly, det["road"]) if poly is not None and not poly.is_empty else 0.0
-        big = (rb is None and on_road >= BOX_ROAD_SHARE
+        on_road = _road_share(poly, road_mask) if poly is not None and not poly.is_empty else 0.0
+        big = (rb is None and not through and on_road >= BOX_ROAD_SHARE
                and ((area_m2 >= big_m2 and area_m2 >= open_x * cross_m2) or len(j["arms"]) >= 5))
         if rb is None and poly is not None and not poly.is_empty:
             boxes.append({"j": ji, "poly": poly, "area_m2": area_m2, "big": big, "cross_m2": cross_m2,
-                          "on_road": on_road})
+                          "on_road": on_road, "through": bool(through)})
         for ai, (arm, e) in enumerate(zip(j["arms"], edges)):
             if e is None:
                 continue
             x, y, ox, oy, half = e
-            road_m = 2 * half * px
-            s = arm.get("segment")
-            st, lay, canon = None, None, True
-            if s in found:
-                path = found[s][0]
-                pa = np.asarray(path, float)
-                first, last = pa[0][::-1], pa[-1][::-1]
-                near_last = math.hypot(last[0] - x, last[1] - y) < math.hypot(first[0] - x, first[1] - y)
-                st = _Street(path, near_last, px)
-                # the street's canonical way (app/lanes.py): coming in is it when its canonical end is here
-                c_fwd = LN.canonical(first, last)
-                canon = near_last == c_fwd
-                lay = lays[s]
+            inf = info[ai]
+            fr = inf["frame"]
+            road_m = 2 * (fr[4] if fr else half) * px
+            st, lay, canon = inf["street"], inf["lay"], inf["canon"]
             if lay is None:
-                lay = LN.layout(road_m, None, rules=rules, edge_inset=edge_inset)
+                lay = LN.layout(road_m, None, rules=rules, edge_inset=edge_inset, hw=hw)
             spans = LN.lane_spans(lay)
             right_side = "side2" if canon else "side1"                      # the right of the way in
             left_side = "side1" if canon else "side2"
@@ -841,8 +927,8 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             half_span = (min(min(t) for t in lanes), max(max(t) for t in lanes)) if lanes else None
             approaches.append({"j": ji, "arm": ai, "x": x, "y": y, "ox": ox, "oy": oy, "road_m": road_m,
                                "role": roles[ai], "rb": rb, "big": big, "lanes": lanes, "half": half_span,
-                               "street": st, "canon": canon, "lay": lay, "reach_m": j["r"] * px + road_m + 5.0,
-                               "exits": None})
+                               "street": st, "frame": fr, "frame_m": inf.get("frame_m", 0.0), "canon": canon,
+                               "lay": lay, "reach_m": j["r"] * px + road_m + 5.0, "exits": None})
     # the ways out of each approach
     by_j = {}
     for a in approaches:
@@ -852,7 +938,7 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
         if a["role"] == "entry":
             by_rb.setdefault(a["rb"], []).append(a)
     for a in approaches:
-        if a["role"] == "ring":
+        if a["role"] in ("ring", "through"):
             continue
         d = (-a["ox"], -a["oy"])
         moves = set()
@@ -873,7 +959,7 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
                 if m:
                     moves.add(m)
         a["moves"] = moves
-    return {"approaches": approaches, "roundabouts": rbs, "boxes": boxes}
+    return {"approaches": approaches, "roundabouts": rbs, "boxes": boxes, "chains": chains}
 
 
 def _leaves(b, drive):
@@ -911,7 +997,7 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     drive = cfg.get("drive", "right")
     box0 = next((L["values"] for _, L in layers if L["preset"] == "box"), {})
     P = plan(det, mpp, found, chosen, cfg.get("rules", "simple"), drive, cfg.get("edge_inset"),
-             box0.get("big_m2", BIG_M2), box0.get("open_x", OPEN_X))
+             box0.get("big_m2", BIG_M2), box0.get("open_x", OPEN_X), cfg.get("highway"))
     placements, ends = [], []
     # each layer's laid so far (none on another), in cells of the map so a marking
     # checks only those near it: {layer: {"cells": {(i, j): [p]}, "w", "h" (the largest)}}
@@ -943,6 +1029,12 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
 
     def spot(a, d_m, x_m):
         """The point d_m out from the edge and x_m across (the canonical way's right), and the way in there."""
+        fr = a.get("frame")
+        if fr is not None and d_m <= min(a["frame_m"], FRAME_NEAR_M):
+            # near the edge: square to the kerbs, from the middle between them
+            fx, fy, fox, foy, _ = fr
+            nx, ny = (foy, -fox) if a["canon"] else (-foy, fox)
+            return fx + fox * d_m / px + nx * x_m / px, fy + foy * d_m / px + ny * x_m / px, -fox, -foy
         st = a["street"]
         ex, ey = a["x"], a["y"]
         if st is not None:
@@ -963,8 +1055,8 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     words, word0 = _ways(layers, "stopword")
     cycles, cyc0 = _ways(layers, "cycle")
     for a in P["approaches"]:
-        if a["role"] == "ring":
-            continue
+        if a["role"] in ("ring", "through"):
+            continue                                           # a roundabout's ring, a highway running on
         rb = a["role"] == "entry"
         where = "roundabouts" if rb else "junctions"
         zs = [(li, L) for li, L in zebras if L["opts"][where]]
@@ -1092,7 +1184,9 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                         x, y, ux, uy = spot(a, tip + h / 2, (l0 + l1) / 2)
                         lay(li, L, kind, x, y, ux, uy, w, h, "edge")
         if far > 0:
-            ends.append({"x": round(a["x"], 2), "y": round(a["y"], 2), "ox": round(a["ox"], 5), "oy": round(a["oy"], 5),
+            # from the middle and way the markings were laid by (the kerbs' frame), else the edge
+            ex, ey, eox, eoy = a["frame"][:4] if a.get("frame") else (a["x"], a["y"], a["ox"], a["oy"])
+            ends.append({"x": round(ex, 2), "y": round(ey, 2), "ox": round(eox, 5), "oy": round(eoy, 5),
                          "m": round(far, 3), "reach_m": round(a["reach_m"], 2), "half_m": round(a["road_m"] / 2, 2)})
     # the yellow box inside big open junctions (or every junction)
     for li, L in [(li, L) for li, L in layers if L["preset"] == "box" and not L.get("off")]:
@@ -1113,11 +1207,13 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
             cx, cy = c.mean(axis=0)
             ux, uy = _unit(*e2)
             lay(li, L, f"b{w_m:g}x{h_m:g}", cx, cy, ux, uy, w_m, h_m, "junction")
+    # the highways' centrelines their lines are laid along (app/lanes.py, app/highways.py)
+    ends.extend(dict(c, chain=True) for c in P["chains"])
     return placements, ends, P
 
 
 def line_ends(det, mpp, layers, found, chosen, cfg):
-    """Only where the lines stop (place()'s ends)."""
+    """Only where the lines stop (place()'s ends, with the highways' centrelines)."""
     return place(det, mpp, layers, found, chosen, cfg)[1]
 
 
@@ -1127,4 +1223,6 @@ def summary(plan_):
     for a in plan_["approaches"]:
         roles[a["role"]] = roles.get(a["role"], 0) + 1
     return {"approaches": roles, "roundabouts": len(plan_["roundabouts"]),
-            "big_junctions": sum(1 for b in plan_["boxes"] if b["big"])}
+            "big_junctions": sum(1 for b in plan_["boxes"] if b["big"]),
+            "highways": len(plan_.get("chains") or []),
+            "highway_km": round(sum(c.get("length_m", 0.0) for c in plan_.get("chains") or []) / 1000.0, 1)}

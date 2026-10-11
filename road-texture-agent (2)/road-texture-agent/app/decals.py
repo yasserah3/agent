@@ -156,6 +156,64 @@ def _edge(j, arm, det):
     return float(x), float(y), ox, oy, float(ref) / 2
 
 
+def kerb_frame(road, x, y, ox, oy, half_px, length_px):
+    """
+    A street's middle and direction at a junction edge, read from its kerbs
+    rather than its centre line (a skeleton bends towards the junction, so a
+    crossing laid square to it lies askew and off the middle): from the edge
+    (x, y) out along (ox, oy) for length_px, the road's extent both ways
+    across at every pixel; the middles between the kerbs where the road is as
+    wide as the street (not where a side street or a driveway opens) fitted
+    with a straight line; then again, square to that line. Returns (x, y (the
+    middle across from the edge), ox, oy (out along the street), half width,
+    pixels) or None when too little of the street is plain to read.
+    """
+    H, W = road.shape
+    L = max(4.0, float(length_px))
+    for _ in range(2):
+        px_, py_ = -oy, ox                                     # across the street
+        s = np.arange(0.0, L + 1e-6, 1.0)
+        t = np.arange(0.0, 2.5 * half_px + 4.0, 0.5)
+
+        def extent(sign):
+            X = x + ox * s[:, None] + sign * px_ * t[None, :]
+            Y = y + oy * s[:, None] + sign * py_ * t[None, :]
+            xi, yi = np.round(X).astype(int), np.round(Y).astype(int)
+            inside = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+            on = np.zeros(X.shape, bool)
+            on[inside] = road[yi[inside], xi[inside]]
+            off = ~on
+            first = np.where(off.any(axis=1), off.argmax(axis=1), len(t) - 1)
+            return t[first], off.any(axis=1)
+        a, fa = extent(1.0)
+        b, fb = extent(-1.0)
+        w = a + b
+        ok = fa & fb
+        if ok.sum() < 4:
+            return None
+        med = float(np.median(w[ok]))
+        ok &= np.abs(w - med) <= 0.12 * med + 1.0              # as wide as the street here
+        if ok.sum() < 4:
+            return None
+        mid = (a - b) / 2
+        pts = np.column_stack([x + ox * s + px_ * mid, y + oy * s + py_ * mid])[ok]
+        c = pts.mean(axis=0)
+        q = pts - c
+        if float(np.ptp(s[ok])) < 3.0:
+            return None
+        d = np.linalg.eigh(q.T @ q)[1][:, -1]
+        if d[0] * ox + d[1] * oy < 0:
+            d = -d
+        if d[0] * ox + d[1] * oy < 0.8:                        # nowhere near the street's own way
+            return None
+        # across from the edge, on the fitted middle line
+        e = np.array([x, y]) - c
+        x, y = (c + d * float(e @ d)).tolist()
+        ox, oy = float(d[0]), float(d[1])
+        half_px = med / 2
+    return float(x), float(y), ox, oy, float(half_px)
+
+
 def _fits(cx, cy, ux, uy, w_px, h_px, road):
     """Does a decal (centre, top direction, size in pixels) lie on the road, corners and middle?"""
     H, W = road.shape

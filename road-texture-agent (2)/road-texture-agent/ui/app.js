@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.11-highways1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1855,25 +1855,36 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
   }
   // ------------------------------------------------ lanes (app/lanes.py: the same equation)
   // Every street's lanes are split evenly between its two sides, as many as its width
-  // holds: limit = floor((width - island) / 3 m), the island 1 m from 22 m. The Lanes
-  // tool gives a street its own: click it, set side 1 and side 2, never more than its
-  // limit together. Kept with the mask, by a point on each street, as the island slots.
+  // holds: limit = floor((width - island) / 3 m), the island 1 m from 22 m. A highway
+  // (Road markings, Highways: from 18 m) has 3 lanes each way however wide it is, widened
+  // to fill it. The Lanes tool gives a street its own: click it, set side 1 and side 2,
+  // never more than its limit together. Kept with the mask, by a point on each street,
+  // as the island slots.
   const laneHighway = W => W >= LN.HIGHWAY - LN.TOL;
   const laneLimit = W => Math.max(0, Math.floor((W + LN.TOL - (laneHighway(W) ? LN.ISLAND : 0)) / LN.LANE));
+  const isHighway = W => MARKS.opts.highways === 'on' && MARKS.values['highway.min_m'] != null
+    && W >= MARKS.values['highway.min_m'] - LN.TOL;
   function laneSides(W, want){
     const lim = laneLimit(W);
+    if(!want && isHighway(W)){
+      const n = Math.min(Math.max(1, Math.trunc(MARKS.values['highway.lanes'] || 3)), Math.floor(lim / 2));
+      return [n, n, false];
+    }
     if(!want) return [Math.floor(lim / 2), Math.floor(lim / 2), false];
     let a = Math.max(0, Math.trunc(want[0])), b = Math.max(0, Math.trunc(want[1])), cut = false;
     while(a + b > lim){ if(a >= b) a--; else b--; cut = true; }
     return [a, b, cut];
   }
+  // a street's name in the log: a highway's whole centreline (app/highways.py) is numbered from 1,000,000
+  const streetName = s => s.id >= 1000000 ? `Highway ${s.id - 1000000 + 1}` : `Street ${s.id}`;
   // with the road marking guide's rules (Road markings, Lines): the line between the two
   // directions is the centre line, broken with one lane each way, solid with two, double from three
   const laneRules = () => MARKS.opts.rules === 'guide' ? 'guide' : 'simple';
   const centreKind = (a, b) => Math.max(a, b) <= 1 ? 'cdash' : Math.max(a, b) === 2 ? 'csolid' : 'cdouble';
   function laneLayout(W, want){
     const [a, b, cut] = laneSides(W, want), lanes = a + b, half = W / 2;
-    const out = { limit: laneLimit(W), sides: [a, b], cut, lanes, lines: [], island: null, kind: 'none', lane_m: W };
+    const out = { limit: laneLimit(W), sides: [a, b], cut, lanes, lines: [], island: null, kind: 'none', lane_m: W,
+      hw: isHighway(W) };
     if(lanes < 2) return out;
     const guide = laneRules() === 'guide';
     const ei = guide && MARKS.values['edge.inset_m'] != null ? MARKS.values['edge.inset_m'] + MARKS.values['edge.width_m'] / 2 : LN.EDGE;
@@ -1994,7 +2005,7 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
   }
   function setEven(i){
     const k = laneMatch().get(i);
-    if(k != null){ LANES.picks.splice(k, 1); log(`Street ${LANES.streets[i].id}: back to the even split.`); lanesChanged(); }
+    if(k != null){ LANES.picks.splice(k, 1); log(`${streetName(LANES.streets[i])}: back to the even split.`); lanesChanged(); }
   }
   function renderLanes(){
     const has = !!LANES.streets;
@@ -2013,7 +2024,7 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
         : `${a} + ${b} lane${a + b === 1 ? '' : 's'} of ${L.lane_m.toFixed(2)} m`
           + (L.kind === 'highway' ? ', a raised island between the sides, solid lines at the kerbs and the island' : '')
           + (a === 0 || b === 0 ? ' (one-way)' : '');
-      ed.innerHTML = `<div class="le-h">Street ${s.id} · ${s.width_m.toFixed(1)} m wide · holds at most ${L.limit} lane${L.limit === 1 ? '' : 's'}</div>
+      ed.innerHTML = `<div class="le-h">${streetName(s)} · ${s.width_m.toFixed(1)} m wide · holds at most ${L.limit} lane${L.limit === 1 ? '' : 's'}</div>
         <div class="le-sides">
           <span><span class="le-sw" style="background:rgb(70,140,255)"></span>Side 1</span>
           <span class="le-step"><button type="button" data-s="0" data-d="-1" ${a <= 0 ? 'disabled' : ''}>−</button><b>${a}</b><button type="button" data-s="0" data-d="1" ${full ? 'disabled' : ''}>+</button></span><span></span>
@@ -2038,7 +2049,7 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
       const i = owner.get(k);
       row.innerHTML = `<span></span><button type="button" class="ll-x" title="Back to the even split">×</button>`;
       $('span', row).textContent = i != null
-        ? `Street ${LANES.streets[i].id} (${LANES.streets[i].width_m.toFixed(1)} m): ${laneSides(LANES.streets[i].width_m, p.sides).slice(0, 2).join(' + ')} lanes`
+        ? `${streetName(LANES.streets[i])} (${LANES.streets[i].width_m.toFixed(1)} m): ${laneSides(LANES.streets[i].width_m, p.sides).slice(0, 2).join(' + ')} lanes`
         : `${p.sides.join(' + ')} lanes at (${Math.round(p.pt[0])}, ${Math.round(p.pt[1])})${LANES.streets ? ': on no street now' : ''}`;
       row.addEventListener('click', () => { if(i != null){ LANES.sel = i; if(!LANES.on) lanesMode(true); else { renderLanes(); drawBridges(); } } });
       $('.ll-x', row).addEventListener('click', e => { e.stopPropagation(); LANES.picks.splice(k, 1); LANES.sel = -1; lanesChanged(); paintLanes(); });
@@ -2455,7 +2466,8 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
   }
   const marksPayload = () => ({ ...MARKS.opts, values: { ...MARKS.values } });
   // what decides the lines in the texture (the drive side only moves the junction markings)
-  const marksKey = () => JSON.stringify([MARKS.opts.rules, MARKS.opts.colours, MARKS.opts.sizes, MARKS.values]);
+  const marksKey = () => JSON.stringify([MARKS.opts.rules, MARKS.opts.colours, MARKS.opts.sizes, MARKS.opts.highways,
+    MARKS.values]);
   async function loadMarks(){
     try{ MARKS.spec = await api('/api/marks/spec'); }
     catch(e){ $('#rmBox').innerHTML = '<div class="note">The road marking guide could not be loaded: ' + esc(e.message) + '</div>'; return; }
@@ -2507,10 +2519,10 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
       const f = fieldOf(key), v = MARKS.values[key], g = guideOf(f), isOff = Math.abs(v - g) > 1e-6;
       const name = key === 'setback_m' ? 'Distance' : key === 'edge.inset_m' ? 'From kerb'
         : key.endsWith('.' + col) && key !== 'double.gap_m' ? COLNAME[col] : f.label;
-      const dis = learned && key.endsWith('width_m') ? ' disabled' : '';
+      const dis = (learned && key.endsWith('width_m')) || (f.group === 'highway' && o.highways !== 'on') ? ' disabled' : '';
       return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
-        + `<span>${esc(name)} (m)</span>`
-        + `<input type="number" step="${f.min < 0.1 ? 0.01 : 0.1}" min="${f.min}" max="${f.max}" value="${num(v)}"${dis}>`
+        + `<span>${esc(name)}${f.int ? '' : ' (m)'}</span>`
+        + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.01 : 0.1}" min="${f.min}" max="${f.max}" value="${num(v)}"${dis}>`
         + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}</small></label>`;
     };
     const rows = LINE_ROWS.filter(r => guide || r[3] === 'all').map(([name, sub, keys]) =>
@@ -2530,9 +2542,13 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
       <label class="rm-l">Dash and line sizes${sel('sizes')}</label>
       ${rows}
       <div class="rm-kind"><div class="rm-kn">${esc(sb.label)}</div><div class="rm-3">${cell('setback_m', 'x')}<div></div><div></div></div></div>
+      <label class="rm-l">Highways${sel('highways')}</label>
+      <div class="rm-kind"><div class="rm-kn">Highways <small>streets this wide or wider: their lines run on past side
+        streets and T-junctions, with no crossing or stop line across them there</small></div>
+        <div class="rm-3">${cell('highway.min_m', 'x')}${cell('highway.lanes', 'x')}<div></div></div></div>
       ${!guide ? '<div class="note">Every line between two lanes is dashed alike, with the lane lines\' sizes, white (as before).</div>' : ''}
       ${learned ? '<div class="note">Widths and the dash\'s share of dash + gap come from your training images; the dash and gap together stay as set.</div>' : ''}
-      ${warnBox(fields, MARKS.values, null, f => `${{ centre: 'Centre line', double: 'Double centre line', lane: 'Lane lines', edge: 'Edge lines', ends: 'Lines end' }[f.group]} ${f.label.toLowerCase()}`, 'lines')}
+      ${warnBox(fields, MARKS.values, null, f => `${{ centre: 'Centre line', double: 'Double centre line', lane: 'Lane lines', edge: 'Edge lines', ends: 'Lines end', highway: 'Highways' }[f.group]} ${f.label.toLowerCase()}`, 'lines')}
       ${stale ? '<div class="rm-stale">These differ from the texture\'s lines: press Generate texture to lay them.</div>' : ''}`;
     // events
     $('.rm-chain', box).addEventListener('click', () => { MARKS.chain = !MARKS.chain; keepMarks(); renderMarks(); });
@@ -2559,7 +2575,7 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
   }
   const fieldLabel = key => {
     const f = fieldOf(key);
-    return `${{ centre: 'centre line', double: 'double centre line', lane: 'lane lines', edge: 'edge lines', ends: 'lines end' }[f.group]} ${f.label.toLowerCase()}`;
+    return `${{ centre: 'centre line', double: 'double centre line', lane: 'lane lines', edge: 'edge lines', ends: 'lines end', highway: 'highways' }[f.group]} ${f.label.toLowerCase()}`;
   };
   // the drive side and the colours move or change the junction markings: lay them again
   function marksMoved(what){
@@ -2567,7 +2583,7 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
       $('#btnPlaceDecals').classList.add('attention');
       $('#decalNote').textContent = 'The road markings changed: press Update decals to lay the junction markings again.';
     }
-    if(what === 'rules' && LANES.on) drawBridges();
+    if(['rules', 'highways'].includes(what) && LANES.on) drawBridges();
   }
   // "54 junction approaches (...), 1 roundabout, 1 big junction"
   function junctionMarksText(j){
@@ -2575,10 +2591,12 @@ const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
     const parts = [];
     if(a.major) parts.push(`${a.major} on main roads`);
     if(a.minor) parts.push(`${a.minor} on side streets`);
+    if(a.through) parts.push(`${a.through} on highways running on through (nothing laid across them)`);
     if(a.equal) parts.push(`${a.equal} where no road is the main one`);
     if(a.entry) parts.push(`${a.entry} roundabout entries`);
     return `Junction markings: ${n} street ends at junctions (${parts.join(', ') || 'none'}), ${j.roundabouts} roundabout${j.roundabouts === 1 ? '' : 's'}`
-      + ` (its ring left clear), ${j.big_junctions} big open junction${j.big_junctions === 1 ? '' : 's'}.`;
+      + ` (its ring left clear), ${j.big_junctions} big open junction${j.big_junctions === 1 ? '' : 's'}`
+      + (j.highway_through ? `; highways' lines run on through ${j.highway_through} junction${j.highway_through === 1 ? '' : 's'}.` : '.');
   }
 
   // ---- the presets in the Decals panel

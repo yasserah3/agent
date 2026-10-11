@@ -36,6 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
+from app import lanes as LN
+
 PATCH_M = 1000.0          # a patch's side (metres)
 WORKER_GB = 1.5           # what a worker may take at most (1.4 GB measured on a 12 x 9 km city at 2.5 m a pixel)
 MARGIN_M = 100.0          # built with this much of its neighbours around it, then cut to its square
@@ -363,8 +365,28 @@ def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=No
     patches it reaches, and only those are built again.
     """
     out = {}
-    picks = [(p, streets.box_of(*p["pt"]) if streets else None) for p in (lane_picks or [])]
-    ends_b = [(e, streets.box_of(e["x"], e["y"]) if streets else None) for e in (ends or [])]
+    # a highway's centreline (app/highways.py) reaches every patch along it: so do the lane
+    # choices made on it
+    chains = LN.chains_of(ends)
+    cboxes = []
+    for c in chains:
+        P = np.asarray(c["pts"], float)
+        m = max(c["w"]) / mpp if c["w"] else 0.0
+        cboxes.append((P[:, 0].min() - m, P[:, 1].min() - m, P[:, 0].max() + m, P[:, 1].max() + m))
+    cidx = LN.ChainIndex(chains, mpp) if chains else None
+    which = (np.concatenate([np.full(len(c["pts"]), k) for k, c in enumerate(chains) if len(c["pts"])])
+             if chains else None)
+
+    def pick_box(p):
+        b = streets.box_of(*p["pt"]) if streets else None
+        if cidx is not None and cidx.ok:
+            d, i = cidx.tree.query(p["pt"])
+            if d <= cidx.W[i] / 2 / mpp + 1.0:
+                return cboxes[int(which[i])]
+        return b
+    picks = [(p, pick_box(p) if streets else None) for p in (lane_picks or [])]
+    ends_b = [(e, (cboxes[chains.index(e)] if e.get("chain") else streets.box_of(e["x"], e["y"])) if streets else None)
+              for e in (ends or [])]
     area_box = None
     if mark_area:                                       # the turned rectangle's reach all round its middle
         r = math.hypot(mark_area["w"], mark_area["h"]) / 2

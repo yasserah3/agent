@@ -68,7 +68,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.11-patches1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.11-highways1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1742,10 +1742,11 @@ def generate(payload: dict):
     lane_picks = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base))
     # the markings area: lines (and decals) only inside it; sent with the request, else the one kept
     mark_area = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base))
-    # the junction markings (the Decals panel's presets) the lines stop at
+    # the junction markings (the Decals panel's presets) the lines stop at, and the junctions
+    # highways' lines run on through
     line_ends, jplan = None, None
     presets = _preset_layers(_layers_checked(_decal_layers()))
-    if presets:
+    if presets or (marks or {}).get("highway"):
         prog.stage("junction_marks", "where the junction markings go")
         _, line_ends, jplan = _junction_marks(rec["path"], float(payload.get("scale", 0.25)), lane_picks,
                                               streets["nomark"], marks, presets, _bridges_of(base, rec))
@@ -2544,7 +2545,8 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
     lanes_art = mem.artifact(f"{gid}_lanes")
     colours = (overrides or {}).get("colours") or (dashes.get("marks") or {}).get("colours", "white")
     ends, jplan = None, None
-    if presets:
+    if presets or (dashes.get("marks") or {}).get("highway"):
+        # (with highways on, where their lines run on through junctions too, presets or not)
         pl2, ends, jplan = _junction_marks(rec["path"], mpp, (lanes_art["meta"] or {}).get("picks") if lanes_art else [],
                                            art["meta"].get("nomark"), dashes.get("marks"), presets, bridges, overrides)
         placements += pl2

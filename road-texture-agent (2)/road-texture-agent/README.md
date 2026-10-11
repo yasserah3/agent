@@ -395,6 +395,7 @@ Line width and Fixed width):
 | Traffic drives on the | **Right** (default) or Left: which half of each street the stop lines, give way lines and arrows cover |
 | Colours | **Guide colours** (the centre line yellow, as the yellow box), or *All white* |
 | Dash and line sizes | **As set below**, or *Learned from your training images* (widths and the dash's share, as before) |
+| Highways | **Lines run on past side streets and T-junctions** (default), or *None* (every junction stops the lines, as before); **From width** 18 m, **Lanes each way** 3 (ours; see *Highways*, below) |
 
 | Line | Dash | Gap | Width | Source |
 | --- | --- | --- | --- | --- |
@@ -446,6 +447,22 @@ guide's values*.
 
 How it finds where they go, from the mask:
 
+- **Square to the kerbs**: at each street's edge its middle and its way are
+  read from its kerbs, not from its centre line (a skeleton bends into the
+  junction, towards the side street, so a crossing laid by it lay a few
+  degrees askew and off the middle, one end on the sidewalk, the other short
+  of the kerb). Over up to 30 m of the street (at least 8 m, never past 80% of
+  it), the road's extent both ways is measured at every metre; the middles
+  between the kerbs where the road is as wide as the street (not where a side
+  street or a driveway opens) are fitted with a straight line, twice. The
+  crossing lies across that line, kerb to kerb, its stripes along it; the stop
+  line, the give way line, the STOP word and the arrows within 12 m of the
+  edge follow the same line (further out, the street's own centre line).
+- **Highways run on**: where a highway runs on through a junction (its whole
+  centreline passes the junction's middle, below), nothing is laid across it:
+  no crossing, stop line, give way line, arrow or STOP word, and its lines do
+  not stop. The side streets there keep their crossing and their stop line
+  (they give way to it), and the junction gets no yellow box.
 - **Each street into a junction** (its edge: where it meets the junction),
   its **lanes** (as Lanes lays them, the Lanes tool's choices included) and
   which way their traffic goes: with right-hand traffic the lanes coming in
@@ -486,6 +503,44 @@ Not in it yet: chevrons and diagonals before islands, bus lane and bus stop
 words, the cycle symbol, and the shorter 3 m gaps the guide asks for on curves
 and approaches.
 
+### Highways: lines that run on past side streets
+
+A street at least **18 m** wide (Road markings, *Highways, From width*: 3 + 3
+lanes of 3 m) is a **highway** (`app/highways.py`, `app/lanes.py`):
+
+- **3 lanes each way** (*Lanes each way*), however wide it is: the lanes widen
+  to fill the road (a 30 m road: 3 + 3 lanes of 4.8 m around the island). From
+  22 m it has the raised island, as before; under 22 m a double yellow centre
+  line. The Lanes tool gives any highway its own lanes (click it: the whole
+  highway changes, from one crossroads of highways to the next).
+- **Its lines run on past side streets and T-junctions**: they are laid along
+  the highway's whole centreline, not street by street. A street's segments are
+  cut out around every junction it passes (twice the road's half width each
+  way), and on a busy highway the cuts overlap: on the 4780 × 3584 map at
+  1 m a pixel only 21% of the highways' length had a segment left, so most of
+  them had no lines at all. The centreline is found on its own, from the
+  mask's whole skeleton:
+  1. the skeleton where the road is at least the highway's width (a pixel's
+     give, so a road reading a few centimetres under it in places stays one);
+  2. the short stubs a side street leaves on it taken off;
+  3. where three highways meet, the two most in line (within 35°) run on (a
+     T: the third stops there); where four meet (a **crossroads of
+     highways**), every one stops short of it, and the junction gets its
+     crossings, stop lines and arrows like any other;
+  4. put midway between the kerbs, measured across it every metre from a
+     smoothed line (twice); where a side street, a bay or a corner's rounding
+     widens the road, the middle and the width carry on straight from either
+     side (a road that narrows or widens along its length is followed).
+- The lines move with the highway's width point by point, and the island runs
+  on with them. The highway's own street segments lay no lines.
+- In the 3D model a highway's lines are strips (with painted markings too);
+  big maps' patches lay the same highways, so they meet at the patches' edges.
+  A lane choice on a highway rebuilds every patch it runs through.
+- *None* turns highways off: every junction stops the lines, as before.
+
+On the 4780 × 3584 map (1 m a pixel): 93 highways, 50 km, found in 3 seconds;
+229 street ends at junctions where a highway runs on.
+
 ## Lane lines by road width
 
 Every street's lanes are **split evenly between its two sides**, as many as its
@@ -513,6 +568,8 @@ directions), and 0 below.
 | 32 m | 10 | 5 + 5, island | 3.1 m | 8 dashed + 4 solid |
 | 37 m | 12 | 6 + 6, island | 3.0 m | 10 dashed + 4 solid |
 
+- **Highways** (18 m and wider, Road markings, Highways) have 3 lanes each way
+  instead, widened to fill the road (above).
 - The lines between lanes are dashed; by the guide (Road markings, above) the
   line between the two sides is the centre line: broken, solid or double.
 - **From 22 m**, with lanes on both sides, a **raised island** 1 m wide lies

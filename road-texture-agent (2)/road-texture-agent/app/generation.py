@@ -290,6 +290,29 @@ def street_paths(det, metres_per_pixel, nomark=None):
     return found
 
 
+def with_chains(found, ends, metres_per_pixel):
+    """
+    found ({label: (path, width_m)}) with the highways' whole centrelines (in
+    the lines' ends: app/highways.py) as streets of their own, numbered from
+    LN.CHAIN_ID (any kept from before replaced): lay_lanes lays a highway's
+    lines along them, and the Lanes tool's choices on a highway are matched to
+    them.
+    """
+    chains = LN.chains_of(ends)
+    out = {k: v for k, v in found.items() if k < LN.CHAIN_ID}
+    if not chains:
+        return out
+    # a highway's own segments are left out: its centreline lays its lines, takes its lane choices
+    cidx = LN.ChainIndex(chains, max(metres_per_pixel, 1e-6))
+    for k, (path, w) in list(out.items()):
+        if cidx.share(np.asarray(path, float)[:, ::-1]) >= 0.5:
+            del out[k]
+    for k, c in enumerate(chains):
+        if len(c["pts"]) >= 2:
+            out[LN.CHAIN_ID + k] = ([(float(y), float(x)) for x, y in c["pts"]], float(np.median(c["w"])))
+    return out
+
+
 def lane_choices(found, lane_picks, metres_per_pixel):
     """The Lanes tool's choices ([{"pt": [x, y] in this picture's pixels, "sides"}]) by street: {label: (a, b)}."""
     if not lane_picks or not found:
@@ -339,11 +362,15 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
     ends_here = ends or None                      # the whole picture's pixels, as the streets' paths are
     placed = 0
     widths_used, layouts, streets = [], [], []
-    last = max(found) if found else 1
+    # the highways' whole centrelines (in found as streets of their own, numbered from
+    # LN.CHAIN_ID, their own segments left out: with_chains): their lines are laid along them
+    chains = LN.chains_of(ends_here)
+    last = max([k for k in found if k < LN.CHAIN_ID], default=1)
     for s, (path, w_m) in found.items():
-        if s % 50 == 0:
+        if s % 50 == 0 and s < LN.CHAIN_ID:
             prog.part(s / last)
-        lay = LN.layout(w_m, chosen.get(s), rules=cfg["rules"], edge_inset=cfg.get("edge_inset"))
+        chain = chains[s - LN.CHAIN_ID] if s >= LN.CHAIN_ID and s - LN.CHAIN_ID < len(chains) else None
+        lay = LN.layout(w_m, chosen.get(s), rules=cfg["rules"], edge_inset=cfg.get("edge_inset"), hw=cfg.get("highway"))
         layouts.append(lay)
         line = np.array(path[::-1] if not LN.canonical(path[0][::-1], path[-1][::-1]) else path, float)[:, ::-1]
         streets.append({"id": int(s), "line": line, "width_m": round(w_m, 2), "limit": lay["limit"],
@@ -359,17 +386,22 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
         # always smooth a little so dashes follow the road axis, not the
         # skeleton's pixel steps; "lines not aligned" smooths more
         path = _smooth(path, window=15 if align else 7)
+        # a highway's width at each point of its centreline (the lines move with it)
+        wid = np.asarray(chain["w"], np.float32) if chain is not None else None
         if not LN.canonical(path[0][::-1], path[-1][::-1]):
             path = path[::-1]
+            wid = wid[::-1] if wid is not None else None
         # how far short of each end the lines stop: at a junction's markings, else the setback;
         # a stop line inside the junction's circle: the street runs on straight to it
         sb0 = sb1 = default_px
         if ends_here:
-            sb0, sb1 = LN.end_setbacks(np.array(path, float)[:, ::-1], ends_here, default_px, px)
+            sb0, sb1 = LN.end_setbacks(np.array(path, float)[:, ::-1], ends_here, default_px, px, inside=wid is not None)
             if sb0 < 0 or sb1 < 0:
-                ext, _, _ = LN.extend_ends(np.array(path, float), max(0.0, -sb0), max(0.0, -sb1))
+                ext, bef, aft = LN.extend_ends(np.array(path, float), max(0.0, -sb0), max(0.0, -sb1))
                 path = [tuple(q) for q in ext]
                 sb0, sb1 = max(0.0, sb0), max(0.0, sb1)
+                if wid is not None:
+                    wid = np.concatenate([np.full(len(bef), wid[0]), wid, np.full(len(aft), wid[-1])])
         # arc length along the street
         d = [0.0]
         for a, b in zip(path, path[1:]):
@@ -388,18 +420,25 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
         nrm = np.column_stack([tg[:, 1], -tg[:, 0]]).astype(np.float32)   # (y, x) of (-ty, tx)
         run = (dist >= sb0) & (dist <= total - sb1)
 
+        # each line's offset: one for the street, or along a highway one at each point
+        if wid is not None:
+            xs_, isl_at = LN.chain_offsets(lay, wid, cfg["rules"], cfg.get("edge_inset"))
+            x_at = [x.astype(np.float32) for x in xs_]
+        else:
+            x_at, isl_at = [x for x, _ in lay["lines"]], None
+
         def along(off_px, a, b):
-            """The line off_px to the side, from a to b along the centreline."""
-            q = pts + nrm * off_px
+            """The line off_px to the side (one value, or one per point), from a to b along the centreline."""
+            q = pts + nrm * (off_px[:, None] if np.ndim(off_px) else off_px)
             inner = q[(dist > a) & (dist < b)]
             ends_ = [np.array([np.interp(v, dist, q[:, 0]), np.interp(v, dist, q[:, 1])], np.float32) for v in (a, b)]
             return np.vstack([ends_[0][None], inner, ends_[1][None]]) if len(inner) else np.vstack(ends_)
 
-        for x_m, kind in lay["lines"]:
+        for li_, (_, kind) in enumerate(lay["lines"]):
             stl = styles[kind]
             w_px = stl["width"] / px
             half_w, strength = max(0.5, w_px / 2), min(1.0, w_px)
-            off = x_m / px
+            off = x_at[li_] / px
             tgt, tgt_solid = (yellow, solid_y) if stl.get("yellow") else (cover, solid)
             if kind in LN.SOLID_KINDS:
                 offs = [off]
@@ -418,7 +457,7 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             keep = np.ones(cycles, bool)
             if area:
                 # a dash is laid whole, or not at all: by where its middle lies
-                q = pts + nrm * off
+                q = pts + nrm * (off[:, None] if np.ndim(off) else off)
                 mid = starts + dash_len / 2
                 keep = LN.in_area(area, np.interp(mid, dist, q[:, 1]) + ox, np.interp(mid, dist, q[:, 0]) + oy)
             gap_px = step - dash_len
@@ -443,7 +482,8 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
                     placed += 1
         if lay["island"] and run.any():
             x0, x1 = lay["island"]
-            spine = along((x0 + x1) / 2 / px, sb0, total - sb1)
+            mid_isl = ((isl_at[0] + isl_at[1]) / 2).astype(np.float32) if isl_at is not None else (x0 + x1) / 2
+            spine = along(mid_isl / px, sb0, total - sb1)
             hw_isl = (x1 - x0) / 2 / px
             _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), piece_px)
             _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), piece_px)
@@ -493,7 +533,7 @@ def place_dashes(det, metres_per_pixel, cfg, rng, align=False, nomark=None, lane
     cycle_px = cycle_m / px
     # every street's ordered centreline and width first, so the Lanes tool's
     # choices can be matched to the street they were made on
-    found = street_paths(det, metres_per_pixel, nomark)
+    found = with_chains(street_paths(det, metres_per_pixel, nomark), ends, metres_per_pixel)
     chosen = lane_choices(found, lane_picks, metres_per_pixel)
     cover, isl, isl_top, laid = lay_lanes(road.shape, found, chosen, metres_per_pixel, cfg, align, area=area, ends=ends)
     rc = road_cov if (road_cov := det.get("coverage")) is not None else road
@@ -610,8 +650,8 @@ def save_lane_state(path, worn, wear_map, road, cov, found, meta):
 
 def _same_lines(width_m, a, b, cfg=None):
     """Whether two lane choices lay the same lines and island on a street this wide."""
-    rules = (cfg or {}).get("rules", "simple")
-    la, lb = LN.layout(width_m, a, rules=rules), LN.layout(width_m, b, rules=rules)
+    rules, hw = (cfg or {}).get("rules", "simple"), (cfg or {}).get("highway")
+    la, lb = LN.layout(width_m, a, rules=rules, hw=hw), LN.layout(width_m, b, rules=rules, hw=hw)
     return la["lines"] == lb["lines"] and la["island"] == lb["island"]
 
 
@@ -651,15 +691,19 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
     def scaled(picks):
         return [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in picks or []]
     cfg = lines_cfg(meta)
+    e_old, e_new = ends_scaled(old_ends, scale), ends_scaled(new_ends, scale)
+    # the highways' centrelines as streets of their own (as the texture was laid with them)
+    found = with_chains(found, e_new, mpp)
     old, new = lane_choices(found, scaled(old_picks), mpp), lane_choices(found, scaled(new_picks), mpp)
     changed = [s for s, (_, w) in found.items() if not _same_lines(w, old.get(s), new.get(s), cfg)]
-    e_old, e_new = ends_scaled(old_ends, scale), ends_scaled(new_ends, scale)
+    if LN.chains_of(old_ends) != LN.chains_of(new_ends):
+        changed = list(found)                  # other highways (other settings): every street's lines again
     by_ends = []
     if (old_ends or None) != (new_ends or None):
         # a street whose lines stop somewhere else now (the junction markings changed)
         d_px = cfg["setback_m"] / px
         for s_, (p_, w_) in found.items():
-            if s_ in changed or not LN.layout(w_, new.get(s_), rules=cfg["rules"])["lines"]:
+            if s_ in changed or not LN.layout(w_, new.get(s_), rules=cfg["rules"], hw=cfg.get("highway"))["lines"]:
                 continue
             xy = np.asarray(p_, float)[:, ::-1]
             a_ = LN.end_setbacks(xy, e_old, d_px, px) if e_old else (d_px, d_px)
@@ -672,7 +716,7 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
     if a_old != a_new:
         # a street the area's change reaches: across either edge, or in one and out of the other
         for s_, (p_, w_) in found.items():
-            if s_ in changed or not LN.layout(w_, new.get(s_), rules=cfg["rules"])["lines"]:
+            if s_ in changed or not LN.layout(w_, new.get(s_), rules=cfg["rules"], hw=cfg.get("highway"))["lines"]:
                 continue
             pa_ = np.asarray(p_, float)
             r_ = (w_ / 2 + 0.5) / px + 3
@@ -756,7 +800,7 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
         if before is not None:
             d = pics["result"][win][R].astype(np.int16) - before[win][R].astype(np.int16)
             pics["full"][win][R] = np.clip(pics["full"][win][R].astype(np.int16) + d, 0, 255).astype(np.uint8)
-        lay = LN.layout(found[s][1], new.get(s), rules=cfg["rules"])
+        lay = LN.layout(found[s][1], new.get(s), rules=cfg["rules"], hw=cfg.get("highway"))
         out["changed"].append({"id": int(s), "sides": list(lay["sides"]), "even": lay["even"], "cut": lay["cut"],
                                "area": s in by_area, "ends": s in by_ends,
                                "box": [round(x0 / scale, 1), round(y0 / scale, 1), round(x1 / scale, 1),
@@ -930,7 +974,9 @@ def ends_scaled(ends, scale):
     """Junction markings' line ends (mask pixels) in the pixels of a picture scale times the mask's size."""
     if not ends:
         return None
-    return [dict(e, x=e["x"] * scale + (scale - 1) / 2, y=e["y"] * scale + (scale - 1) / 2) for e in ends]
+    c = (scale - 1) / 2
+    return [dict(e, pts=[[x * scale + c, y * scale + c] for x, y in e["pts"]]) if e.get("chain")
+            else dict(e, x=e["x"] * scale + c, y=e["y"] * scale + c) for e in ends]
 
 
 def generate(mask_path, libraries, params, out_paths, map_path=None):

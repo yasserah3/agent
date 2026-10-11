@@ -759,7 +759,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         rules = dmarks.get("rules", "simple")
         cycle0 = float((dash_cfg or {}).get("cycle_m", 9.0))
         if painted:
-            # a street the markings area cuts keeps its dashes as strips (only those inside it)
+            # a street the markings area cuts keeps its dashes as strips (only those inside it); a
+            # highway's lines are strips along its whole centreline (no street of its own lays them)
             dashed = {sid: st for sid, st in mesh.streets.items()
                       if st.get("dash") and any(k in DASHED for _, k in st["dash"]["lines"])
                       and not st["dash"].get("clipped")}
