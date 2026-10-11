@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.11-patches1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -966,8 +966,8 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
     S.gen.topStale = gid;
     $('#lp-top').innerHTML = `<div class="ph">${had ? 'out of date:<br>click to build again' : 'click to build'}<br>(${c.text})</div>`;
     log(had ? `Top view out of date: click its layer to build it again (${c.text}).`
-      : `Top view not built by itself: this map is ${kmText(c)}, and its 3D model takes ${c.text} and about `
-        + `${Math.max(1, Math.round(c.gb))} GB of memory. Click the Top view layer to build it.`);
+      : `Top view not built by itself: this map is ${kmText(c)}, too big for one 3D model; click the Top view layer `
+        + 'to draw it from the model\'s 1 km patches as they are built (the 3D tab\'s).');
   }
   async function buildTopView(gid, stay = false){
     if(S.gen.topBusy){ S.gen.topAgain = gid; S.gen.topStay = stay && S.gen.topStay !== false; return; }
@@ -980,6 +980,8 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
     }
   }
   async function buildTopViewNow(gid, stay){
+    const big = modelCost();
+    if(big && big.big) return buildTopViewPatches(gid, stay, big);
     $('#lp-top').innerHTML = '<div class="ph">building…</div>';
     log('Top view: building the 3D model to show the streets, sidewalks and kerbs with their materials…');
     const built = JSON.stringify(exportSettings());
@@ -1002,6 +1004,52 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
       $('#lp-top').innerHTML = '<div class="ph">—</div>';
       log('Top view not available: ' + e.message, 'bad');
     }
+  }
+
+  // A big map's top view, from its 3D model's 1 km patches (the 3D tab's, app/patches.py):
+  // the whole map flat first, then each patch drawn into its square as it is built
+  async function buildTopViewPatches(gid, stay, c){
+    $('#lp-top').innerHTML = '<div class="ph">building…</div>';
+    log(`Top view: this map is ${kmText(c)}, so it is drawn from its 3D model's patches of 1 km as they are built `
+      + '(the same patches as the 3D tab\'s; the whole model at once would not fit in memory).');
+    const built = JSON.stringify(exportSettings());
+    const job = trackJob('Top view from the 3D patches');
+    let painter = null;
+    try{
+      if(!window.topViewPainter) throw new Error('the top view drawing is not loaded');
+      let st = await api('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...exportSettings(), generation: gid, mesh: 'tiled' }) });
+      painter = window.topViewPainter(st.size_m);
+      const canvas = painter.canvas, ctx = canvas.getContext('2d');
+      const ground = await loadImage(API + st.ground).catch(() => null);
+      if(ground) ctx.drawImage(ground, 0, 0, canvas.width, canvas.height);
+      const drawn = new Set();
+      for(;;){
+        if(!S.gen.result || S.gen.result.id !== gid){ job.done(false, 'a newer texture'); return; }
+        const todo = st.patches.filter(p => p.state === 'ready' && p.url && !drawn.has(p.id));
+        for(const p of todo){ await painter.draw(API + p.url, p.m); drawn.add(p.id); }
+        if(todo.length || !S.gen.top || S.gen.top.gid !== gid){
+          S.gen.top = { canvas, gid, key: built };
+          drawInto($('#lp-top'), canvas);
+          if(S.gen.layer === 'top') showLayer('top', true);
+        }
+        const want = st.patches.filter(p => !['failed', 'dropped'].includes(p.state)).length;
+        job.set(`${drawn.size} of ${st.total} patches drawn${st.ready < st.total ? `, ${st.ready} built` : ''}`,
+          drawn.size / Math.max(1, st.total), st.left);
+        if(st.finished && drawn.size >= want) break;
+        if(st.error) throw new Error(st.error);
+        await new Promise(r => setTimeout(r, 2000));
+        st = await api('/api/patches/state/' + st.plan);
+      }
+      job.done(true, `${drawn.size} patches`);
+      log(`Top view ready (${painter.canvas.width} × ${painter.canvas.height}, `
+        + `${(st.patches.length ? c.km[0] * 1000 / painter.canvas.width * 100 : 0).toFixed(0)} cm per pixel), from ${drawn.size} patches.`, 'ok');
+      if(S.gen.layer === 'top' || (S.gen.layer === 'result' && !stay)) showLayer('top', S.gen.layer === 'top');
+    }catch(e){
+      job.done(false, e.message);
+      if(!(S.gen.top && S.gen.top.gid === gid)) $('#lp-top').innerHTML = '<div class="ph">—</div>';
+      log('Top view not available: ' + e.message, 'bad');
+    }finally{ if(painter) painter.dispose(); }
   }
 
   // the 3D model settings, shared by the export and the 3D tab's scene (ui/view3d.js)
@@ -1063,6 +1111,8 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
 
   async function download3d(choice){
     if(!S.gen.result) return;
+    const big = modelCost();
+    if(big && big.big) return downloadPatches(big);
     $('#btn3d').disabled = true; status('Building 3D model…');
     log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
     try{
@@ -1142,6 +1192,31 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
     status('Ready.'); $('#btn3d').disabled = false; renderMemory();
   }
 
+  // a big map's 3D model: its 1 km patches (the 3D tab's), each a GLB in the whole map's
+  // coordinates, in one zip; those not built yet are built now (watch them in the 3D tab)
+  async function downloadPatches(c){
+    $('#btn3d').disabled = true;
+    try{
+      const st = await api('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ generation: S.gen.result.id, ...exportSettings() }) });
+      if(EXPORT.format !== 'glb' || EXPORT.ground || EXPORT.objects)
+        log('A big map downloads as its patches, GLB files as they are built (the format and combine choices are for whole models).');
+      if(st.ready < st.total){
+        log(`This map is ${kmText(c)}: its 3D model comes in ${st.total} patches of 1 km, too big as one model. `
+          + `${st.ready} of them are built; the rest are being built now`
+          + (st.left ? ` (about ${fmtTime(Math.round(st.left))} left)` : '') + '. Press Download 3D model again when they are done '
+          + '(the 3D tab shows them as they come).');
+        return;
+      }
+      log(`3D model in ${st.total} patches of 1 km: each a GLB in the whole map's coordinates (metres, the map's middle at 0), `
+        + 'so imported together they fit as they are.', 'ok');
+      const link = document.createElement('a');
+      link.href = API + `/api/patches/zip/${st.plan}`; link.download = '';
+      document.body.appendChild(link); link.click(); link.remove();
+    }catch(e){ log('3D export failed: ' + e.message, 'bad'); }
+    finally{ $('#btn3d').disabled = false; }
+  }
+
   // keep: the same layer drawn again (its lanes laid again, say): the zoom and place stay
   async function showLayer(name, keep){
     const res = S.gen.result;
@@ -1151,7 +1226,7 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
       if(S.gen.topStale === res.id && !S.gen.topBusy){
         const c = modelCost();
         S.gen.topStale = null;
-        log(`Top view: building the 3D model of the whole map (${kmText(c)}): ${c.text}.`);
+        if(!c.big) log(`Top view: building the 3D model of the whole map (${kmText(c)}): ${c.text}.`);
         buildTopView(res.id);
       }
       if(!(S.gen.top && S.gen.top.gid === res.id)) return;
@@ -2411,7 +2486,7 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
       ? '<div class="rm-ok"><b>✓</b> Our values: this marking is not in the guide, so these are common practice.</div>'
       : '<div class="rm-ok"><b>✓</b> The guide\'s values: the right ones for a good design. Change them only if you need to.</div>';
     const items = off.map(f => {
-      const r = rangeOf(f, opts), out = bad.includes(f), unit = f.int || f.key === 'big_m2' ? '' : ' m';
+      const r = rangeOf(f, opts), out = bad.includes(f), unit = f.int ? '' : f.unit ? ' ' + f.unit : ' m';
       return `<li>${esc(label(f))}: ${num(values[f.key])}${unit} (${f.src === 'ours' ? 'ours' : 'the guide'}: ${num(guideOf(f, opts))}${unit}`
         + `${r ? `, ${num(r[0])} to ${num(r[1])}` : ''})${out ? ' <b>outside the guide</b>' : ''}</li>`;
     }).join('');
@@ -2538,7 +2613,7 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
       case 'arrows': return `${v.count} in each lane coming in, every ${num(v.every_m)} m, ${num(v.length_m)} m long; ${both(o.junctions, o.roundabouts)}`;
       case 'stopword': return `in each lane, ${num(v.dist_m)} m before the stop line, letters ${num(v.height_m)} m`;
       case 'cycle': return `${num(v.spacing_m)} m track beside the crossing; ${both(o.junctions, o.roundabouts)}`;
-      case 'box': return o.all ? 'inside every junction' : `inside big open junctions (over ${num(v.big_m2)} m²)`;
+      case 'box': return o.all ? 'inside every junction' : `inside big open junctions (over ${num(v.big_m2)} m² and ${num(v.open_x)}× a plain crossing)`;
     }
     return '';
   }
@@ -2559,6 +2634,10 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
     if(!P) return;
     const card = document.createElement('div'); card.className = 'dc-layer rm-card';
     const fields = P.fields;
+    // a layer kept from an earlier version: the values and options added since at their defaults
+    L.opts = L.opts || {}; L.values = L.values || {};
+    P.opts.forEach(o => { if(!(o.key in L.opts)) L.opts[o.key] = o.default; });
+    fields.forEach(f => { if(!isFinite(L.values[f.key])) L.values[f.key] = guideOf(f, L.opts); });
     card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
         <button type="button" class="dc-x" title="Remove this road marking layer">×</button></div>
       <div class="rm-row"><select data-switch title="Which road marking this layer is">${MARKS.spec.order.map(k =>
@@ -2569,7 +2648,7 @@ const UI_VERSION = '2026.10.11-marks1';   // must match VERSION in server.py
       <div class="rm-fields">${fields.map(f => {
         const g = guideOf(f, L.opts), v = L.values[f.key], isOff = Math.abs(v - g) > 1e-6, r = rangeOf(f, L.opts);
         return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${f.key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
-          + `<span>${esc(f.label)}${f.int ? '' : f.key === 'big_m2' ? '' : ' (m)'}</span>`
+          + `<span>${esc(f.label)}${f.int || f.unit ? '' : ' (m)'}</span>`
           + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.05 : 0.5}" min="${f.min}" max="${f.max}" value="${num(v)}">`
           + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}${r && (r[0] !== r[1]) ? ` (${num(r[0])}–${num(r[1])})` : ''}</small></label>`;
       }).join('')}</div>

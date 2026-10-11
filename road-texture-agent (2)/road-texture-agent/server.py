@@ -18,6 +18,7 @@ What is not built yet (these endpoints say so honestly instead of pretending):
 """
 
 import functools
+import math
 import json
 import os
 import threading
@@ -60,13 +61,14 @@ from app import formats as FMT
 from app import decals as DC
 from app import roadmarks as RM
 from app import lanes as LN
+from app import patches as PT
 from app.generation import prepare_mask as _prep
 from app import routing as R
 from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.11-marks1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.11-patches1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -2755,8 +2757,13 @@ def _keep_model(key, part_keys, rebuild, info, tileset):
             _models.pop(k)
 
 
-def _export3d(payload):
-    prog.stage("preparing", "preparing")
+def _export_inputs(payload):
+    """
+    What a generation's 3D model is built from: (gid, its map artifact, its
+    result, its mask, the lines' settings with the Lanes tool's choices and
+    the markings area, the inner streets laid exactly or None, a note when
+    they changed since, and the inner streets now).
+    """
     gid = payload.get("generation")
     art = mem.artifact(f"{gid}_map")
     result = mem.artifact(f"{gid}_result")
@@ -2765,14 +2772,6 @@ def _export3d(payload):
     rec = mem.image(art["meta"]["mask"])
     if not rec:
         raise HTTPException(400, "the mask for this generation is missing")
-    # written under its own name, then put in place whole: a page loading the model
-    # never reads a file half written
-    final = ARTIFACTS / f"gen_{gid}.glb"
-    out = final.with_name(f"gen_{gid}.{uuid.uuid4().hex[:8]}.part.glb")
-    # the changed parts alone, when only parts changed (for a view that has the rest)
-    lanes_final = ARTIFACTS / f"gen_{gid}.parts.glb"
-    lanes_out = lanes_final.with_name(f"gen_{gid}.parts.{uuid.uuid4().hex[:8]}.part.glb")
-    mode = payload.get("mesh", "tiled")
     dash_cfg = dict(art["meta"].get("dashes") or {})
     base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
     dash_cfg["lane_picks"] = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base_rec))
@@ -2789,6 +2788,59 @@ def _export3d(payload):
         elif streets_now["shapes"] and base["id"] != rec["id"]:
             # the inner streets as they were drawn, laid exactly; the other roads from the mask without them
             inner = {"base_mask_path": base["path"], "shapes": streets_now["shapes"]}
+    return gid, art, result, rec, dash_cfg, inner, stale, streets_now
+
+
+def _tiled_kwargs(payload, gid, art, result, rec, dash_cfg, inner, tileset):
+    """
+    export_road_tiled_glb's arguments for a generation and the 3D model
+    settings (payload), the tileset's materials already chosen; and the
+    island slots (None when the texture has no numbered islands).
+    """
+    islands = _islands_for(gid, tileset, payload)
+    decals = _decals_for(gid, payload)
+    base_tex = ARTIFACTS / f"gen_{gid}_result_base.png"     # without painted decals (the variation layer)
+    markings = mem.artifact(f"{gid}_markings")
+    return dict(
+        mask_path=rec["path"], result_path=str(base_tex) if base_tex.exists() else result["path"],
+        markings_path=markings["path"] if markings else None, tileset=tileset,
+        metres_per_pixel=float(art["meta"]["scale"]), output_scale=int(art["meta"].get("output_scale", 1)),
+        straightness=float(payload.get("straightness", 70)) / 100.0,
+        spacing_m=float(payload.get("spacing_m", 2.0)),
+        variation=float(payload.get("variation", 100)) / 100.0,
+        seed=int(payload.get("seed", 7)),
+        dash_cfg=dash_cfg,
+        sidewalk=({"share": float(payload.get("sw_share", 30)) / 100.0,
+                   "min_m": float(payload.get("sw_min_m", 1.5)),
+                   "max_m": float(payload.get("sw_max_m", 2.5)),
+                   "height_m": float(payload.get("sw_height_cm", 10)) / 100.0,
+                   "max_road_m": float(payload.get("sw_max_road_m", 20)),
+                   "skip_interchanges": bool(payload.get("sw_skip_interchanges", False))}
+                  if payload.get("sidewalks", True) else None),
+        bridges=_bridge_list(payload.get("bridges")),
+        markings="painted" if payload.get("markings") == "painted" else "strips",
+        optimise=payload.get("mesh_detail") == "optimised",
+        blocks=({"height_m": float(payload.get("sw_height_cm", 10)) / 100.0}
+                if payload.get("blocks", True) else None),
+        scatter=_scatter_for_export(payload.get("scatter")),
+        bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
+                    "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
+                    "deck_m": float(payload.get("bridge_deck_m", 1.0))},
+        inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")), islands=islands,
+        decals=decals), islands
+
+
+def _export3d(payload):
+    prog.stage("preparing", "preparing")
+    gid, art, result, rec, dash_cfg, inner, stale, streets_now = _export_inputs(payload)
+    # written under its own name, then put in place whole: a page loading the model
+    # never reads a file half written
+    final = ARTIFACTS / f"gen_{gid}.glb"
+    out = final.with_name(f"gen_{gid}.{uuid.uuid4().hex[:8]}.part.glb")
+    # the changed parts alone, when only parts changed (for a view that has the rest)
+    lanes_final = ARTIFACTS / f"gen_{gid}.parts.glb"
+    lanes_out = lanes_final.with_name(f"gen_{gid}.parts.{uuid.uuid4().hex[:8]}.part.glb")
+    mode = payload.get("mesh", "tiled")
     rkey, part_keys = (_model_keys(gid, payload, [streets_now["sig"], stale is None], dash_cfg["lane_picks"],
                                    dash_cfg["mark_area"], dash_cfg.get("ends")) if mode == "tiled" else (None, None))
     try:
@@ -2804,36 +2856,8 @@ def _export3d(payload):
             prog.stage("materials", "street materials")
             used_materials = _apply_materials(tileset, payload.get("materials") or {},
                                               bool(payload.get("match_tone", True)))
-            islands = _islands_for(gid, tileset, payload)
-            decals = _decals_for(gid, payload)
-            base_tex = ARTIFACTS / f"gen_{gid}_result_base.png"     # without painted decals (the variation layer)
-            markings = mem.artifact(f"{gid}_markings")
-            info = M3.export_road_tiled_glb(
-                rec["path"], str(base_tex) if base_tex.exists() else result["path"], markings["path"] if markings else None, tileset,
-                float(art["meta"]["scale"]), int(art["meta"].get("output_scale", 1)), out,
-                straightness=float(payload.get("straightness", 70)) / 100.0,
-                spacing_m=float(payload.get("spacing_m", 2.0)),
-                variation=float(payload.get("variation", 100)) / 100.0,
-                seed=int(payload.get("seed", 7)),
-                dash_cfg=dash_cfg,
-                sidewalk=({"share": float(payload.get("sw_share", 30)) / 100.0,
-                           "min_m": float(payload.get("sw_min_m", 1.5)),
-                           "max_m": float(payload.get("sw_max_m", 2.5)),
-                           "height_m": float(payload.get("sw_height_cm", 10)) / 100.0,
-                           "max_road_m": float(payload.get("sw_max_road_m", 20)),
-                           "skip_interchanges": bool(payload.get("sw_skip_interchanges", False))}
-                          if payload.get("sidewalks", True) else None),
-                bridges=_bridge_list(payload.get("bridges")),
-                markings="painted" if payload.get("markings") == "painted" else "strips",
-                optimise=payload.get("mesh_detail") == "optimised",
-                blocks=({"height_m": float(payload.get("sw_height_cm", 10)) / 100.0}
-                        if payload.get("blocks", True) else None),
-                scatter=_scatter_for_export(payload.get("scatter")),
-                bridge_cfg={"height_m": float(payload.get("bridge_height_m", 5.0)),
-                            "ramp_m": float(payload.get("bridge_ramp_m", 120.0)),
-                            "deck_m": float(payload.get("bridge_deck_m", 1.0))},
-                inner=inner, surface=_surface_choice(payload.get("surface_detail", "scan")), islands=islands,
-                decals=decals)
+            kw, islands = _tiled_kwargs(payload, gid, art, result, rec, dash_cfg, inner, tileset)
+            info = M3.export_road_tiled_glb(**kw, out_path=out)
             prog.stage("check", "checking the tile repeat")
             check = M3.repeat_check(out, info["_mesh"], info["_world"], info["tile_m"])
             rebuild = info["_rebuild"]
@@ -2888,6 +2912,348 @@ def _export3d(payload):
     return {"ok": True, "url": f"/api/download/{aid}?name={stem}_roads.glb", **info, "streets_warning": stale,
             "partial": partial, "model_base": base_sig,
             "model_parts": {n: _sig(k) for n, k in part_keys.items()} if part_keys else None}
+
+
+# --------------------------------------------------------------- big maps in patches
+# A big map's 3D model is built in patches of 1 km (app/patches.py) by worker
+# processes, nearest the camera first. Each patch is kept under a key made of
+# what it was built from (the settings every patch shares and the parts that
+# reach into its own window), so pressing Update view after a change builds
+# again only the patches the change reaches; the view swaps just those.
+PATCH_DIR = ARTIFACTS / "patches"
+_patch_lock = threading.RLock()
+_patch_pool = None
+_patch_plans = OrderedDict()          # plan id -> plan
+_patch_inflight = {}                  # output file -> [plan ids waiting on it]
+_patch_streets = {}                   # store -> PT.Streets
+PATCH_PLANS_KEEP = 3
+PATCH_STORES_KEEP = 3                 # the patches of the last few textures; older ones are deleted
+
+
+def _patches_pool():
+    global _patch_pool
+    with _patch_lock:
+        if _patch_pool is None:
+            _patch_pool = PT.Pool()
+        return _patch_pool
+
+
+def _patch_url(store_key, name):
+    return f"/api/patches/file/{store_key}/{name}"
+
+
+def _patch_done(plan_id, pid, out, res):
+    """A worker finished a patch: kept with its report (lamps, time), or noted as failed."""
+    info_path = Path(out).with_suffix(".json")
+    with _patch_lock:
+        waiting = _patch_inflight.pop(str(out), [])
+        if res.get("ok"):
+            info = dict(res.get("info") or {}, seconds=res.get("seconds"), peak_gb=res.get("peak_gb"))
+            _write_json(info_path, info)
+        for pl_id in set(waiting + [plan_id]):
+            pl = _patch_plans.get(pl_id)
+            if pl is None:
+                continue
+            for p in pl["patches"]:
+                if p["file"] == str(out):
+                    if res.get("ok"):
+                        p["state"], p["seconds"] = "ready", res.get("seconds")
+                    else:
+                        p["state"], p["error"] = "failed", res.get("error")
+            if all(p["state"] in ("ready", "failed") for p in pl["patches"]):
+                pl["finished"] = pl.get("finished") or time.time()
+
+
+def _patch_order(pl):
+    """The order patches are built in: nearest the camera first."""
+    cx, cz = pl.get("camera") or (0.0, 0.0)
+
+    def key(job):
+        p = job.get("patch_m")
+        if not p or job.get("plan") != pl["id"]:
+            return (0 if job.get("kind") == "prepare" else 2, 0.0)
+        mx, mz = (p[0] + p[2]) / 2, (p[1] + p[3]) / 2
+        return (1, math.hypot(mx - cx, mz - cz))
+    return key
+
+
+def _patch_submit(pl):
+    """
+    Queue the plan's patches that are not built yet (or wait for another plan's
+    build of the same file). An older plan's waiting patches of this texture
+    that this one no longer needs (settings changed since) are taken off the
+    queue: that plan is behind this one.
+    """
+    pool = _patches_pool()
+    need = {p["file"] for p in pl["patches"]}
+    older = {k for k, v in _patch_plans.items() if v["gid"] == pl["gid"] and k != pl["id"]}
+    gone = pool.drop(lambda j: j.get("plan") in older and j.get("kind") != "prepare" and j["task"].get("out") not in need)
+    with _patch_lock:
+        for j in gone:
+            _patch_inflight.pop(j["task"].get("out"), None)
+            old = _patch_plans.get(j["plan"])
+            for p in (old["patches"] if old else []):
+                if p["file"] == j["task"].get("out"):
+                    p["state"], p["error"] = "dropped", "settings changed since: a newer build replaces it"
+            if old and all(p["state"] in ("ready", "failed", "dropped") for p in old["patches"]):
+                old["finished"] = old.get("finished") or time.time()
+        for p in pl["patches"]:
+            if p["state"] != "queued":
+                continue
+            if p["file"] in _patch_inflight:
+                _patch_inflight[p["file"]].append(pl["id"])       # another plan builds the same one
+                p["state"] = "building"
+                continue
+            _patch_inflight[p["file"]] = []
+            p["state"] = "building"
+            task = {"store": str(pl["store"]), "args": str(pl["args"]), "patch": {"keep": p["keep"]}, "out": p["file"]}
+            pool.submit({"plan": pl["id"], "pid": p["id"], "patch_m": p["m"], "task": task,
+                         "fn": functools.partial(_patch_done, pl["id"], p["id"], p["file"])})
+    pool.reorder(_patch_order(pl))
+
+
+def _patch_prepare_done(pl_id, res):
+    with _patch_lock:
+        pl = _patch_plans.get(pl_id)
+        if pl is None:
+            return
+        if not res.get("ok"):
+            pl["error"] = "the map could not be prepared: " + str(res.get("error"))
+            return
+        pl["prepared"] = True
+    _patch_keys(pl)
+    _patch_submit(pl)
+
+
+def _patch_keys(pl):
+    """Each patch's key and file, from the parts that reach into it (the streets known once the map is prepared)."""
+    key = str(pl["store"])
+    if key not in _patch_streets:
+        _patch_streets.clear()
+        _patch_streets[key] = PT.Streets(pl["store"])
+    kw = pl["kw"]
+    sigs = PT.part_sigs(pl["grid"], pl["W"], pl["H"], kw["metres_per_pixel"], pl["base_sig"],
+                        lane_picks=kw["dash_cfg"].get("lane_picks"), ends=kw["dash_cfg"].get("ends"),
+                        mark_area=kw["dash_cfg"].get("mark_area"), decals=kw.get("decals"), scatter=kw.get("scatter"),
+                        islands=kw.get("islands"), streets=_patch_streets[key])
+    folder = pl["folder"]
+    with _patch_lock:
+        for p in pl["patches"]:
+            p["sig"] = sigs[p["id"]]
+            p["file"] = str(folder / f"p_{p['id']}_{p['sig']}.glb")
+            p["url"] = _patch_url(pl["store_key"], Path(p["file"]).name)
+            if p["state"] in ("waiting", "queued"):
+                p["state"] = "ready" if (Path(p["file"]).exists() and Path(p["file"]).with_suffix(".json").exists()) \
+                    else "queued"
+    try:
+        _patch_cleanup(pl)
+    except OSError as e:
+        print("old patches could not be cleared:", repr(e))
+
+
+def _patch_cleanup(pl):
+    """
+    Delete what no plan needs any more: in this texture's folder the patches
+    built from older settings (not in a plan kept, not being built, over 10
+    minutes old), and the folders of all but the newest few textures.
+    """
+    import shutil
+    with _patch_lock:
+        keep = {p["file"] for v in _patch_plans.values() for p in v["patches"] if p.get("file")} | set(_patch_inflight)
+        stores = {str(v["folder"]) for v in _patch_plans.values()}
+    now = time.time()
+    for f in pl["folder"].glob("p_*"):
+        base = str(f.with_suffix(".glb"))
+        if base not in keep and now - f.stat().st_mtime > 600:
+            f.unlink(missing_ok=True)
+    folders = sorted((d for d in PATCH_DIR.iterdir() if d.is_dir() and not d.name.endswith(".tmp")),
+                     key=lambda d: d.stat().st_mtime, reverse=True)
+    for d in folders[PATCH_STORES_KEEP:]:
+        if str(d) not in stores:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+@app.post("/api/patches/start")
+def patches_start(payload: dict):
+    """
+    A big map's 3D model in patches: the patches (their squares in the
+    model's metres), which are built already, and the plan to follow. The
+    rest are built in the background, nearest payload["camera"] ([x, z],
+    metres) first; GET /api/patches/state/{plan} says how far it is.
+    """
+    import hashlib
+    import pickle
+    gid, art, result, rec, dash_cfg, inner, stale, streets_now = _export_inputs(payload)
+    tileset = _tileset_with_paths()
+    if tileset is None:
+        raise HTTPException(400, "no material tiles yet: build them in the Memory tab, or train, which builds them")
+    used = _apply_materials(tileset, payload.get("materials") or {}, bool(payload.get("match_tone", True)))
+    kw, islands = _tiled_kwargs(payload, gid, art, result, rec, dash_cfg, inner, tileset)
+    mpp, scale = kw["metres_per_pixel"], kw["output_scale"]
+    W, H = Image.open(rec["path"]).size
+
+    def stamp(path):
+        return [str(path), Path(path).stat().st_mtime if path and Path(path).exists() else None]
+    store_key = hashlib.sha1(json.dumps([gid, stamp(rec["path"]), stamp(inner["base_mask_path"]) if inner else None,
+                                         scale, mpp, stamp(kw["result_path"]), stamp(kw["markings_path"]),
+                                         kw["variation"]], default=str).encode()).hexdigest()[:16]
+    folder = PATCH_DIR / store_key
+    folder.mkdir(parents=True, exist_ok=True)
+    store = folder / "store"
+    args_path, args_hash = PT.save_args(folder, kw)
+    # what every patch shares: the settings but the parts that reach only some patches
+    shared_kw = dict(kw, decals=None, scatter=None, islands=None,
+                     dash_cfg={k: v for k, v in kw["dash_cfg"].items() if k not in ("lane_picks", "ends", "mark_area")})
+    base_sig = hashlib.sha1(pickle.dumps(shared_kw, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()[:16]
+    road = np.array(Image.open(rec["path"]).convert("L")) > 127
+    grid = [g for g in PT.grid(W, H, mpp, road=road) if g["road"] > 0]
+    cam = payload.get("camera")
+    plan_id = uuid.uuid4().hex[:12]
+    pl = {"id": plan_id, "gid": gid, "store": store, "store_key": store_key, "folder": folder, "args": args_path,
+          "kw": kw, "base_sig": base_sig, "grid": grid, "W": W, "H": H, "started": time.time(),
+          "camera": (float(cam[0]), float(cam[1])) if isinstance(cam, (list, tuple)) and len(cam) == 2 else (0.0, 0.0),
+          "prepared": (store / "done").exists(), "error": None, "finished": None,
+          "patches": [{"id": g["id"], "keep": list(g["keep"]), "m": list(g["m"]), "road": g["road"],
+                       "state": "waiting", "file": None, "url": None} for g in grid]}
+    with _patch_lock:
+        _patch_plans[plan_id] = pl
+        while len(_patch_plans) > PATCH_PLANS_KEEP:
+            _patch_plans.popitem(last=False)
+    if pl["prepared"]:
+        _patch_keys(pl)
+        _patch_submit(pl)
+    else:
+        pool = _patches_pool()
+        with _patch_lock:
+            busy = any(j.get("kind") == "prepare" and j["task"]["store"] == str(store)
+                       for j in pool.waiting() + list(pool.busy.values()))
+        if busy:
+            # the map is being prepared for another plan: this one follows it
+            pl["follow_prepare"] = True
+        else:
+            task = {"kind": "prepare", "store": str(store), "mask": rec["path"],
+                    "base": inner["base_mask_path"] if inner else None, "output_scale": scale, "mpp": mpp,
+                    "result": kw["result_path"], "markings": kw["markings_path"], "variation": kw["variation"]}
+            pool.submit({"plan": plan_id, "kind": "prepare", "task": task,
+                         "fn": functools.partial(_patch_prepare_done, plan_id)})
+            pool.reorder(_patch_order(pl))
+    return dict(_patch_state(pl), materials_used=used, streets_warning=stale, base_sig=base_sig,
+                size_m=[round(W * mpp, 1), round(H * mpp, 1)], patch_m=PT.PATCH_M,
+                ground=f"/api/patches/ground/{plan_id}")
+
+
+def _patch_state(pl):
+    with _patch_lock:
+        if pl.get("follow_prepare") and not pl["prepared"] and (pl["store"] / "done").exists():
+            pl["prepared"], pl["follow_prepare"] = True, False
+            follow = True
+        else:
+            follow = False
+    if follow:
+        _patch_keys(pl)
+        _patch_submit(pl)
+    with _patch_lock:
+        ps = pl["patches"]
+        ready = [p for p in ps if p["state"] == "ready"]
+        times = [p.get("seconds") for p in ready if p.get("seconds")]
+        left_n = sum(1 for p in ps if p["state"] in ("queued", "building", "waiting"))
+        n_work = _patch_pool.n if _patch_pool else 1
+        avg = (sum(times) / len(times)) if times else None
+        return {"plan": pl["id"], "prepared": pl["prepared"], "error": pl["error"],
+                "patches": [{"id": p["id"], "m": p["m"], "road": p["road"], "state": p["state"],
+                             "url": p["url"] if p["state"] == "ready" else None, "error": p.get("error")} for p in ps],
+                "ready": len(ready), "total": len(ps), "elapsed": round(time.time() - pl["started"], 1),
+                "left": round(avg * left_n / n_work, 0) if avg else None, "workers": n_work,
+                "finished": pl["finished"] is not None}
+
+
+@app.get("/api/patches/state/{plan_id}")
+def patches_state(plan_id: str):
+    pl = _patch_plans.get(plan_id)
+    if pl is None:
+        raise HTTPException(404, "no such plan: press Generate 3D scene again")
+    return _patch_state(pl)
+
+
+@app.post("/api/patches/focus/{plan_id}")
+def patches_focus(plan_id: str, payload: dict):
+    """The camera moved ([x, z], metres): the patches not built yet are built nearest it first."""
+    pl = _patch_plans.get(plan_id)
+    if pl is None:
+        raise HTTPException(404, "no such plan")
+    try:
+        pl["camera"] = (float(payload["camera"][0]), float(payload["camera"][1]))
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise HTTPException(400, "camera: [x, z]")
+    _patches_pool().reorder(_patch_order(pl))
+    return {"ok": True}
+
+
+@app.get("/api/patches/file/{store_key}/{name}")
+def patches_file(store_key: str, name: str):
+    """A built patch (GLB) or its report (JSON: its street lamps)."""
+    if not re.fullmatch(r"[0-9a-f]{16}", store_key) or not re.fullmatch(r"p_\d+_\d+_[0-9a-f]{16}\.(glb|json)", name):
+        raise HTTPException(404, "no such patch")
+    path = PATCH_DIR / store_key / name
+    if not path.exists():
+        raise HTTPException(404, "not built yet")
+    return FileResponse(path, media_type="model/gltf-binary" if name.endswith(".glb") else "application/json")
+
+
+@app.get("/api/patches/ground/{plan_id}")
+def patches_ground(plan_id: str):
+    """The texture of the whole map, at most 4096 px, for the ground far from the camera (JPEG)."""
+    pl = _patch_plans.get(plan_id)
+    if pl is None:
+        raise HTTPException(404, "no such plan")
+    out = pl["folder"] / f"ground_{pl['base_sig']}.jpg"
+    if not out.exists():
+        im = Image.open(pl["kw"]["result_path"]).convert("RGB")
+        k = min(1.0, 4096 / max(im.size))
+        size = (max(1, round(im.width * k)), max(1, round(im.height * k)))
+        if k < 1.0:
+            im = im.resize(size, Image.LANCZOS)
+        # the blocks and islands as the patches pave them (seen from afar: the paving's own
+        # colour), so a patch coming in does not show as a light square on a dark map
+        tiles = pl["kw"]["tileset"]["tiles"]
+        pave = (tiles.get("block") or tiles.get("sidewalk") or [None])[0]
+        if pave and Path(pave["path"]).exists():
+            colour = np.asarray(Image.open(pave["path"]).convert("RGB"), np.float32).reshape(-1, 3).mean(axis=0)
+            road = np.asarray(Image.open(pl["kw"]["mask_path"]).convert("L").resize(size, Image.BILINEAR),
+                              np.float32)[..., None] / 255.0
+            im = Image.fromarray(np.clip(np.asarray(im, np.float32) * road + colour * (1 - road), 0, 255).astype(np.uint8))
+        tmp = out.with_suffix(".tmp.jpg")
+        im.save(tmp, "JPEG", quality=88)
+        os.replace(tmp, out)
+    return FileResponse(out, media_type="image/jpeg")
+
+
+@app.get("/api/patches/zip/{plan_id}")
+def patches_zip(plan_id: str):
+    """The built patches as one zip: each a GLB in the whole map's coordinates (they fit together as they are)."""
+    import zipfile
+    pl = _patch_plans.get(plan_id)
+    if pl is None:
+        raise HTTPException(404, "no such plan")
+    ready = [p for p in pl["patches"] if p["state"] == "ready"]
+    if not ready:
+        raise HTTPException(400, "no patch is built yet")
+    out = pl["folder"] / f"patches_{plan_id}.zip"
+    for old in pl["folder"].glob("patches_*.zip"):          # one zip at a time: they are as big as the patches
+        if old != out:
+            old.unlink(missing_ok=True)
+    tmp = out.with_suffix(".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+        index = []
+        for p in ready:
+            z.write(p["file"], f"patch_{p['id']}.glb")
+            index.append({"file": f"patch_{p['id']}.glb", "square_m": p["m"]})
+        z.writestr("patches.json", json.dumps({"patch_m": PT.PATCH_M, "patches": index,
+                                               "note": "every patch is in the whole map's coordinates (metres, "
+                                                       "Y up, the map's middle at 0): import them all as they are"},
+                                              indent=1))
+    os.replace(tmp, out)
+    return FileResponse(out, media_type="application/zip", filename=f"{pl['gid']}_patches.zip")
 
 
 @app.post("/api/export3d/convert")

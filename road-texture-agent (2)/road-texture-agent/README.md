@@ -442,7 +442,7 @@ guide's values*.
 | Lane arrows | 3.5 m long (IRC 35, up to 50 km/h; 5 m above), first 15 m from the stop line, then every 15 m, four in each lane (guide) | in each lane coming in, the way it may go (below) |
 | STOP word | letters 1.25 m along the road (IRC 35), top 2.5 m before the stop line (2 to 3 m) | in each lane before a stop line |
 | Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side |
-| Yellow box (not in the guide) | 0.15 m lines, 1.5 m apart, ours | inside big open junctions (over 300 m² between their edges, or five streets or more), or every junction |
+| Yellow box (not in the guide) | 0.15 m lines, 1.5 m apart, ours | inside big open junctions (below), or every junction |
 
 How it finds where they go, from the mask:
 
@@ -463,7 +463,14 @@ How it finds where they go, from the mask:
   crossing a car length back, arrows to the roundabout's other entries); the
   ring itself gets no crossing and no stop line.
 - **Big open junctions** get the yellow box; their streets get the same
-  crossings, stop lines and arrows as any junction.
+  crossings, stop lines and arrows as any junction. Big (ours): more than
+  300 m² between its edges *and* at least 2 times a plain crossing of its two
+  widest streets (their widths multiplied), or five streets or more. Two wide
+  streets crossing are not big for being wide: on a 12 × 9 km city map the
+  old rule (300 m² alone) called 1,215 of 1,342 junctions big; this one 107.
+  A box is laid only where the junction's area is road (85% or more), never
+  on one whose edges, found across a wide road or the picture's border,
+  enclose blocks.
 - **The lane lines stop at the junction's markings**: at the stop or give way
   line, or behind the crossing, running on past the street's end into the
   junction's circle where the line is that close (the median island too).
@@ -790,15 +797,90 @@ machine:
   model takes 20 minutes or more. When the estimate (about 45 s for every km² of
   road, from the measurements above) is over a minute, it is no longer built by
   itself after Generate texture or a change: its layer button says *click to
-  build* with the time, and a click builds it. Smaller maps work as before.
-- **Generate 3D scene** on such a map first asks, with the time and memory
-  it will take (23 min and 11 GB on the city above).
+  build*, and a click draws it from the model's 1 km patches (below): the
+  whole map flat first, then each patch drawn into its square as it is built.
+  Smaller maps work as before.
+- **Generate 3D scene** on such a map builds it in patches (below).
 
-What stays slow on a city is the 3D model of the whole of it at once (23 min,
-10.6 GB, 10 million triangles; it grows with the area, about 12.5 s a km² on
-this map). The next step builds it in patches of 1 km × 1 km, in parallel,
-nearest the camera first, each under 1 GB, and the 3D view loads the patches
-around you.
+### Big maps in 1 km patches
+
+A city's 3D model as one piece took 23 minutes and 10.6 GB on the 6 m a pixel
+map above. On the same city at 2.5 m a pixel (4780 × 3584 px, 12 × 9 km) it
+had used 12.5 GB after 17.5 minutes and was stopped, with 15 GB in the machine:
+it does not fit. So when a map's model would take more than a minute (the same
+estimate as the Top view), the 3D tab and Download 3D model build it in
+**patches of 1 km × 1 km** instead:
+
+- **What every patch shares is worked out once** for the whole map (about
+  40 s on the city): the cleaned mask and its road coverage, the junctions and
+  streets, numbered once (a street keeps its width, its lanes, its dashes and
+  their texture along it in every patch it crosses), the variation layer, and
+  the paved areas between the roads, numbered too (each is laid with the paving
+  layout of its own number and whole outline, not of the piece in one patch).
+  It is kept on disk, and the workers read it from there without each holding
+  a copy.
+- **Each patch is built from its square and 100 m of its neighbours** round
+  it, in the whole map's coordinates, and then **cut exactly at its square**:
+  a triangle across the edge is cut there (its corners, texture places and
+  colours worked out on the edge), so two patches side by side meet with no gap
+  and no overlap. Objects and street lamps belong to the patch their foot stands
+  in. The kerb lines are worked out between fixed points of a 40 m grid over the
+  whole map, every block's sidewalk is laid one way (round the block, its width
+  point by point), and a patch's frame keeps the blocks along its edge apart, so
+  a kerb, a sidewalk or a block cut by one patch's window comes out the same as
+  in the patch that sees it whole.
+- **Built in parallel**, all cores but one, as many as the free memory holds
+  (1.5 GB each, 2 GB kept back; 3 here), **nearest the point you look at
+  first**: when you move, the server builds the patches near you next.
+- **The 3D view holds only what is near you**: patches within 1.6 km of the
+  point you look at come in as they are built, in full detail; past 2.8 km they
+  go. Everywhere else the map is its texture laid flat, one square for each
+  patch, hidden where the patch itself is in. Each patch's file carries the same
+  materials; the view keeps one of each, so the graphics card holds every
+  texture once. Street lamps come with their patches.
+- **A change builds again only the patches it reaches**: each patch is kept
+  under a key made of the settings every patch shares and the parts that reach
+  into its own window (the decals and objects near it, its islands' materials,
+  the Lanes tool's choices and the junctions' line stops on the streets that
+  cross it, the markings area). Update view swaps in just those.
+- **Far away, the texture laid flat**: the generated texture, its blocks and
+  islands painted in the paving's own colour (as the patches pave them, so a
+  patch coming in does not show as a light square on a dark map). The view
+  shows it at once and does not wait for anything to be built.
+- **Download 3D model** gives the patches as a zip of GLB files, each in the
+  whole map's coordinates: imported together they fit as they are. While some
+  are still being built it says how many are left and builds them; press it
+  again when they are done. (FBX, OBJ and the combine choices are for whole
+  models; patches are GLB.)
+- **Markings painted into the road texture** (3D model setting) in patches:
+  each street's painted picture is chosen by its own line width (5 cm steps)
+  and width (1 m steps; its lines then lie within about 25 cm of where they
+  belong), so a street crossing from one patch to the next is painted the same
+  in both. Streets wider than 40 m keep their lines as strips (each patch
+  would otherwise make a picture and surface maps as wide as the street again:
+  on the city, a 100 m wide road took a patch to 2 minutes and 7.7 GB).
+- **The Top view** (Generate tab) is drawn from the same patches.
+- Old patches are cleared: those built from earlier settings once no plan
+  needs them, and all but the last 3 textures' patches.
+
+Measured on the 12 × 9 km city at 2.5 m a pixel (108 patches), 4 cores:
+
+| | One model | Patches |
+|---|---|---|
+| Until the first part is in the view | did not fit (stopped at 12.5 GB, 17.5 min) | 56 s (40 s of it the shared part) |
+| The whole city | — | 8.1 min |
+| Memory | over 12.5 GB | 0.6 to 1.4 GB a worker, 3.9 GB in all |
+| One lane changed (Lanes tool) | everything again | 2 patches again, 18 s; 106 kept |
+
+Patches against one build of two patches together, along the line between
+them (an 80 m strip, 1 km long): road 0.002%, sidewalks 0.05%, blocks 0.008%
+of the area differ (hairlines where triangles are cut), markings only in the
+pixels a dash's cut runs through; at 600 points within 3 m of the line, every
+surface has the same material, height and texture place in both; nothing of
+either patch reaches past the line.
+
+Smaller maps are built as one model, as before, and come out the same byte for
+byte.
 
 ## Time so far and time left, in the console
 

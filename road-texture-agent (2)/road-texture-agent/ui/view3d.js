@@ -904,16 +904,10 @@ async function generate(keep = false){
   const gid = window.lastGeneration && window.lastGeneration();
   if(!gid){ note('Generate the texture first (Generate tab), then come back and press Generate 3D scene.', true); return; }
   if(!renderer && !init()) return;
-  // a big map's whole model: say what it costs before building it (app.js modelCost)
+  // a big map: its model in patches of 1 km, the ones round the camera first (app.js modelCost)
   const cost = window.modelCost && window.modelCost();
-  if(cost && cost.big && !(keep && world)){
-    const km = `${cost.km[0].toFixed(1)} × ${cost.km[1].toFixed(1)} km`;
-    if(!confirm(`This map is ${km}. Its 3D model takes ${cost.text} to build and about ${Math.max(1, Math.round(cost.gb))} GB `
-      + 'of memory, and the view then holds all of it. Build it now?')){
-      note(`Not built: the ${km} map's 3D model takes ${cost.text}. A smaller map, or a part of it, builds quickly.`);
-      return;
-    }
-  }
+  if(cost && cost.big) return generatePatches(keep, gid);
+  if(PATCHES) endPatches();
   busy = true; $('#btnScene3d').disabled = true; $('#btnScene3dUpdate').disabled = true;
   stopPhoto();
   note(keep ? 'Updating the scene with the current materials and settings…' : 'Building the 3D model: streets, sidewalks, kerbs, blocks and objects…');
@@ -987,6 +981,266 @@ async function generate(keep = false){
     note('Could not build the 3D scene: ' + e.message, true);
   }
   busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
+}
+
+// ----------------------------------------------------------------- big maps in patches
+// A big map's model comes in patches of 1 km (server.py /api/patches, app/patches.py):
+// built by the server nearest the point you look at first, they come into the view
+// within PATCH_NEAR of it in full detail and go out past PATCH_FAR; everywhere else
+// the map is its texture laid flat, one square for each patch, hidden where the patch
+// itself is in. The patches meet exactly at their edges (the server cuts each to its
+// square). Pressing Update view after a change swaps in only the patches it changed.
+// Every patch's file holds its own copy of the same materials: the view keeps one of
+// each (by name, for one set of settings), so the graphics card holds each once
+const PATCH_NEAR = 1600, PATCH_FAR = 2800, PATCH_LOADS = 2;
+let PATCHES = null;
+
+async function generatePatches(keep, gid){
+  busy = true; $('#btnScene3d').disabled = true; $('#btnScene3dUpdate').disabled = true;
+  stopPhoto();
+  const update = keep && PATCHES && PATCHES.gid === gid && world;
+  const job = window.trackJob ? window.trackJob(update ? 'Updating the 3D scene (patches)' : 'Building the 3D scene in 1 km patches') : null;
+  try{
+    const t = controls.target;
+    const r = await fetch('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined,
+                             camera: update ? [t.x, t.z] : [0, 0] }) });
+    const res = await r.json();
+    if(!r.ok) throw new Error(res.detail || 'the 3D model could not be built');
+    if(PATCHES && PATCHES.job && PATCHES.job !== job) PATCHES.job.done(true, 'replaced by a newer build');
+    if(update) updatePatches(res); else await startPatches(res, gid);
+    PATCHES.job = job;
+    builtFrom = buildKey();
+    staleCheck();
+    if(job) job.set(patchLine(res), res.ready / Math.max(1, res.total), res.left);
+    PATCHES.size = res.size_m; PATCHES.patchM = res.patch_m; PATCHES.warning = res.streets_warning;
+    patchNote(res);
+    patchesTick();
+    patchPoll();
+    $('#btnPhoto').disabled = false; $('#btnSaveImg').disabled = false; $('#btnBake').disabled = false;
+  }catch(e){
+    if(job) job.done(false, e.message);
+    note('Could not build the 3D scene: ' + e.message, true);
+  }
+  busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
+}
+
+// the scene's note: the map, how many of its patches are built, what the view shows
+function patchNote(s){
+  const [w, h] = PATCHES.size, done = s.ready >= s.total;
+  note(`${(w / 1000).toFixed(1)} × ${(h / 1000).toFixed(1)} km in ${s.total} patches of ${(PATCHES.patchM / 1000).toFixed(0)} km: `
+    + (done ? 'all built. ' : `${s.ready} built so far, the rest on the way, nearest you first. `)
+    + `Full detail within ${(PATCH_NEAR / 1000).toFixed(1)} km of where you look; further out the texture, flat.`
+    + (PATCHES.warning ? ' Note: ' + PATCHES.warning + '.' : ''));
+}
+
+const patchLine = s => s.prepared === false && !s.ready ? 'preparing the whole map once (its junctions, streets and paved areas)'
+  : `${s.ready} of ${s.total} patches built`;
+
+function endPatches(){
+  if(!PATCHES) return;
+  clearInterval(PATCHES.timer);
+  controls.removeEventListener('change', PATCHES.onMove);
+  if(PATCHES.job) PATCHES.job.done(true, 'stopped: another scene');
+  for(const m of PATCHES.mats.values()) disposeMaterial(m);
+  if(PATCHES.flatMat){ if(PATCHES.flatMat.map) PATCHES.flatMat.map.dispose(); PATCHES.flatMat.dispose(); }
+  PATCHES = null;
+}
+
+function disposeMaterial(m){
+  for(const k of TEXTURE_SLOTS) if(m[k] && m[k].isTexture) m[k].dispose();
+  m.dispose();
+}
+
+async function startPatches(res, gid){
+  endPatches();
+  if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
+  dropBakes();
+  buildLamps([]);
+  world = new THREE.Group();
+  world.name = 'patches';
+  scene.add(world);
+  worldBase = worldParts = null;
+  const g = scene.getObjectByName('grid'); if(g) scene.remove(g);
+  const [Wm, Hm] = res.size_m, P = res.patch_m;
+  PATCHES = { gid, plan: res.plan, base: res.base_sig, size: [Wm, Hm], items: new Map(), mats: new Map(), loading: 0,
+              flat: new THREE.Group(), flatMat: null, timer: null, focusAt: 0, finished: false, job: null };
+  PATCHES.flat.name = 'Map texture (far)';
+  world.add(PATCHES.flat);
+  // the flat map: every 1 km square of it, the texture's part on each (plain grey until
+  // the picture is in: the view does not wait for it)
+  PATCHES.flatMat = new THREE.MeshStandardMaterial({ color: 0x55595e, roughness: 0.95 });
+  const mine = PATCHES;
+  loadTexture(res.ground).then(tex => {
+    if(PATCHES !== mine){ tex.dispose(); return; }
+    tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    mine.flatMat.map = tex; mine.flatMat.color.set(0xffffff); mine.flatMat.needsUpdate = true;
+  }).catch(() => {});
+  const nx = Math.ceil(Wm / P - 1e-9), nz = Math.ceil(Hm / P - 1e-9);
+  for(let j = 0; j < nz; j++) for(let i = 0; i < nx; i++){
+    const x0 = i * P - Wm / 2, z0 = j * P - Hm / 2, x1 = Math.min(Wm / 2, x0 + P), z1 = Math.min(Hm / 2, z0 + P);
+    const pos = [x0, -0.02, z0, x0, -0.02, z1, x1, -0.02, z1, x1, -0.02, z0];
+    const uv = [[x0, z0], [x0, z1], [x1, z1], [x1, z0]].flatMap(([x, z]) => [(x + Wm / 2) / Wm, 1 - (z + Hm / 2) / Hm]);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+    const sq = new THREE.Mesh(geo, PATCHES.flatMat);
+    sq.receiveShadow = true;
+    sq.name = `flat_${i}_${j}`;
+    PATCHES.flat.add(sq);
+  }
+  updatePatches(res);
+  frame(new THREE.Vector3(0, 0, 0), Math.min(900, Math.max(Wm, Hm) / 2));
+  // as far out as the haze lets the map show (further, the sky's haze covers it all)
+  controls.maxDistance = Math.min(4500, Math.max(Wm, Hm) * 1.1);
+  PATCHES.onMove = () => { patchesTick(); patchFocus(); };
+  controls.addEventListener('change', PATCHES.onMove);
+  PATCHES.timer = setInterval(patchPoll, 1500);
+}
+
+// a newer plan (Update view): the same patches, built from the new settings; a patch whose
+// file changed is swapped when the new one is in, the others stay as they are
+function updatePatches(res){
+  PATCHES.plan = res.plan;
+  if(res.base_sig !== PATCHES.base){ PATCHES.base = res.base_sig; PATCHES.oldMats = PATCHES.mats; PATCHES.mats = new Map(); }
+  PATCHES.finished = false;
+  patchStates(res);
+}
+
+function patchStates(s){
+  for(const p of s.patches){
+    let it = PATCHES.items.get(p.id);
+    if(!it){ it = { id: p.id, m: p.m, obj: null, objUrl: null, lamps: [] }; PATCHES.items.set(p.id, it); }
+    it.state = p.state; it.url = p.url;
+  }
+}
+
+async function patchPoll(){
+  if(!PATCHES || PATCHES.polling) return;
+  if(PATCHES.finished){ return; }
+  PATCHES.polling = true;
+  try{
+    const r = await fetch('/api/patches/state/' + PATCHES.plan);
+    if(r.ok && PATCHES){
+      const s = await r.json();
+      if(s.plan === PATCHES.plan){
+        patchStates(s);
+        patchesTick();
+        if(s.ready !== PATCHES.shownReady){ PATCHES.shownReady = s.ready; patchNote(s); }
+        if(PATCHES.job){
+          if(s.error){ PATCHES.job.done(false, s.error); PATCHES.job = null; }
+          else if(s.finished){
+            const failed = s.patches.filter(p => p.state === 'failed').length;
+            PATCHES.job.done(!failed, `${s.ready} patches built in ${Math.round(s.elapsed)} s`
+              + (failed ? `, ${failed} could not be built` : '') + ` (${s.workers} at a time)`);
+            PATCHES.job = null;
+          }else PATCHES.job.set(patchLine(s), s.ready / Math.max(1, s.total), s.left);
+        }
+        if(s.finished) PATCHES.finished = true;
+      }
+    }
+  }catch(_){}
+  if(PATCHES) PATCHES.polling = false;
+}
+
+// the camera moved: the server builds the patches nearest it first (at most once a second)
+function patchFocus(){
+  if(!PATCHES || PATCHES.finished) return;
+  const now = performance.now();
+  if(now - PATCHES.focusAt < 1000) return;
+  PATCHES.focusAt = now;
+  const t = controls.target;
+  fetch('/api/patches/focus/' + PATCHES.plan, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ camera: [t.x, t.z] }) }).catch(() => {});
+}
+
+const patchDist = (m, x, z) => Math.hypot(Math.max(m[0] - x, 0, x - m[2]), Math.max(m[1] - z, 0, z - m[3]));
+
+// which patches the view holds: the built ones near where you look, nearest first
+function patchesTick(){
+  if(!PATCHES) return;
+  const t = controls.target, want = [];
+  for(const it of PATCHES.items.values()){
+    const d = patchDist(it.m, t.x, t.z);
+    if(it.obj && d > PATCH_FAR) unloadPatch(it);
+    else if(it.url && d < PATCH_NEAR && it.objUrl !== it.url && !it.loading) want.push([d, it]);
+  }
+  want.sort((a, b) => a[0] - b[0]);
+  for(const [, it] of want){
+    if(PATCHES.loading >= PATCH_LOADS) break;
+    loadPatch(it);
+  }
+}
+
+async function loadPatch(it){
+  const P = PATCHES, url = it.url;
+  it.loading = true; P.loading++;
+  try{
+    const gltf = await new GLTFLoader().loadAsync(url);
+    if(PATCHES !== P){ gltf.scene.traverse(o => { if(o.geometry) o.geometry.dispose(); }); return; }
+    await loadRelief(gltf);
+    // one material of each name: the one already in the view, or this one kept for the others
+    const spare = new Set();
+    gltf.scene.traverse(o => {
+      if(!o.isMesh) return;
+      const swap = m => {
+        const have = P.mats.get(m.name);
+        if(have && have !== m){ spare.add(m); return have; }
+        if(!have) P.mats.set(m.name, m);
+        return m;
+      };
+      o.material = Array.isArray(o.material) ? o.material.map(swap) : swap(o.material);
+    });
+    for(const m of spare) disposeMaterial(m);
+    prepare(gltf.scene);
+    gltf.scene.name = 'patch_' + it.id;
+    const old = it.obj;
+    world.add(gltf.scene);
+    it.obj = gltf.scene; it.objUrl = url;
+    if(old) dropPatchObject(old);
+    const sq = P.flat.getObjectByName('flat_' + it.id);
+    if(sq) sq.visible = false;
+    try{
+      const r = await fetch(url.replace(/\.glb$/, '.json'));
+      it.lamps = r.ok ? ((await r.json()).lamps || []) : [];
+    }catch(_){ it.lamps = []; }
+    patchLamps();
+    bvhFor = null; poolAt = null;
+    applyBake();
+  }catch(e){
+    it.failedUrl = url;
+  }finally{
+    it.loading = false; P.loading--;
+    if(PATCHES === P) patchesTick();
+  }
+}
+
+function dropPatchObject(obj){
+  world.remove(obj);
+  const mats = new Set();
+  obj.traverse(o => { if(o.geometry) o.geometry.dispose(); if(o.isMesh) for(const m of [].concat(o.material)) mats.add(m); });
+  // a material no patch in the view uses any more, from settings the view no longer builds with
+  const used = new Set();
+  world.traverse(o => { if(o.isMesh) for(const m of [].concat(o.material)) used.add(m); });
+  for(const m of mats) if(!used.has(m) && ![...PATCHES.mats.values()].includes(m)) disposeMaterial(m);
+}
+
+function unloadPatch(it){
+  dropPatchObject(it.obj);
+  it.obj = null; it.objUrl = null; it.lamps = [];
+  const sq = PATCHES.flat.getObjectByName('flat_' + it.id);
+  if(sq) sq.visible = true;
+  patchLamps();
+  bvhFor = null; poolAt = null;
+}
+
+// the street lamps of the patches in the view
+function patchLamps(){
+  const all = [];
+  for(const it of PATCHES.items.values()) if(it.obj) all.push(...it.lamps);
+  buildLamps(all);
 }
 
 // the parts of the model the server builds again on their own (app/model3d.py)
@@ -2824,6 +3078,18 @@ window.view3dControl = { setTime: n => setTime(n), tune: (n, patch) => { Object.
   // for comparisons: the path tracer's light tree on or off (off: each light as likely)
   lightTree: on => { if(photo && photo.on){ photo.pt._pathTracer.material.lightTree.enabled = on ? 1 : 0; photo.pt.reset(); dropClean(); } },
   capture: () => { draw(); return renderer.domElement.toDataURL('image/png'); }, look: lookApi,
+  // what the view holds and how long a frame takes (ms, the median of n)
+  stats: () => { let tris = 0, meshes = 0; if(world) world.traverse(o => { if(o.isMesh && o.visible){ meshes++;
+    tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3 * (o.isInstancedMesh ? o.count : 1); } });
+    return { triangles: Math.round(tris), meshes, calls: renderer.info.render.calls, textures: renderer.info.memory.textures,
+             geometries: renderer.info.memory.geometries }; },
+  timeDraw: n => { const ts = []; for(let k = 0; k < (n || 3); k++){ const t = performance.now(); draw(); renderer.getContext().finish(); ts.push(performance.now() - t); }
+    ts.sort((a, b) => a - b); return Math.round(ts[ts.length >> 1]); },
+  // a big map's patches: each one's state on the server and whether the view holds it
+  patches: () => PATCHES ? { plan: PATCHES.plan, finished: PATCHES.finished, loading: PATCHES.loading,
+    items: [...PATCHES.items.values()].map(it => ({ id: it.id, state: it.state, loaded: !!it.obj, current: !!it.obj && it.objUrl === it.url,
+                                                   m: it.m, lamps: it.lamps.length })),
+    materials: PATCHES.mats.size, flat_shown: PATCHES.flat.children.filter(c => c.visible).length } : null,
   // the scene's meshes by the part of the model they belong to (base: the rest), and the lamps
   parts: () => { const c = {}; if(world) world.traverse(o => { if(o.isMesh){ const m = [].concat(o.material)[0];
     const p = (m && m.userData && m.userData.part) || 'base'; c[p] = (c[p] || 0) + 1; } }); return { meshes: c, lamps: lamps ? lamps.items.length : 0 }; },

@@ -82,6 +82,9 @@ NO_CROSSING_M = 1.0            # a stop or give way line with no crossing: this 
 KERB_MARGIN_M = 0.15           # a line across the road stops this short of the kerb
 CENTRE_MARGIN_M = 0.1          # and of the centre line
 BIG_M2 = 300.0                 # a big open junction: more than this between its edges (ours)
+OPEN_X = 2.0                   # and this many times a plain crossing of its two widest streets (ours)
+BOX_ROAD_SHARE = 0.85          # a box only on a junction whose area is road (not one running off it)
+CELL_M = 20.0                  # placing: the markings already laid are looked up in cells this big
 
 PRESETS = {
     "zebra": {
@@ -197,7 +200,9 @@ PRESETS = {
             {"key": "spacing_m", "label": "Between the diagonals", "guide": 1.5, "min": 0.3, "max": 10.0,
              "src": "ours"},
             {"key": "big_m2", "label": "Big junction: more than (m²)", "guide": BIG_M2, "min": 0.0, "max": 100000.0,
-             "src": "ours"},
+             "src": "ours", "unit": "m²"},
+            {"key": "open_x", "label": "and bigger than a plain crossing (×)", "guide": OPEN_X, "min": 1.0, "max": 20.0,
+             "src": "ours", "unit": "×"},
         ],
         "opts": [{"key": "all", "label": "At every junction, not only big ones", "default": False}],
     },
@@ -704,7 +709,25 @@ class _Street:
         return x, y, tx, ty
 
 
-def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None, big_m2=BIG_M2):
+def _road_share(poly, road):
+    """How much of a polygon (mask pixels) is road."""
+    H, W = road.shape
+    x0, y0, x1, y1 = poly.bounds
+    x0, y0 = max(0, int(math.floor(x0))), max(0, int(math.floor(y0)))
+    x1, y1 = min(W, int(math.ceil(x1)) + 1), min(H, int(math.ceil(y1)) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    im = Image.new("L", (x1 - x0, y1 - y0), 0)
+    rings = [poly] if poly.geom_type == "Polygon" else list(getattr(poly, "geoms", []))
+    for g in rings:
+        if g.geom_type == "Polygon":
+            ImageDraw.Draw(im).polygon([(x - x0, y - y0) for x, y in g.exterior.coords], fill=255)
+    inside = np.array(im) > 0
+    n = int(inside.sum())
+    return float(road[y0:y1, x0:x1][inside].sum()) / n if n else 0.0
+
+
+def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None, big_m2=BIG_M2, open_x=OPEN_X):
     """
     Every junction's approaches, from the mask's junctions (app/junctions.py),
     their edges (app/decals.py) and the streets' lanes (found, chosen: as
@@ -776,9 +799,17 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             if not poly.is_valid:
                 poly = poly.buffer(0)
             area_m2 = float(poly.area) * px * px
-        big = rb is None and (area_m2 >= big_m2 or len(j["arms"]) >= 5)
+        # big: more than big_m2 and open_x times a plain crossing of its two widest streets (a
+        # crossing of two wide streets is not big for being wide), or five streets or more; and
+        # mostly road (edges found across a wide road or the picture's edge can enclose blocks)
+        ws = sorted((2 * e[4] * px for e in edges if e), reverse=True)
+        cross_m2 = ws[0] * ws[1] if len(ws) >= 2 else 0.0
+        on_road = _road_share(poly, det["road"]) if poly is not None and not poly.is_empty else 0.0
+        big = (rb is None and on_road >= BOX_ROAD_SHARE
+               and ((area_m2 >= big_m2 and area_m2 >= open_x * cross_m2) or len(j["arms"]) >= 5))
         if rb is None and poly is not None and not poly.is_empty:
-            boxes.append({"j": ji, "poly": poly, "area_m2": area_m2, "big": big})
+            boxes.append({"j": ji, "poly": poly, "area_m2": area_m2, "big": big, "cross_m2": cross_m2,
+                          "on_road": on_road})
         for ai, (arm, e) in enumerate(zip(j["arms"], edges)):
             if e is None:
                 continue
@@ -878,10 +909,14 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     H, W = road.shape
     colours = cfg.get("colours", "white")
     drive = cfg.get("drive", "right")
-    big_m2 = next((L["values"]["big_m2"] for _, L in layers if L["preset"] == "box"), BIG_M2)
-    P = plan(det, mpp, found, chosen, cfg.get("rules", "simple"), drive, cfg.get("edge_inset"), big_m2)
+    box0 = next((L["values"] for _, L in layers if L["preset"] == "box"), {})
+    P = plan(det, mpp, found, chosen, cfg.get("rules", "simple"), drive, cfg.get("edge_inset"),
+             box0.get("big_m2", BIG_M2), box0.get("open_x", OPEN_X))
     placements, ends = [], []
-    mine = {}                                                  # each layer's laid so far: none on another
+    # each layer's laid so far (none on another), in cells of the map so a marking
+    # checks only those near it: {layer: {"cells": {(i, j): [p]}, "w", "h" (the largest)}}
+    mine = {}
+    cell = max(1.0, CELL_M / px)
 
     def lay(li, L, variant, x, y, ux, uy, w, h, at):
         xi, yi = int(round(x)), int(round(y))
@@ -892,11 +927,17 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
              "x": round(float(x), 2), "y": round(float(y), 2), "ux": round(ux / n, 5), "uy": round(uy / n, 5),
              "w_m": round(float(w), 3), "h_m": round(float(h), 3), "at": at}
         c = DC._corners(p, mpp, 0.98)
-        for q in mine.get(li, ()):
-            if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < math.hypot(q["w_m"] + p["w_m"], q["h_m"] + p["h_m"]) / px \
-                    and DC._overlap(c, DC._corners(q, mpp, 0.98)):
-                return None
-        mine.setdefault(li, []).append(p)
+        g = mine.setdefault(li, {"cells": {}, "w": 0.0, "h": 0.0})
+        reach = math.hypot(g["w"] + p["w_m"], g["h"] + p["h_m"]) / px      # the furthest one that could touch it
+        ci, cj, r = int(p["x"] // cell), int(p["y"] // cell), int(math.ceil(reach / cell))
+        for i in range(ci - r, ci + r + 1):
+            for j in range(cj - r, cj + r + 1):
+                for q in g["cells"].get((i, j), ()):
+                    if math.hypot(q["x"] - p["x"], q["y"] - p["y"]) < math.hypot(q["w_m"] + p["w_m"], q["h_m"] + p["h_m"]) / px \
+                            and DC._overlap(c, DC._corners(q, mpp, 0.98)):
+                        return None
+        g["cells"].setdefault((ci, cj), []).append(p)
+        g["w"], g["h"] = max(g["w"], p["w_m"]), max(g["h"], p["h_m"])
         placements.append(p)
         return p
 
@@ -1057,7 +1098,7 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     for li, L in [(li, L) for li, L in layers if L["preset"] == "box" and not L.get("off")]:
         v = L["values"]
         for b in P["boxes"]:
-            if not (b["big"] or L["opts"]["all"]):
+            if not (b["big"] or L["opts"]["all"] and b["on_road"] >= BOX_ROAD_SHARE):
                 continue
             rect = b["poly"].buffer(-0.3 / px).minimum_rotated_rectangle if b["poly"].area > 0 else None
             if rect is None or rect.is_empty or rect.geom_type != "Polygon":

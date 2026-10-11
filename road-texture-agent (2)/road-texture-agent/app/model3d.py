@@ -641,7 +641,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                           variation=1.0, seed=7, dash_cfg=None, paint_rgb=(235, 232, 222),
                           sidewalk=None, bridges=None, bridge_cfg=None, markings="strips",
                           optimise=False, blocks=None, scatter=None, inner=None, surface="scan", islands=None,
-                          decals=None):
+                          decals=None, shared=None, window=None, keep=None):
     """
     The road with repeating material tiles laid along each street, a large
     variation layer as vertex colours, and dashes as their own strips.
@@ -656,16 +656,27 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     decals: the decals laid on the streets (app/decals.py), {"placements",
     "images", "mode"}: "separate" makes them an object of their own (Decals),
     "painted" part of the road object, just above its surface.
+    shared, window, keep: one patch of a big map (app/patches.py). shared: what
+    every patch of the map has in common, worked out once (the mask and its
+    coverage, the junctions and streets, the variation layer, the paved areas);
+    window: what this patch builds, its square and a margin (mask pixels);
+    keep: its square (mask pixels). Everything is placed in the whole map's
+    coordinates, and the model is cut exactly at the square's edges, so patches
+    side by side meet with no gap and no overlap.
     """
     from scipy.ndimage import map_coordinates
-    gray = np.array(Image.open(mask_path).convert("L"))
     exact = inner["shapes"] if inner and inner.get("shapes") else None
-    mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
+    if shared is None:
+        gray = np.array(Image.open(mask_path).convert("L"))
+        mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
+    else:
+        mask1, cov1 = shared["mask1"], shared["cov1"]
     mesh, det, rep = QM.build(mask1, output_scale, metres_per_pixel, straightness, spacing_m,
                               coverage=cov1, kerb_band=True, dashes=dash_cfg or {},
                               sidewalk=sidewalk if sidewalk and tileset["tiles"].get("sidewalk") else None,
-                              bridges=bridges or None, optimise=optimise, exact=exact)
-    _, coverage = prepare_mask(gray, output_scale)
+                              bridges=bridges or None, optimise=optimise, exact=exact,
+                              shared=shared["city"] if shared is not None else None, window=window)
+    coverage = prepare_mask(gray, output_scale)[1] if shared is None else shared["coverage"]
     H, W = coverage.shape
     mpp_out = metres_per_pixel / output_scale
     tile_m = float(tileset["settings"]["tile_m"])
@@ -682,7 +693,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         lift = BR.lifts(mesh, plans, output_scale)
     world = np.column_stack([V[:, 0] * mpp_out - W * mpp_out / 2, lift,
                              V[:, 1] * mpp_out - H * mpp_out / 2])
-    fac = variation_factor(result_path, markings_path, coverage, mpp_out, variation)
+    fac = (variation_factor(result_path, markings_path, coverage, mpp_out, variation) if shared is None
+           else shared["fac"])
     vfac = map_coordinates(fac, [V[:, 1], V[:, 0]], order=1, mode="nearest")
     vfac_raw = vfac.copy()
     # each part's tone as a multiplier on the tile's common tone. Vertices where
@@ -751,7 +763,42 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             dashed = {sid: st for sid, st in mesh.streets.items()
                       if st.get("dash") and any(k in DASHED for _, k in st["dash"]["lines"])
                       and not st["dash"].get("clipped")}
-            if dashed:
+            if window is not None:
+                # a patch: streets wider than PATCH_PAINT_M keep their lines as strips (each
+                # patch would make a picture and its surface maps as wide as the street again)
+                dashed = {sid: st for sid, st in dashed.items() if st["dash"]["street_m"] <= PATCH_PAINT_M}
+            if dashed and window is not None:
+                # a patch: each street's class from its own line width and street width alone
+                # (5 cm and half-metre steps), each class's picture as wide as its streets, so a
+                # street crossing from one patch into the next is painted the same in both
+                by, exact = {}, {}
+                for sid, st in dashed.items():
+                    d = st["dash"]
+                    look = (round(d.get("cycle_m", cycle0), 4), round(d["share"], 4), bool(d.get("yellow")))
+                    exact.setdefault(look, (float(d.get("cycle_m", cycle0)), float(d["share"])))
+                    key = (max(5, int(round(d["width_m"] * 100 / 5)) * 5), float(round(d["street_m"])), d["kind"],
+                           sum(1 for _, k in d["lines"] if k in DASHED), tuple(d["sides"]) if d.get("sides") else None,
+                           look)
+                    by.setdefault(key, []).append(sid)
+                classes = [(wc, wb, sids, sides, look)
+                           for (wc, wb, kind, nd, sides, look), sids in sorted(by.items(), key=lambda kv: str(kv[0]))]
+                for ci, (wc, w_m, sids, sides, look) in enumerate(classes):
+                    (cyc, shr), yel = exact[look], look[2]
+                    xs = [x for x, k in LN.layout(w_m, sides, rules=rules)["lines"] if k in DASHED]
+                    E = math.ceil((w_m + 0.5) * 1.15 / tile_m) * tile_m
+                    img = marked_texture(tiles["open"][0]["path"], tile_m, cyc, shr, E, wc / 100.0,
+                                         YELLOW_RGB if yel else paint_rgb, xs, big_px=PATCH_TILING_PX)
+                    marked[ci] = len(mark_tex)
+                    # named by what it holds: the same name in every patch is the same picture
+                    nm = (f"Road_marked_{len(xs)}x{wc}cm_{w_m:g}m_{cyc:g}m_{shr:g}"
+                          + (f"_{'-'.join(str(v) for v in sides)}" if sides else "") + ("_yellow" if yel else ""))
+                    mark_tex.append(({"width_cm": wc, "street_m": round(w_m, 2), "lines": len(xs), "streets": len(sids),
+                                      "cycle_m": cyc, "yellow": yel, "name": nm}, img))
+                    mark_own[ci] = marked_maps(tiles["open"][0], tile_m, cyc, E, big_px=PATCH_TILING_PX)
+                    mark_size[ci] = (cyc, E)
+                    for sid in sids:
+                        mark_of[sid] = ci
+            elif dashed:
                 E = math.ceil(2 * max(st["half_width_m"] for st in dashed.values()) * 1.15 / tile_m) * tile_m
                 # at most three line widths, each a group of streets with similar
                 # widths: many short pieces would otherwise each want a texture
@@ -824,8 +871,9 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             st = mesh.streets[owner]["dash"]
             along, across = canon_along(vi, owner)
             # across: a vertex at -across metres from the centreline lies at x = -across in
-            # the lanes' coordinate (app/lanes.py), which the texture's rows follow
-            return (along - st["setback_m"]) / st["step_m"], 0.5 - across / E
+            # the lanes' coordinate (app/lanes.py), which the texture's rows follow; its
+            # class's picture spans this many metres across
+            return (along - st["setback_m"]) / st["step_m"], 0.5 - across / mark_size[mark_of[owner]][1]
 
         # group quads into primitives by part and tile variant
         groups = {}
@@ -844,7 +892,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         for (part, vk), quads in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
             if part == "marked":
                 info_m = mark_tex[marked[vk]][0]
-                tile_material(f"Road_marked_{info_m['lines']}x{info_m['width_cm']}cm_{vk + 1}", mark_tex[marked[vk]][1],
+                tile_material(info_m.get("name") or f"Road_marked_{info_m['lines']}x{info_m['width_cm']}cm_{vk + 1}",
+                              mark_tex[marked[vk]][1],
                               images, materials,
                               mark_size[vk], "asphalt", 0.9, surface, own=mark_own.get(vk))
             else:
@@ -913,7 +962,7 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     ic_tris = 0
     if rep["flagged"]:
         from shapely.geometry import Point
-        polys = outline_polygons(coverage)
+        polys = outline_polygons(coverage) if window is None else QM._outline_in(coverage, window, output_scale)
         pieces = []
         for j in rep["flagged"]:
             disc = Point(j["cx"] * output_scale, j["cy"] * output_scale).buffer(j["r"] * output_scale)
@@ -943,8 +992,10 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     frames = None
     if (sidewalk or blocks) and tiles.get("sidewalk"):
         regions = QM.block_polygons(mesh, (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale),
-                                    output_scale, mpp_out * output_scale, min_area_m2=0.5)
-        frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac)
+                                    output_scale, mpp_out * output_scale, min_area_m2=0.5, window=window)
+        frames = PavedFrames(regions, mpp_out, W, H, tile_m, len(tiles["sidewalk"]), seed, fac,
+                             blocks=shared["blocks"] if shared is not None else None,
+                             fb=shared["fb"] if shared is not None else None)
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
     base = (meshes, materials, images)
@@ -959,7 +1010,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         if frames is not None:
             frames.set_islands(islands_now, output_scale)
         prog.stage("sidewalk_meshes", "sidewalk paving")
-        sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, imgs, mats, ms, surface, frames)
+        sw_info = _sidewalk_meshes(mesh, world, vfac_raw, tiles, tile_m, seed, imgs, mats, ms, surface, frames,
+                                   planar_kerb=window is not None)
         blocks_info = None
         if blocks:
             mask_shape = (coverage.shape[0] // output_scale, coverage.shape[1] // output_scale)
@@ -968,7 +1020,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                         fac, tiles, tile_m, imgs, mats, ms,
                                         height_m=float(blocks.get("height_m", 0.10)),
                                         with_sidewalks=bool(mesh.sw_quads),
-                                        cell_m=16.0 if optimise else 8.0, surface=surface, frames=frames)
+                                        cell_m=16.0 if optimise else 8.0, surface=surface, frames=frames,
+                                        window=window)
         return (ms, mats, imgs), {"sidewalk": sw_info, "blocks": blocks_info}
 
     def objects_part(scatter_now):
@@ -984,12 +1037,22 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         feet = scatter_info.pop("_feet", None) if scatter_info else None
         prog.stage("lamps", "street lamps")
         lamps = _lamps(mesh, world, feet, metres_per_pixel, output_scale, mpp_out, W, H)
+        if keep is not None:
+            x0, z0, x1, z1 = keep_world
+            lamps = [l for l in lamps if x0 <= l[0] < x1 and z0 <= l[2] < z1]     # this patch's own
         return (ms, mats, imgs), {"scatter": scatter_info, "lamps": lamps}
 
     def decals_part(decals_now):
         """The decals: an object of their own (Decals), or painted: part of the road object, just above it."""
         imgs, mats, ms = [], [], []
         decal_info = None
+        if decals_now and decals_now.get("placements") and window is not None:
+            # a patch: the decals reaching into it (the cut at its edges takes the rest off)
+            reach = max([math.hypot(p.get("w_m", 1.0), p.get("h_m", 1.0)) for p in decals_now["placements"]] + [1.0])
+            r_px = reach / metres_per_pixel
+            decals_now = dict(decals_now, placements=[p for p in decals_now["placements"]
+                                                      if window[0] - r_px <= p["x"] <= window[2] + r_px
+                                                      and window[1] - r_px <= p["y"] <= window[3] + r_px])
         if decals_now and decals_now.get("placements"):
             on_road = decals_now.get("mode") == "painted"
             dprims = DC.mesh_prims(decals_now["placements"], decals_now["images"], mats, imgs, W, H, mpp_out,
@@ -1071,10 +1134,18 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
             "strip_dashes": len(mesh.dashes) - (painted_dashes if painted else 0),
         }
 
+    # a patch's square in the model's metres (x, z): what it keeps
+    keep_world = None
+    if keep is not None:
+        keep_world = (keep[0] * metres_per_pixel - W * mpp_out / 2, keep[1] * metres_per_pixel - H * mpp_out / 2,
+                      keep[2] * metres_per_pixel - W * mpp_out / 2, keep[3] * metres_per_pixel - H * mpp_out / 2)
     parts = (("paving", paving_part), ("objects", objects_part), ("decals", decals_part), ("lanes", lanes_part))
     inputs = {"paving": islands, "objects": scatter, "decals": decals, "lanes": None}
     built = {name: fn(inputs[name]) for name, fn in parts}
 
+    if keep_world is not None:
+        out_patch = {"window": [int(v) for v in window], "keep": [int(v) for v in keep],
+                     "keep_m": [round(float(v), 3) for v in keep_world]}
     out = {"mesh": "tiled", "streets": rep["streets"],
            "junctions": rep["junctions_patched"],
            "tile_m": tile_m, "mm_per_px": tileset.get("mm_per_px"),
@@ -1089,11 +1160,17 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                                                           "warnings", "streets")}
                        for pl in plans] if plans else None,
            "deck": deck_info}
+    if keep_world is not None:
+        out["patch"] = out_patch
 
     def assemble(names=None):
         """The whole model (names None), or those parts alone (for a view that has the rest)."""
         chosen = [(n, built[n][0]) for n, _ in parts if names is None or n in names]
-        return _assemble(base if names is None else ([], [], []), chosen)
+        scene = _assemble(base if names is None else ([], [], []), chosen)
+        if keep_world is not None:
+            from app import patches as PT
+            scene = PT.clip_scene(scene, keep_world)       # a patch: exactly its square
+        return scene
 
     def report(scene, nbytes):
         info = dict(out)
@@ -1231,7 +1308,15 @@ class PavedFrames:
     fac: the variation layer (texture pixels).
     """
 
-    def __init__(self, regions, mpp_out, W, H, tile_m, n_variants, seed, fac):
+    def __init__(self, regions, mpp_out, W, H, tile_m, n_variants, seed, fac, blocks=None, fb=None):
+        """
+        blocks: a big map built in patches (app/patches.py): the areas of the whole
+        map ({"labels": every non-road area numbered, mask pixels; "scale": texture
+        pixels per mask pixel; "theta": {} a cache}), so an area cut by the edge of
+        a patch is laid the same in each patch it reaches: its layout from its own
+        number and its whole outline, not from the piece of it in this patch.
+        fb: the blurred variation layer, worked out once (patches).
+        """
         import shapely
         from scipy import ndimage as _ndi
         self.regions, self.mpp, self.W, self.H, self.tile_m = list(regions), mpp_out, W, H, tile_m
@@ -1240,22 +1325,26 @@ class PavedFrames:
         self.tree = shapely.STRtree(self.regions) if self.regions else None
         self.theta, self.off, self.variant = [], [], []
         for k, g in enumerate(self.regions):
-            # the main direction of its kerbs (not the image border): edge directions
-            # averaged four-fold, so streets at right angles agree
-            c = np.asarray(g.exterior.coords)
-            d = np.diff(c, axis=0)
-            mid = (c[:-1] + c[1:]) / 2
-            inner = ~((mid[:, 0] < 1) | (mid[:, 1] < 1) | (mid[:, 0] > W - 1) | (mid[:, 1] > H - 1))
-            ln = np.hypot(d[:, 0], d[:, 1]) * inner
-            a = np.arctan2(d[:, 1], d[:, 0])
-            th = np.arctan2((ln * np.sin(4 * a)).sum(), (ln * np.cos(4 * a)).sum()) / 4 if ln.sum() > 0 else 0.0
-            r = np.random.default_rng([seed, k + 500000])
+            key, th = k, None
+            if blocks is not None:
+                key, th = _block_frame(blocks, g)
+            if th is None:
+                # the main direction of its kerbs (not the image border): edge directions
+                # averaged four-fold, so streets at right angles agree
+                c = np.asarray(g.exterior.coords)
+                d = np.diff(c, axis=0)
+                mid = (c[:-1] + c[1:]) / 2
+                inner = ~((mid[:, 0] < 1) | (mid[:, 1] < 1) | (mid[:, 0] > W - 1) | (mid[:, 1] > H - 1))
+                ln = np.hypot(d[:, 0], d[:, 1]) * inner
+                a = np.arctan2(d[:, 1], d[:, 0])
+                th = np.arctan2((ln * np.sin(4 * a)).sum(), (ln * np.cos(4 * a)).sum()) / 4 if ln.sum() > 0 else 0.0
+            r = np.random.default_rng([seed, key + 500000])
             self.theta.append(float(th))
             self.off.append(r.uniform(0, tile_m, 2))
             self.variant.append(int(r.integers(0, 10 ** 6)) % max(1, n_variants))
         # weathering: the variation layer blurred over about 25 m, at a third of its
         # strength, the same function everywhere so it is continuous across edges
-        self.fb = _ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
+        self.fb = fb if fb is not None else _ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
 
     def to_px(self, x, z):
         return np.asarray(x) / self.mpp + self.W / 2, np.asarray(z) / self.mpp + self.H / 2
@@ -1330,6 +1419,40 @@ class PavedFrames:
         return 1.0 + (f - 1.0) * 0.33
 
 
+def _block_frame(blocks, g):
+    """
+    A paved area's number on the whole map and the main direction of its whole
+    outline (patches: the same for every piece of it), (key, theta); (k, None)
+    when the area is not one of the map's (then its own edges decide).
+    """
+    lab, sc = blocks["labels"], blocks["scale"]
+    p = g.representative_point()
+    xi, yi = int(p.x / sc), int(p.y / sc)
+    H, W = lab.shape
+    if not (0 <= xi < W and 0 <= yi < H) or lab[yi, xi] <= 0:
+        return 0, None
+    L = int(lab[yi, xi])
+    th = blocks["theta"].get(L)
+    if th is None:
+        sl = blocks["slices"][L - 1]
+        y0, y1, x0, x1 = sl[0].start, sl[0].stop, sl[1].start, sl[1].stop
+        sub = np.pad(lab[y0:y1, x0:x1] == L, 1).astype(float)
+        best, th = None, 0.0
+        for c in measure.find_contours(sub, 0.5):
+            if best is None or len(c) > len(best):
+                best = c
+        if best is not None and len(best) > 2:
+            c = best[:, ::-1] + (x0 - 1, y0 - 1)                 # (x, y), mask pixels
+            d = np.diff(c, axis=0)
+            mid = (c[:-1] + c[1:]) / 2
+            inner = ~((mid[:, 0] < 1) | (mid[:, 1] < 1) | (mid[:, 0] > W - 2) | (mid[:, 1] > H - 2))
+            ln = np.hypot(d[:, 0], d[:, 1]) * inner
+            a = np.arctan2(d[:, 1], d[:, 0])
+            th = float(np.arctan2((ln * np.sin(4 * a)).sum(), (ln * np.cos(4 * a)).sum()) / 4) if ln.sum() > 0 else 0.0
+        blocks["theta"][L] = th
+    return L, th
+
+
 GROUND_DRIFT = 0.07     # ground: how far colour and shine drift over a metre or few (0.07: about 7%)
 
 
@@ -1349,10 +1472,13 @@ def _slot_mix(frames, s, vk):
             "seed": mix.get("seed", s), "name": mix.get("name", "")}
 
 
-def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan", frames=None):
+def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, meshes, surface="scan", frames=None,
+                     planar_kerb=False):
     """
     The sidewalk top (paving, with a kerb stone along its edge) and the vertical
-    kerb face down to the road, as two meshes of quads.
+    kerb face down to the road, as two meshes of quads. planar_kerb: the kerb
+    stone laid by its place on the map, not along its kerb from where the
+    kerb's loop starts (a patch of a big map: the same in every patch).
     """
     if (not mesh.sw_quads and not getattr(mesh, "sw_tris", None)) or not tiles.get("sidewalk"):
         return None
@@ -1444,7 +1570,7 @@ def _sidewalk_meshes(mesh, world, vfac, tiles, tile_m, seed, images, materials, 
                 remap[key] = len(pos)
                 pos.append(Wh[vi])
                 if k is None:                                  # kerb stone: along its kerb
-                    uvs.append(uv(vi, owner))
+                    uvs.append(uv(vi, owner) if not planar_kerb else (Wh[vi, 0] / tile_m, Wh[vi, 2] / tile_m))
                     c = 1.0 + (float(vfac[vi]) - 1.0) * 0.5
                 else:                                          # paving: its area's layout
                     uvs.append(frames.uv(k, Wh[vi, 0], Wh[vi, 2]))
@@ -1667,7 +1793,7 @@ def _deck_edges(mesh, plans, world, tiles, tile_m, deck_m, images, materials, me
 
 
 
-def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
+def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048, big_px=None):
     """
     For a tile with its own bump and roughness (a library material): those maps
     laid exactly as marked_texture lays its colour (the same repeats, stretch
@@ -1684,23 +1810,46 @@ def marked_maps(tile, tile_m, cycle_m, across_m, max_px=2048):
     h, w = n.shape[0] * k_across, n.shape[1] * k_along
     f = min(1.0, max_px / max(h, w))
     out_w, out_h = max(8, int(w * f)), max(8, int(h * f))
-    nn = LIB._resize(np.tile(n, (k_across, k_along, 1)), out_w, out_h)
-    rr = LIB._resize(np.tile(r, (k_across, k_along)), out_w, out_h)
+    big = h * w > (BIG_TILING_PX if big_px is None else big_px)
+    if big:
+        nn = _tiled(n, k_across, k_along, out_w, out_h, LIB._resize)
+        rr = _tiled(r, k_across, k_along, out_w, out_h, LIB._resize)
+    else:
+        nn = LIB._resize(np.tile(n, (k_across, k_along, 1)), out_w, out_h)
+        rr = LIB._resize(np.tile(r, (k_across, k_along)), out_w, out_h)
     nn = LIB.squeeze_normals(nn, (k_along * tile_m / cycle_m, k_across * tile_m / across_m))
     grey = lambda a: Image.fromarray(np.clip(a * 255 + 0.5, 0, 255).astype(np.uint8))
     extra = [None, None]
     for i, pic in enumerate(own[3:5]):
         if pic is not None:
             a = np.asarray(pic).astype(np.float32) / 255.0
-            extra[i] = grey(LIB._resize(np.tile(a, (k_across, k_along)), out_w, out_h))
+            extra[i] = grey(_tiled(a, k_across, k_along, out_w, out_h, LIB._resize) if big
+                            else LIB._resize(np.tile(a, (k_across, k_along)), out_w, out_h))
     return (Image.fromarray(np.clip((nn * 0.5 + 0.5) * 255 + 0.5, 0, 255).astype(np.uint8)),
             grey(rr), own[2], extra[0], extra[1], own[5] if extra[0] is not None else 0.0)
 
 
 _marked = {}                 # marked textures made, by what they were made from: the last few
+PATCH_PAINT_M = 40.0         # a big map's patches paint the lines of streets up to this wide; wider ones keep strips
+PATCH_TILING_PX = 2_000_000  # and in a big map's patches, past this (the patches' memory stays under 1.5 GB)
+BIG_TILING_PX = 32_000_000   # a marked texture whose tiles would be more pixels than this (a road 100 m wide, on a
+                             # big map) shrinks its tile first and then tiles it: the full-size tiling took gigabytes
 
 
-def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_rgb, lines=(0.0,), max_px=2048):
+def _tiled(tile, k_across, k_along, out_w, out_h, resize):
+    """
+    A tile repeated k_across x k_along times and brought to out_w x out_h:
+    the tile shrunk to its share first, then repeated, then fitted (resize:
+    picture, w, h -> picture). For tilings past BIG_TILING_PX only.
+    """
+    tw = max(1, int(round(out_w / k_along))); th = max(1, int(round(out_h / k_across)))
+    small = resize(tile, tw, th)
+    reps = (k_across, k_along) + ((1,) if small.ndim == 3 else ())
+    return resize(np.tile(small, reps), out_w, out_h)
+
+
+def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_rgb, lines=(0.0,), max_px=2048,
+                   big_px=None):
     """
     One dash cycle of road, with a dash painted along each lane line: lines,
     metres across from the centre (app/lanes.py's x; the centre line alone by
@@ -1715,18 +1864,23 @@ def marked_texture(tile_path, tile_m, cycle_m, share, across_m, width_m, paint_r
     """
     import os
     key = (str(tile_path), os.path.getmtime(tile_path), float(tile_m), float(cycle_m), float(share), float(across_m),
-           float(width_m), tuple(float(v) for v in paint_rgb), tuple(round(float(x), 4) for x in lines), int(max_px))
+           float(width_m), tuple(float(v) for v in paint_rgb), tuple(round(float(x), 4) for x in lines), int(max_px),
+           big_px)
     if key in _marked:
         return _marked[key]                                        # the same kind of street as before
     tile = np.array(Image.open(tile_path).convert("RGB")).astype(np.float32)
     tp = tile.shape[0]
     k_along = max(1, int(round(cycle_m / tile_m)))
     k_across = max(1, int(round(across_m / tile_m)))
-    base = np.tile(tile, (k_across, k_along, 1))                   # rows across, columns along
-    h, w = base.shape[:2]
+    h, w = tp * k_across, tile.shape[1] * k_along
     f = min(1.0, max_px / max(h, w))
     out_w, out_h = max(8, int(w * f)), max(8, int(h * f))
-    img = np.array(Image.fromarray(base.clip(0, 255).astype(np.uint8)).resize((out_w, out_h), Image.LANCZOS)).astype(np.float32)
+    if h * w > (BIG_TILING_PX if big_px is None else big_px):
+        lanczos = lambda a, ww, hh: np.array(Image.fromarray(a.clip(0, 255).astype(np.uint8)).resize((ww, hh), Image.LANCZOS)).astype(np.float32)
+        img = _tiled(tile, k_across, k_along, out_w, out_h, lanczos)
+    else:
+        base = np.tile(tile, (k_across, k_along, 1))                   # rows across, columns along
+        img = np.array(Image.fromarray(base.clip(0, 255).astype(np.uint8)).resize((out_w, out_h), Image.LANCZOS)).astype(np.float32)
 
     # the dashes: along [0, share) of the cycle, across at each line, soft one-pixel edges
     along_px = out_w / cycle_m                                     # pixels per metre along
@@ -1770,7 +1924,7 @@ SLIVER_M = 0.06               # block pieces thinner than this along the kerb ar
 
 
 def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, images, materials, meshes,
-                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan", frames=None):
+                  height_m=0.10, with_sidewalks=True, cell_m=8.0, surface="scan", frames=None, window=None):
     """
     The blocks and islands between roads as flat planes with the sidewalk's
     paving. With sidewalks, each block reaches all the way to the kerb line
@@ -1779,9 +1933,12 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
     block sits at sidewalk height and gets its own kerb face down to the road.
     """
     from scipy.ndimage import map_coordinates
-    polys = QM.block_polygons(mesh, shape_mask, scale, mpp_out * scale)
+    polys = QM.block_polygons(mesh, shape_mask, scale, mpp_out * scale, window=window)
     if not polys or not tiles.get("sidewalk"):
         return {"blocks": 0}
+    fx0, fy0, fx1, fy1 = 0, 0, W, H                     # the frame, texture pixels: the image, or the window
+    if window is not None:
+        fx0, fy0, fx1, fy1 = (v * scale for v in QM._frame_px(window, shape_mask))
     # blocks stop exactly at the sidewalk's outer edge: the sidewalk (paving,
     # kerb stone, paved islands) is cut out of each block, so the two meet edge
     # to edge instead of one running underneath the other
@@ -1890,8 +2047,8 @@ def _block_meshes(mesh, shape_mask, scale, mpp_out, W, H, fac, tiles, tile_m, im
             shapely.prepare(g)                                  # many inside tests on one block
             for ring in [g.exterior] + list(g.interiors):
                 c = np.array(ring.coords)
-                on_frame = ((c[:, 0] < 0.6 * scale) | (c[:, 1] < 0.6 * scale) |
-                            (c[:, 0] > W - 0.6 * scale) | (c[:, 1] > H - 0.6 * scale))
+                on_frame = ((c[:, 0] < fx0 + 0.6 * scale) | (c[:, 1] < fy0 + 0.6 * scale) |
+                            (c[:, 0] > fx1 - 0.6 * scale) | (c[:, 1] > fy1 - 0.6 * scale))
                 d_mid = edge.distance((c[:-1] + c[1:]) / 2) if len(c) > 1 else []
                 for k in range(len(c) - 1):
                     if on_frame[k] and on_frame[k + 1]:

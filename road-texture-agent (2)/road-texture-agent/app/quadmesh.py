@@ -228,9 +228,41 @@ def _kerbs(coverage, pts, side, guess):
     return out[:, 0], out[:, 1]
 
 
+def city(gray_mask, metres_per_pixel, coverage=None, divider_limit=J.DIVIDER_LIMIT_PX):
+    """
+    What build finds over the whole map, found once to build a big map in
+    windows (app/patches.py): the junctions and streets, the tight groups of
+    junctions with their pieces, each street's pixels and box, and the usual
+    road width. build(shared=...) takes it instead of finding it again, so
+    every window sees the same streets, numbered the same.
+    """
+    prog.stage("junctions", "finding the junctions and streets")
+    det = J.detect(gray_mask, divider_limit)
+    mpp = metres_per_pixel
+    sk_all = det["skeleton"].astype(bool)
+    road_w_m = float(np.median(2 * det["dt"][sk_all])) * mpp if sk_all.any() else 8.0
+    prog.stage("groups", "grouping close junctions")
+    clusters = find_clusters(det, mpp, coverage if coverage is not None else (gray_mask > 127).astype(float))
+    seg_lab, piece_of = det["segments"], {}
+    if clusters:
+        seg_lab, piece_of = _pieces(det, clusters, gray_mask.shape)
+    seg_px = J.label_coords(seg_lab)
+    boxes = {k: (int(c[:, 1].min()), int(c[:, 0].min()), int(c[:, 1].max()), int(c[:, 0].max()))
+             for k, c in enumerate(seg_px) if k and len(c)}
+    return {"det": det, "clusters": clusters, "seg_lab": seg_lab, "piece_of": piece_of, "seg_px": seg_px,
+            "road_w_m": road_w_m, "boxes": boxes, "shape": gray_mask.shape}
+
+
+def _in_window(window, x0, y0, x1, y1):
+    """Whether a box (mask pixels) reaches into the window (wx0, wy0, wx1, wy1); no window: everywhere."""
+    if window is None:
+        return True
+    return not (x1 < window[0] or x0 > window[2] or y1 < window[1] or y0 > window[3])
+
+
 def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, across=2,
           divider_limit=J.DIVIDER_LIMIT_PX, coverage=None, kerb_band=False, dashes=None,
-          sidewalk=None, bridges=None, optimise=False, exact=None):
+          sidewalk=None, bridges=None, optimise=False, exact=None, shared=None, window=None):
     """
     gray_mask: the road mask at its own size (already smooth-thresholded is fine)
     scale:     texture size / mask size (the output scale)
@@ -238,12 +270,21 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                the inner streets (app/streets.py), each {"road": shapely shape,
                "lines": [(centreline points, half width)], "markings": bool} in
                mask pixels. The mask then holds only the other roads.
+    shared:    city()'s junctions and streets of the whole map, found once
+    window:    (x0, y0, x1, y1) in mask pixels: build only what lies in it (a
+               big map's patch with its margin, app/patches.py), in the whole
+               map's pixels, from shared; the rest of the map is left out. The
+               streets are worked out whole (their centrelines, widths and
+               lines are the same seen from any window) and laid only inside.
     Returns the mesh in texture pixels, and a short report.
     """
-    prog.stage("junctions", "finding the junctions and streets")
-    det = J.detect(gray_mask, divider_limit)
+    if shared is None:
+        prog.stage("junctions", "finding the junctions and streets")
+        det = J.detect(gray_mask, divider_limit)
+    else:
+        det = shared["det"]
     dt = det["dt"]
-    seg_lab = det["segments"]      # replaced below when there are groups
+    seg_lab = det["segments"] if shared is None else shared["seg_lab"]     # replaced below when there are groups
     H, W = gray_mask.shape
     mpp = metres_per_pixel                         # at mask size
     s_ = float(np.clip(straightness, 0.0, 1.0))
@@ -254,15 +295,23 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     width_sigma = max(0.5, _lerp(1.0, 30.0, s_) / mpp) / spacing_px   # in samples
 
     mesh = Mesh()
-    prog.stage("groups", "grouping close junctions")
-    clusters = find_clusters(det, mpp, coverage if coverage is not None else (gray_mask > 127).astype(float))
+    if shared is None:
+        prog.stage("groups", "grouping close junctions")
+        clusters = find_clusters(det, mpp, coverage if coverage is not None else (gray_mask > 127).astype(float))
+    else:
+        clusters = list(shared["clusters"])            # its own list: fills are added to it
     mesh.clusters = clusters
     in_cluster = {jid for c in clusters for jid in c["members"]}
-    sk_all = det["skeleton"].astype(bool)
-    road_w_m = float(np.median(2 * dt[sk_all])) * mpp if sk_all.any() else 8.0
-    piece_of = {}
-    if clusters:
-        seg_lab, piece_of = _pieces(det, clusters, gray_mask.shape)
+    if window is not None:
+        mesh.clusters = clusters = [c for c in clusters if _in_window(window, *c["region"].bounds)]
+    if shared is None:
+        sk_all = det["skeleton"].astype(bool)
+        road_w_m = float(np.median(2 * dt[sk_all])) * mpp if sk_all.any() else 8.0
+        piece_of = {}
+        if clusters:
+            seg_lab, piece_of = _pieces(det, clusters, gray_mask.shape)
+    else:
+        road_w_m, seg_lab, piece_of = shared["road_w_m"], shared["seg_lab"], shared["piece_of"]
     if sidewalk and coverage is not None:
         mesh.sw_cfg = dict({"share": 0.3, "min_m": 1.5, "max_m": 2.5, "height_m": 0.10,
                             "kerbstone_m": 0.15, "max_road_m": 20.0}, **sidewalk)
@@ -283,8 +332,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     streets = 0
 
     prog.stage("streets", "street strips")
-    seg_px = J.label_coords(seg_lab)                # every street's pixels, in one pass
-    n_seg = int(seg_lab.max())
+    seg_px = J.label_coords(seg_lab) if shared is None else shared["seg_px"]   # every street's pixels, in one pass
+    n_seg = int(seg_lab.max()) if shared is None else len(seg_px) - 1
     # the Lanes tool's choices: each for the street whose centreline is nearest its point
     picks = (dashes or {}).get("lane_picks") or []
     mesh.lane_mpp = mpp
@@ -303,6 +352,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             prog.part(sid / n_seg)
         coords = seg_px[sid]
         if len(coords) < 2:
+            continue
+        if window is not None and not (sid in shared["boxes"] and _in_window(window, *shared["boxes"][sid])):
             continue
         path = _ordered_path(coords)
         if len(path) < 2:
@@ -371,6 +422,13 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             iy = np.clip(pts[:, 1].astype(int), 0, nomark.shape[0] - 1)
             ix = np.clip(pts[:, 0].astype(int), 0, nomark.shape[1] - 1)
             unmarked = nomark[iy, ix].mean() > 0.5
+        span = None
+        if window is not None:
+            ins = np.nonzero((pts[:, 0] >= window[0]) & (pts[:, 0] <= window[2]) &
+                             (pts[:, 1] >= window[1]) & (pts[:, 1] <= window[3]))[0]
+            if not len(ins):
+                continue                   # its pixels reach in, its centreline does not
+            span = (max(0, int(ins[0]) - 1), min(len(pts) - 1, int(ins[-1]) + 1))
         if dashes and not narrow_ramp and not unmarked:
             cfg_d = dict(dashes, min_cycles=2) if grp is not None else dashes
             layout = _lanes(mesh, sid, ("street", sid), (pts, side, arc, hw_final, mpp, scale, cfg_d),
@@ -385,6 +443,9 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                              max_gap_m=4.0 if near_bridge else 20.0)
         else:
             keep = np.arange(len(pts))
+        if span is not None:
+            # the rows in the window, from the one before it to the one after
+            keep = np.union1d(keep[(keep >= span[0]) & (keep <= span[1])], [span[0], span[1]])
         P_r, S_r, A_r, HW_r = pts[keep], side[keep], arc[keep], hw_final[keep]
 
         # offsets across the road, from one kerb to the other. With a kerb band,
@@ -423,6 +484,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                 _street_sidewalks(mesh, rows, P_r, S_r, A_r, HW_r, sid)
 
         for end_row, centre, inward in ((rows[0], pts[0], tang[0]), (rows[-1], pts[-1], -tang[-1])):
+            if span is not None and (keep[0] if end_row is rows[0] else keep[-1]) != (0 if end_row is rows[0] else len(pts) - 1):
+                continue                   # the street goes on past the window: not its end
             ends.append({"row": end_row, "centre": centre * scale,
                          "outward": -inward, "street": sid,
                          "which": 0 if end_row is rows[0] else 1})
@@ -434,6 +497,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
         if n_j % 10 == 0:
             prog.part(n_j / max(1, len(det["junctions"])))
         cx, cy, r = j["cx"] * scale, j["cy"] * scale, j["r"] * scale
+        if not _in_window(window, j["cx"] - j["r"], j["cy"] - j["r"], j["cx"] + j["r"], j["cy"] + j["r"]):
+            continue
         if int(j["id"]) in in_cluster:
             continue                       # part of a tight group: covered by its fill
         if j["type"] == "interchange (flagged)":
@@ -464,9 +529,10 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             skipped += 1
             _fallback_fill(mesh, j)
 
-    holes = _cover_bare(mesh, coverage if coverage is not None else (gray_mask > 127).astype(float), scale)
+    holes = _cover_bare(mesh, coverage if coverage is not None else (gray_mask > 127).astype(float), scale,
+                        window=window)
     cov_mask = coverage if coverage is not None else (gray_mask > 127).astype(float)
-    mesh.fill_polys = [_scale_poly(q, scale) for q in cluster_fill_polys(mesh.clusters, cov_mask, 1)]
+    mesh.fill_polys = [_scale_poly(q, scale) for q in cluster_fill_polys(mesh.clusters, cov_mask, 1, window=window)]
     # roads given exactly (the inner streets): laid as they are, so their straight
     # edges stay straight in the kerb line and sidewalks, with their markings
     # along their centrelines. A marked one also gets a strip of road of its own
@@ -512,7 +578,10 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                 continue
             _inner_band(mesh, sid, pts, side, arc, float(hw), layout, road, mpp, scale)
     if mesh.sw_cfg and mesh.sw_mode == "kerb_line":
-        _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_)
+        _kerb_line_sidewalks(mesh, gray_mask.shape, scale, s_, window=window)
+    if window is not None:
+        _dashes_in(mesh, window, scale)
+    mesh.window = window
 
     return mesh, det, {
         "streets": streets, "junctions_patched": patched, "junctions_skipped": skipped,
@@ -523,6 +592,52 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                       "islands": c["islands"]} for c in clusters],
         "straightness": round(s_, 2), "spacing_m": spacing_m, "exact_shapes": exact_n,
     }
+
+
+def _dashes_in(mesh, window, scale):
+    """Keep only the lines (and their owners, kinds and colours) that reach into the window."""
+    x0, y0, x1, y1 = (v * scale for v in window)
+    keep = []
+    for di, strip in enumerate(mesh.dashes):
+        xs = [v for r in strip for v in (r[0], r[2])]
+        ys = [v for r in strip for v in (r[1], r[3])]
+        if xs and not (max(xs) < x0 or min(xs) > x1 or max(ys) < y0 or min(ys) > y1):
+            keep.append(di)
+    for name in ("dashes", "dash_solid", "dash_owner", "dash_yellow"):
+        lst = getattr(mesh, name)
+        setattr(mesh, name, [lst[i] for i in keep if i < len(lst)])
+
+
+def _window_px(window, shape, scale=1):
+    """A window (mask pixels) as whole pixels of an array of this shape (at scale): (x0, y0, x1, y1)."""
+    H, W = shape
+    x0, y0 = max(0, int(math.floor(window[0] * scale))), max(0, int(math.floor(window[1] * scale)))
+    x1, y1 = min(W, int(math.ceil(window[2] * scale)) + 1), min(H, int(math.ceil(window[3] * scale)) + 1)
+    return x0, y0, x1, y1
+
+
+def _frame_px(window, shape):
+    """
+    A window's frame (mask pixels): its pixels' first and last centres. The
+    road traced in it (_outline_in) runs half a pixel past them, so the frame
+    cuts the roads that leave it, and the blocks along its edge stay apart (a
+    frame out to the pixels' far edges left a hair of non-road along two of
+    its sides that joined every block touching them into one).
+    """
+    x0, y0, x1, y1 = _window_px(window, shape)
+    return x0, y0, x1 - 1, y1 - 1
+
+
+def _outline_in(coverage, window, scale=1, simplify=None):
+    """The road's outline (model3d.outline_polygons) traced only inside a window, in the whole map's pixels."""
+    from app.model3d import outline_polygons
+    from shapely.affinity import translate
+    if window is None:
+        return outline_polygons(coverage) if simplify is None else outline_polygons(coverage, simplify)
+    x0, y0, x1, y1 = _window_px(window, coverage.shape, scale)
+    sub = coverage[y0:y1, x0:x1]
+    polys = outline_polygons(sub) if simplify is None else outline_polygons(sub, simplify)
+    return [translate(g, x0, y0) for g in polys]
 
 
 def _ang(v):
@@ -1352,7 +1467,7 @@ def _scale_poly(poly, scale):
     return sscale(poly, xfact=scale, yfact=scale, origin=(0, 0)) if scale != 1 else poly
 
 
-def cluster_fill_polys(clusters, coverage_out, scale):
+def cluster_fill_polys(clusters, coverage_out, scale, window=None):
     """
     The traced road inside each group's area, as triangles in texture pixels.
     coverage_out is the smooth road coverage at the texture's size.
@@ -1365,7 +1480,7 @@ def cluster_fill_polys(clusters, coverage_out, scale):
     # closing rounds off steps without moving straight edges
     r = 1.2 * scale
     polys = []
-    for p0 in outline_polygons(coverage_out):
+    for p0 in (outline_polygons(coverage_out) if window is None else _outline_in(coverage_out, window, scale)):
         q = p0.buffer(r).buffer(-2 * r).buffer(r)
         if not q.is_empty:
             polys.extend(q.geoms if hasattr(q, "geoms") else [q])
@@ -1405,7 +1520,7 @@ def _fallback_fill(mesh, j):
 
 
 
-def _cover_bare(mesh, coverage, scale, min_px=12):
+def _cover_bare(mesh, coverage, scale, min_px=12, window=None):
     """
     The final guarantee: any road in the mask that nothing covers gets filled.
 
@@ -1415,11 +1530,15 @@ def _cover_bare(mesh, coverage, scale, min_px=12):
     """
     from PIL import Image, ImageDraw
     from shapely.geometry import MultiPoint
+    ox, oy = 0, 0                                     # a window: its own corner
+    if window is not None:
+        ox, oy, x1, y1 = _window_px(window, coverage.shape)
+        coverage = coverage[oy:y1, ox:x1]
     H, W = coverage.shape
     k = 2
     img = Image.new("L", (W * k, H * k), 0)
     d = ImageDraw.Draw(img)
-    V = np.array(mesh.v, float) / scale * k
+    V = (np.array(mesh.v, float).reshape(-1, 2) / scale - (ox, oy)) * k
     for q in mesh.quads:
         d.polygon([tuple(V[i]) for i in q], fill=255)
     for t in mesh.tris:
@@ -1430,7 +1549,7 @@ def _cover_bare(mesh, coverage, scale, min_px=12):
             continue
         geoms = area.geoms if hasattr(area, "geoms") else [area]
         for g in geoms:
-            d.polygon([(x * k, y * k) for x, y in g.exterior.coords], fill=255)
+            d.polygon([((x - ox) * k, (y - oy) * k) for x, y in g.exterior.coords], fill=255)
     covered = np.array(img.resize((W, H), Image.BOX)) > 60
     bare = (coverage >= 0.5) & ~covered
     lab, n = ndi.label(bare)
@@ -1442,7 +1561,7 @@ def _cover_bare(mesh, coverage, scale, min_px=12):
     for i, a in enumerate(sizes, start=1):
         if a < min_px:
             continue
-        ys, xs = lab_px[i][:, 0], lab_px[i][:, 1]
+        ys, xs = lab_px[i][:, 0] + oy, lab_px[i][:, 1] + ox
         region = MultiPoint(list(zip(xs.tolist(), ys.tolist()))).convex_hull.buffer(4.0)
         mesh.clusters.append({"members": [], "region": region, "centre": (float(xs.mean()), float(ys.mean())),
                               "islands": 0, "fallback": True, "kind": "fallback"})
@@ -1617,7 +1736,7 @@ def _road_surface(mesh):
     return unary_union([q.buffer(0.02) for q in polys]).buffer(-0.02)
 
 
-def _smooth_ring(P, frame_w, frame_h, iterations, keep=None):
+def _smooth_ring(P, frame_w, frame_h, iterations, keep=None, frame0=(0, 0)):
     """
     Straighten a closed kerb line the way the roads were straightened.
 
@@ -1628,7 +1747,8 @@ def _smooth_ring(P, frame_w, frame_h, iterations, keep=None):
     so do points on an exact edge (keep: an inner street's edge, already exact).
     """
     Q = P.copy()
-    fixed = (Q[:, 0] < 0.6) | (Q[:, 1] < 0.6) | (Q[:, 0] > frame_w - 0.6) | (Q[:, 1] > frame_h - 0.6)
+    fixed = ((Q[:, 0] < frame0[0] + 0.6) | (Q[:, 1] < frame0[1] + 0.6) |
+             (Q[:, 0] > frame_w - 0.6) | (Q[:, 1] > frame_h - 0.6))
     if keep is not None and not keep.is_empty:
         import shapely
         fixed |= shapely.dwithin(keep, shapely.points(Q), 0.05)
@@ -1677,10 +1797,38 @@ def _resample_ring(P, spacing, keep=None):
     return np.column_stack([np.interp(t, cum, closed[:, 0]), np.interp(t, cum, closed[:, 1])])
 
 
-def _adaptive(K, min_step, max_step, max_turn_deg):
+def _anchors(P, grid):
+    """
+    Fixed points of a line, the same wherever it starts or is cut: each point
+    that is the first of the line in a new square of a grid laid over the whole
+    map (grid: its side, mask pixels). A patch of a big map (app/patches.py)
+    works its kerb lines out in stretches between them, so a kerb seen from two
+    patches comes out the same in both.
+    """
+    c = np.floor(np.asarray(P, float) / grid).astype(np.int64)
+    return np.any(c != np.roll(c, 1, axis=0), axis=1)
+
+
+def _simplify_anchored(P, tol, an):
+    """A closed line simplified stretch by stretch between its fixed points (an), each stretch on its own."""
+    from shapely.geometry import LineString, LinearRing
+    idx = np.nonzero(an)[0]
+    if len(idx) < 2:
+        k = int(np.lexsort((P[:, 1], P[:, 0]))[0])         # one place to start: its smallest point
+        return np.array(LinearRing(np.roll(P, -k, axis=0)).simplify(tol).coords)[:-1]
+    n, out = len(P), []
+    for a, b in zip(idx, np.append(idx[1:], idx[0] + n)):
+        seg = P[np.arange(a, b + 1) % n]
+        out.append((np.array(LineString(seg).simplify(tol).coords) if len(seg) > 2 else seg)[:-1])
+    return np.vstack(out)
+
+
+def _adaptive(K, min_step, max_step, max_turn_deg, anchors=None):
     """
     Keep more points where the kerb bends and fewer where it runs straight: a
     new row whenever the kerb has turned by max_turn_deg or run max_step.
+    anchors: points always kept, counting starting again there (a patch: the
+    same rows wherever the kerb starts, _anchors).
     """
     keep = [0]
     run, turn = 0.0, 0.0
@@ -1704,7 +1852,8 @@ def _adaptive(K, min_step, max_step, max_turn_deg):
             turn += here
         # a sharp corner is always kept exactly, or the row before and after it
         # would cut across the tip and leave it uncovered
-        if here >= 12.0 or (run >= max_step) or (turn >= max_turn_deg and run >= min_step):
+        if here >= 12.0 or (run >= max_step) or (turn >= max_turn_deg and run >= min_step) or \
+                (anchors is not None and anchors[i]):
             keep.append(i)
             run, turn = 0.0, 0.0
     return np.array(keep)
@@ -1712,14 +1861,18 @@ def _adaptive(K, min_step, max_step, max_turn_deg):
 
 KERB_PASSES = (4, 16)          # smoothing passes of the kerb line: at straightness 0, and added at 1
 KERB_FIT_PX = 0.75             # straight lines through the mask's pixel steps, never further off than this
+ANCHOR_M = 40.0                # a big map's patches: kerb lines worked out in stretches between grid lines this far apart
 
 
-def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
+def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7, window=None):
     from shapely import contains_xy
     from shapely.geometry import Polygon, box
     from shapely.ops import unary_union
     cfg, mpp = mesh.sw_cfg, mesh.sw_mpp
     H, W = shape
+    X0, Y0 = 0, 0                     # the frame: the image, or the window in it
+    if window is not None:
+        X0, Y0, W, H = _frame_px(window, shape)
     prog.stage("sidewalks", "kerb lines and sidewalks")
     raw = _road_surface(mesh)
     if raw.is_empty:
@@ -1734,7 +1887,8 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     traced_src = False
     if cov is not None:
         from app.model3d import outline_polygons
-        traced = [_scale_poly(g, scale) for g in outline_polygons(cov, 0.0)]
+        traced = [_scale_poly(g, scale) for g in (outline_polygons(cov, 0.0) if window is None
+                                                   else _outline_in(cov, window, 1, 0.0))]
         src = unary_union(traced + list(getattr(mesh, "exact_roads", None) or []))
         if not src.is_empty:
             raw, traced_src = src, True
@@ -1747,6 +1901,10 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     rings_out = []
     geoms = raw.geoms if hasattr(raw, "geoms") else [raw]
     keep = getattr(mesh, "exact_edges", None)
+    grid = ANCHOR_M / mpp if window is not None else None     # a patch: stretches between fixed points
+
+    def fixed(pts):
+        return _anchors(pts, grid) if grid is not None else None
 
     def corners(pts):
         # an inner street's sharp corners (on its exact edges) stay where they are
@@ -1761,10 +1919,14 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             # straight lines through the pixel steps (each point of the traced edge within
             # KERB_FIT_PX of them); the smoothing then only rounds their joins a little
             from shapely.geometry import LinearRing
-            Q = np.array(LinearRing(pts).simplify(KERB_FIT_PX).coords)[:-1]
+            Q = (np.array(LinearRing(pts).simplify(KERB_FIT_PX).coords)[:-1] if grid is None
+                 else _simplify_anchored(pts, KERB_FIT_PX, fixed(pts)))
             if len(Q) >= 3:
                 pts = Q
-        return _smooth_ring(_resample_ring(pts, fine, corners(pts)), W, H, iters, keep)
+        kp = corners(pts)
+        if grid is not None:
+            kp = fixed(pts) if kp is None else (kp | fixed(pts))
+        return _smooth_ring(_resample_ring(pts, fine, kp), W, H, iters, keep, (X0, Y0))
 
     # how far along, for the console: straightening ~45% of the time, the fills ~25%, the rows ~30%
     n_pts = sum(len(g.exterior.coords) + sum(len(r.coords) for r in g.interiors) for g in geoms) or 1
@@ -1778,7 +1940,7 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
         if not q.is_valid:
             q = q.buffer(0)
         rings_out.append(q)
-    surface = unary_union(rings_out).intersection(box(0, 0, W, H))
+    surface = unary_union(rings_out).intersection(box(X0, Y0, W, H))
     mesh.kerb_surface = _scale_poly(surface, scale)
     prog.part(0.5)
 
@@ -1811,7 +1973,7 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
     snap_px = 0.2 / mpp
     H_m, ks_px = cfg["height_m"], cfg["kerbstone_m"] / mpp
     maxd = 2 * cfg["max_m"] / mpp + 2
-    big = box(0, 0, W, H).buffer(4 * cfg["max_m"] / mpp, join_style=2)
+    big = box(X0, Y0, W, H).buffer(4 * cfg["max_m"] / mpp, join_style=2)
     blocks = big.difference(surface)
     blocks = list(blocks.geoms) if hasattr(blocks, "geoms") else [blocks]
     import shapely
@@ -1840,10 +2002,15 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             prog.part(0.7 + 0.3 * len_done / len_all)
             len_done += ring.length
             pts = np.array(ring.coords)[:-1]
-            K = _resample_ring(pts, fine, _sharp(pts))                   # sharp corners kept exactly
+            K = _resample_ring(pts, fine, _sharp(pts) if grid is None else (_sharp(pts) | fixed(pts)))  # sharp corners kept exactly
             n_ = len(K)
             if n_ < 8:
                 continue
+            if grid is not None:
+                # a patch: every loop starts at the same one of its fixed points, whichever patch sees it
+                an = np.nonzero(fixed(K))[0]
+                cand = an if len(an) else np.arange(n_)
+                K = np.roll(K, -int(cand[np.lexsort((K[cand, 1], K[cand, 0]))[0]]), axis=0)
             if not traced_src:
                 K = _snap_to(K, road_all, snap_px)     # a kerb traced from the mask is the road's edge already (filled up to it)
             tg = np.roll(K, -1, axis=0) - np.roll(K, 1, axis=0)
@@ -1851,7 +2018,7 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             nrm = np.column_stack([-tg[:, 1], tg[:, 0]])
             probe = K + nrm * 0.4
             nrm[contains_xy(surface, probe[:, 0], probe[:, 1])] *= -1       # away from the road
-            on_frame = (K[:, 0] < 0.6) | (K[:, 1] < 0.6) | (K[:, 0] > W - 1.6) | (K[:, 1] > H - 1.6)
+            on_frame = (K[:, 0] < X0 + 0.6) | (K[:, 1] < Y0 + 0.6) | (K[:, 0] > W - 1.6) | (K[:, 1] > H - 1.6)
             _, idx = cen_tree.query(K)
             target = np.clip(cfg["share"] * cw[idx] * mpp, cfg["min_m"], cfg["max_m"]) / mpp
             wide = (cw[idx] * mpp > cfg["max_road_m"]) & bool(cfg.get("skip_interchanges", False))
@@ -1869,12 +2036,13 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                     island = island.buffer(0)
                 w = float(np.median(target))
                 inner = island.buffer(-w, join_style=1)
-                keep = _adaptive(K, 0.4 / mpp, sw_max / mpp, sw_turn)
+                keep = _adaptive(K, 0.4 / mpp, sw_max / mpp, sw_turn, fixed(K))
                 Kk = K[keep]
                 if inner.is_empty or inner.area < 0.5 or inner.geom_type != "Polygon":
                     mesh.sw_kind[loop_id] = "paved"
                     _paved_island(mesh, Kk, loop_id, H_m, scale)
                     continue
+            if is_hole and ok.all() and grid is None:
                 mesh.sw_kind[loop_id] = "closed"
                 O = _project_monotonic(Kk, inner.exterior)
                 along = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(Kk, axis=0).T))]) * mpp
@@ -1884,7 +2052,11 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
 
             # open runs: blocks touching the image border, or interrupted by an
             # interchange. Width by the rule, never more than half the space to
-            # the next road, narrowed on tight inside curves
+            # the next road, narrowed on tight inside curves. A patch of a big
+            # map lays a whole block's sidewalk this way too, as one run all the
+            # way round (loop): a block cut by the patch's edge is laid this way,
+            # and the patch beside it, which sees it whole, must lay it the same
+            loop = is_hole and ok.all() and grid is not None
             free = _free_space(mesh, K, nrm, maxd)
             w = np.minimum(target, free / 2)
             # the same widths without the narrowing below, for an inner edge that
@@ -1902,18 +2074,20 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
             w = ndi.minimum_filter1d(w, 5, mode="wrap")
             w = ndi.uniform_filter1d(w, 5, mode="wrap")
             ok &= w > 0.3 / mpp
-            for run in _runs_circular(ok):
+            for run in ([list(range(n_)) + [0]] if loop else _runs_circular(ok)):
                 if len(run) < 3:
                     continue
                 idxs = list(run)
                 # carry a run that stops at the image border right up to it
                 for end in (0, -1):
+                    if loop:
+                        break
                     j = idxs[end]
                     nb = (j - 1) % n_ if end == 0 else (j + 1) % n_
                     if on_frame[nb]:
                         idxs = [nb] + idxs if end == 0 else idxs + [nb]
                 sub = K[idxs]
-                keep = _adaptive(sub, 0.4 / mpp, sw_max / mpp, sw_turn)
+                keep = _adaptive(sub, 0.4 / mpp, sw_max / mpp, sw_turn, fixed(sub) if grid is not None else None)
                 if keep[-1] != len(sub) - 1:
                     keep = np.append(keep, len(sub) - 1)
                 pts = sub[keep]
@@ -1927,8 +2101,8 @@ def _kerb_line_sidewalks(mesh, shape, scale, straightness=0.7):
                 O = _open_inner(pts, ns, wr, blocks)
                 if O is None:
                     O = pts + ns * ws[:, None]
-                O[:, 0] = np.clip(O[:, 0], 0, W - 1.0)
-                O[:, 1] = np.clip(O[:, 1], 0, H - 1.0)
+                O[:, 0] = np.clip(O[:, 0], X0, W - 1.0)
+                O[:, 1] = np.clip(O[:, 1], Y0, H - 1.0)
                 along = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))]) * mpp
                 mesh.sw_kind[loop_id] = "open"
                 _rows_from(mesh, pts, O, along, loop_id, H_m, ks_px, closed=False)
@@ -2317,7 +2491,7 @@ def _row_keep(pts, tang, arc_m, hw, layout, max_gap_m=20.0, turn_deg=2.0, width_
 
 
 
-def block_polygons(mesh, shape, scale, mpp, min_area_m2=4.0):
+def block_polygons(mesh, shape, scale, mpp, min_area_m2=4.0, window=None):
     """
     The blocks and islands between roads, in texture pixels: everything inside
     the image that is not road. The road surface is the straightened kerb line
@@ -2329,6 +2503,9 @@ def block_polygons(mesh, shape, scale, mpp, min_area_m2=4.0):
     if surface is None or surface.is_empty:
         surface = _road_surface(mesh)
     frame = box(0, 0, W * scale, H * scale)
+    if window is not None:
+        x0, y0, x1, y1 = _frame_px(window, shape)
+        frame = box(x0 * scale, y0 * scale, x1 * scale, y1 * scale)
     rest = frame.difference(surface)
     geoms = rest.geoms if hasattr(rest, "geoms") else [rest]
     px_area = (mpp / scale) ** 2                      # square metres per texture pixel
