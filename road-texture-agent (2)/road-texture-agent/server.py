@@ -40,6 +40,39 @@ import numpy as np
 # and browsers will not run a module script, like the 3D tab's, with that type)
 mimetypes.add_type("text/javascript", ".js")
 
+MIXED_VERSIONS = ("An update zip only fits the version just before it. Unzip the full download (part 1: app, "
+                  "part 2: the rest) into a new, empty folder, then copy your workspace folder into it.")
+
+
+def _missing_program_files():
+    """
+    The program's own files that its code imports but this folder lacks: an
+    update zip unzipped over a copy older than the version it was made for.
+    Read from the imports themselves (server.py and app/*.py), so the list
+    never needs keeping.
+    """
+    here = Path(__file__).parent
+    pat = re.compile(r"^\s*(?:from app\.(\w+) import|from app import ([\w ,]+)|import app\.(\w+))", re.M)
+    wanted = set()
+    for f in [here / "server.py"] + sorted((here / "app").glob("*.py")):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in pat.finditer(text):
+            if m.group(2):
+                wanted.update(part.split(" as ")[0].strip() for part in m.group(2).split(","))
+            else:
+                wanted.add(m.group(1) or m.group(3))
+    return sorted("app/%s.py" % n for n in wanted
+                  if n and not (here / "app" / (n + ".py")).exists() and not (here / "app" / n).is_dir())
+
+
+_missing = _missing_program_files()
+if _missing:
+    raise SystemExit("\n  This program folder mixes two versions: %s %s missing.\n  %s\n"
+                     % (", ".join(_missing), "is" if len(_missing) == 1 else "are", MIXED_VERSIONS))
+
 from app import analysis as A
 from app import progress as prog
 from app import images as I
@@ -68,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.11-tjunctions1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.11-tjunctions2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -122,8 +155,12 @@ async def _unexpected(request, exc):
     report.write_text("Road Texture Agent %s\n%s %s\n\n%s" % (
         VERSION, request.method, request.url.path,
         "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))), encoding="utf-8")
+    # one of the program's own files missing or older than the others: say what to do
+    name = getattr(exc, "name", None) or ""
+    hint = (". This program folder mixes two versions. " + MIXED_VERSIONS
+            if isinstance(exc, ImportError) and (name == "app" or name.startswith("app.")) else "")
     return JSONResponse(status_code=500, content={
-        "detail": "%s: %s (at %s). Full report saved to %s" % (type(exc).__name__, exc, at, report)})
+        "detail": "%s: %s (at %s). Full report saved to %s%s" % (type(exc).__name__, exc, at, report, hint)})
 _sm = mem.summary()
 print("\n  Road Texture Agent version %s" % VERSION)
 print("  Program folder: %s" % ROOT)

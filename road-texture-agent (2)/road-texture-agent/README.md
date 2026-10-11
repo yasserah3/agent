@@ -17,6 +17,13 @@ On Windows, if `python` is not recognised, install Python from python.org with
 "Add python.exe to PATH" ticked, and turn off the Store aliases under
 Settings > Apps > Advanced app settings > App execution aliases.
 
+**Updating.** An update zip holds only the files changed since the version just
+before it: unzip it over that version. If your copy is older, unzip the full
+download (part 1: `app`, part 2: the rest) into a new, empty folder and copy
+your `workspace` folder into it. A folder that mixes two versions is caught
+when the server starts: it names the files that are missing and says this,
+instead of stopping with an ImportError.
+
 ## What works today
 
 - **Uploads.** Every image is stored in `workspace/uploads` and recorded in memory.
