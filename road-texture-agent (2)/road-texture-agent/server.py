@@ -3267,6 +3267,89 @@ def patches_ground(plan_id: str):
     return FileResponse(out, media_type="image/jpeg")
 
 
+POINTS_DIR = ARTIFACTS / "points"
+POINTS_KEEP = 8                      # the last clouds kept on disk (each a few tens of MB)
+
+
+@app.post("/api/points")
+def points(payload: dict):
+    """
+    The map as dots, for the 3D tab while its 3D model is built (app/pointcloud.py):
+    the generation and the 3D model settings as for export3d. Binary (pointcloud.build),
+    kept on disk under a key of what it is made from.
+    """
+    import hashlib
+    from app import pointcloud as PC
+    gid, art, result, rec, _, _, _, _ = _export_inputs(payload)
+    mpp = float(art["meta"]["scale"])
+    sw = bool(payload.get("sidewalks", True))
+    h = float(payload.get("sw_height_cm", 10)) / 100.0
+    sw_m, sw_h = (float(payload.get("sw_max_m", 2.5)), h) if sw else (None, None)
+    block_h = h if payload.get("blocks", True) else None
+    tileset = _tileset_with_paths()
+    tiles = (tileset or {}).get("tiles") or {}
+    mats = payload.get("materials") or {}
+
+    def mean_rgb(path):
+        try:
+            im = Image.open(path).convert("RGB")
+            im.thumbnail((64, 64))
+            return tuple(int(v) for v in np.asarray(im, np.float32).reshape(-1, 3).mean(axis=0))
+        except Exception:
+            return None
+
+    def paving(part, own):
+        # the chosen library material's colour, else your own tile's
+        mid = mats.get(part)
+        if mid and mid not in ("tiles", "same"):
+            e = LIB.entry(mid)
+            c = e and mean_rgb(LIB.DIR / e["colour"])
+            if c:
+                return c
+        for t in own:
+            lst = tiles.get(t) or []
+            c = lst and mean_rgb(lst[0]["path"])
+            if c:
+                return c
+        return (150, 150, 150)
+    sidewalk_rgb = paving("sidewalk", ["sidewalk"])
+    block_rgb = paving("square", ["block", "sidewalk"])
+    # the placed objects: each copy's foot, turn and box (app/placements.py)
+    objects = []
+    sc = _scatter_for_export(payload.get("scatter"), parts=False)
+    for p in (sc or {}).get("placements", []):
+        try:
+            spots, _ = PL.copies_of(p, sc["objects"], sc.get("packages", {}), mpp)
+        except Exception:
+            continue
+        for oid, cc, a, _, k in spots:
+            meta = sc["objects"][oid]["meta"]
+            s, _, w, d = PL.sized(meta)
+            hh = float(meta.get("height_m") or max(w, d)) * s
+            objects.append((round(float(cc[0]), 2), round(float(cc[1]), 2), round(float(a), 4),
+                            round(w * k, 2), round(d * k, 2), round(hh * k, 2), block_h or 0.0))
+
+    def stamp(path):
+        return [str(path), Path(path).stat().st_mtime if path and Path(path).exists() else None]
+    key = hashlib.sha1(json.dumps([1, gid, stamp(rec["path"]), stamp(result["path"]), mpp, sw_m, sw_h, block_h,
+                                   sidewalk_rgb, block_rgb, objects, PC.MAX_POINTS, PT.PATCH_M]).encode()).hexdigest()[:16]
+    POINTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = POINTS_DIR / f"points_{key}.bin"
+    if not out.exists():
+        road = np.array(Image.open(rec["path"]).convert("L")) > 127
+        colours = np.asarray(Image.open(result["path"]).convert("RGB"))
+        data = PC.build(road, colours, mpp, PT.PATCH_M, sw_m, sw_h, block_h, sidewalk_rgb, block_rgb, objects)
+        tmp = out.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, out)
+        for old in sorted(POINTS_DIR.glob("points_*.bin"), key=lambda f: f.stat().st_mtime, reverse=True)[POINTS_KEEP:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    return FileResponse(out, media_type="application/octet-stream")
+
+
 @app.get("/api/patches/zip/{plan_id}")
 def patches_zip(plan_id: str):
     """The built patches as one zip: each a GLB in the whole map's coordinates (they fit together as they are)."""

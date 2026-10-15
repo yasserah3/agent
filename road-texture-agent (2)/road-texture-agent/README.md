@@ -987,6 +987,42 @@ either patch reaches past the line.
 Smaller maps are built as one model, as before, and come out the same byte for
 byte.
 
+### The map as dots while it is built
+
+While the 3D model is built, the view shows the map as dots (the look of a laser
+scan or Gaussian splatting), so there is something to look at and move round
+from the first seconds, and you see what is being built:
+
+- **The dots** (`app/pointcloud.py`, `POST /api/points`): on a jittered grid over
+  the whole map, on the road at its height, on the sidewalks along it (as far as
+  the 3D model's widest sidewalk) and on the blocks beyond at theirs; each placed
+  object a cloud on the ellipsoid that fills its box, standing up from the map.
+  At most 2.5 million, so the spacing grows with the map: 1.2 m on the 2.2 ×
+  1.7 km map of narrow streets, 2.6 m on the 4.8 × 3.6 km one, 6.6 m on the
+  12 × 9 km city (0.5 m at least). Made in about 4 to 7 s the first time, kept
+  on disk after that (0.2 s), about 38 MB to the browser.
+- **Colours**: *By height* (blue on the road, cyan on the sidewalks and blocks,
+  green to yellow up the objects, on a log scale so a 10 cm kerb shows as well
+  as a 20 m tree; markings and light paving brighter), or *The map's own
+  colours* (the texture on the road, the paving's colour beside it). 3D tab,
+  *Dot colours*.
+- **What is being built**: a band of light sweeps over the 1 km squares being
+  built (on a smaller map built as one model, over all of it).
+- **Real models in place of the dots**: on a big map each 1 km square's dots give
+  way to its patch when that comes in (and come back where a patch goes again,
+  far off), where the flat texture showed before; on a smaller map the dots go
+  when the whole model is in. *While it is built: As before* goes back to the
+  flat texture (big maps) or an empty view (smaller ones).
+- **Build from a point** (big maps): press it, then click the map: the patches
+  round that spot are built first, wherever you look meanwhile (a beam marks
+  it); *Follow the view again* goes back to building where you look. Pick it
+  while the whole map is prepared (the first part of the build) and the very
+  first patches are those.
+- **Cost**: round dots of a fixed size in metres (about as wide as they are
+  apart), drawn without blending or sorting, one at most 24 pixels across by the
+  camera; the server's build is not slowed (it is all in the browser). Render
+  photo leaves them out.
+
 ## Time so far and time left, in the console
 
 Every long job has a line in the console that updates about once a second:

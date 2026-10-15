@@ -941,6 +941,15 @@
             <button class="btn" id="btnScene3d" title="Build the streets, inner streets, sidewalks, kerbs, blocks and objects of the last generated texture, and frame the whole place">Generate 3D scene</button>
             <button class="btn secondary" id="btnScene3dUpdate" disabled title="Build the scene again with the current materials and settings, keeping the camera">Update view</button>
           </div>
+          <div class="btn-row">
+            <button class="btn secondary" id="btnBuildFrom" hidden title="A big map is built in 1 km patches, the ones round where you look first. Click this, then a spot on the map: the patches round that spot are built first, wherever you look meanwhile">Build from a point</button>
+          </div>
+          <div class="field"><label for="dotsLook">While it is built</label>
+            <select id="dotsLook" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="What the view shows of the parts not built yet">
+              <option value="dots">The map as dots</option><option value="flat">As before (big maps: the texture flat)</option></select></div>
+          <div class="field"><label for="dotsColour">Dot colours</label>
+            <select id="dotsColour" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%" title="By height: blue on the road, cyan on the sidewalks and blocks, green to yellow up the objects. Or the map's own colours">
+              <option value="height">By height</option><option value="map">The map's own colours</option></select></div>
           <div class="note bad" id="scene3dStale" hidden>Materials or settings changed since this scene was built: press Update view.</div>
           <div class="note" id="scene3dNote">Builds the last generated texture in 3D: streets and inner streets, sidewalks and kerbs, blocks and your objects, with the 3D model settings of the Generate tab, and street lamps along the sidewalks.</div>
         </div>

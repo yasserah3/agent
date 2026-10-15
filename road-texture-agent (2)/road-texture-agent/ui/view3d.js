@@ -914,6 +914,14 @@ async function generate(keep = false){
   const key = buildKey();
   // its line in the console: the server's stages with the time left, then the loading
   const job = window.trackJob ? window.trackJob(keep ? 'Updating the 3D scene' : 'Building the 3D scene') : null;
+  // a whole new model: the map as dots meanwhile, every square of it being built (the
+  // last model hidden; an update keeps the view as it is)
+  const fresh = !(keep && world);
+  if(fresh) showDots(gid, true).then(d => {
+    if(!d || DOTS !== d) return;
+    if(world) world.visible = false;
+    if(!world || !keep) frame(new THREE.Vector3(0, 0, 0), Math.max(60, Math.hypot(...d.head.size_m) / 2));
+  });
   try{
     const r = await fetch('/api/export3d', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined,
@@ -950,6 +958,7 @@ async function generate(keep = false){
     });
     if(job) job.set('putting the model in the scene', null);
     if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
+    endDots();
     dropBakes();
     world = gltf.scene;
     worldBase = res.model_base || null;
@@ -979,6 +988,7 @@ async function generate(keep = false){
   }catch(e){
     if(job) job.done(false, e.message);
     note('Could not build the 3D scene: ' + e.message, true);
+    if(fresh){ endDots(); if(world) world.visible = true; }
   }
   busy = false; $('#btnScene3d').disabled = false; $('#btnScene3dUpdate').disabled = !world;
 }
@@ -1045,6 +1055,8 @@ function endPatches(){
   for(const m of PATCHES.mats.values()) disposeMaterial(m);
   if(PATCHES.flatMat){ if(PATCHES.flatMat.map) PATCHES.flatMat.map.dispose(); PATCHES.flatMat.dispose(); }
   PATCHES = null;
+  endDots();
+  buildPicking = false; host.style.cursor = ''; markBuildPoint(null); buildFromUI();
 }
 
 function disposeMaterial(m){
@@ -1092,12 +1104,14 @@ async function startPatches(res, gid){
     PATCHES.flat.add(sq);
   }
   updatePatches(res);
+  showDots(gid, false);                                              // the map as dots while it is built
   frame(new THREE.Vector3(0, 0, 0), Math.min(900, Math.max(Wm, Hm) / 2));
   // as far out as the haze lets the map show (further, the sky's haze covers it all)
   controls.maxDistance = Math.min(4500, Math.max(Wm, Hm) * 1.1);
   PATCHES.onMove = () => { patchesTick(); patchFocus(); };
   controls.addEventListener('change', PATCHES.onMove);
   PATCHES.timer = setInterval(patchPoll, 1500);
+  buildFromUI();
 }
 
 // a newer plan (Update view): the same patches, built from the new settings; a patch whose
@@ -1115,6 +1129,7 @@ function patchStates(s){
     if(!it){ it = { id: p.id, m: p.m, obj: null, objUrl: null, lamps: [] }; PATCHES.items.set(p.id, it); }
     it.state = p.state; it.url = p.url;
   }
+  groundVis();
 }
 
 async function patchPoll(){
@@ -1138,7 +1153,7 @@ async function patchPoll(){
             PATCHES.job = null;
           }else PATCHES.job.set(patchLine(s), s.ready / Math.max(1, s.total), s.left);
         }
-        if(s.finished) PATCHES.finished = true;
+        if(s.finished && !PATCHES.finished){ PATCHES.finished = true; PATCHES.pin = null; buildPicking = false; markBuildPoint(null); buildFromUI(); }
       }
     }
   }catch(_){}
@@ -1151,9 +1166,9 @@ function patchFocus(){
   const now = performance.now();
   if(now - PATCHES.focusAt < 1000) return;
   PATCHES.focusAt = now;
-  const t = controls.target;
+  const t = controls.target, at = PATCHES.pin || [t.x, t.z];
   fetch('/api/patches/focus/' + PATCHES.plan, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ camera: [t.x, t.z] }) }).catch(() => {});
+    body: JSON.stringify({ camera: at }) }).catch(() => {});
 }
 
 const patchDist = (m, x, z) => Math.hypot(Math.max(m[0] - x, 0, x - m[2]), Math.max(m[1] - z, 0, z - m[3]));
@@ -1200,8 +1215,7 @@ async function loadPatch(it){
     world.add(gltf.scene);
     it.obj = gltf.scene; it.objUrl = url;
     if(old) dropPatchObject(old);
-    const sq = P.flat.getObjectByName('flat_' + it.id);
-    if(sq) sq.visible = false;
+    groundVis();
     try{
       const r = await fetch(url.replace(/\.glb$/, '.json'));
       it.lamps = r.ok ? ((await r.json()).lamps || []) : [];
@@ -1230,8 +1244,7 @@ function dropPatchObject(obj){
 function unloadPatch(it){
   dropPatchObject(it.obj);
   it.obj = null; it.objUrl = null; it.lamps = [];
-  const sq = PATCHES.flat.getObjectByName('flat_' + it.id);
-  if(sq) sq.visible = true;
+  groundVis();
   patchLamps();
   bvhFor = null; poolAt = null;
 }
@@ -1241,6 +1254,170 @@ function patchLamps(){
   const all = [];
   for(const it of PATCHES.items.values()) if(it.obj) all.push(...it.lamps);
   buildLamps(all);
+}
+
+// ----------------------------------------------------------------- the map as dots while it is built
+// While its 3D model is built, the map shows as dots (server.py /api/points,
+// app/pointcloud.py): the road, the sidewalks and the blocks at their heights and
+// the placed objects as clouds standing up from them, coloured by height (blue on
+// the road, cyan on the paving, green to yellow up the objects) or in the map's own
+// colours. They come in 1 km squares, one for each patch: a square's dots give way
+// to its patch when that comes in, and come back where it goes again (far off). A
+// light sweeps over the squares being built. Round dots, each about as wide as they
+// are apart, drawn without blending or sorting, so a few million cost little; one
+// right by the camera is at most DOT_MAX_PX across.
+const DOT_MAX_PX = 24;
+const DOTS_PREF = { look: 'dots', colours: 'height' };
+try{ Object.assign(DOTS_PREF, JSON.parse(localStorage.getItem('rta.dots') || '{}')); }catch(_){}
+const DOTS_U = { uTime: { value: 0 }, uHeight: { value: 1 }, uMaxH: { value: 1 }, uCell: { value: 1000 }, uLift: { value: 1 } };
+let DOTS = null, dotTex = null;
+
+function dotTexture(){
+  if(dotTex) return dotTex;
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, 64, 64);
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(32, 32, 30, 0, Math.PI * 2); g.fill();
+  dotTex = new THREE.CanvasTexture(c);
+  return dotTex;
+}
+
+function dotMaterial(size){
+  const m = new THREE.PointsMaterial({ size, sizeAttenuation: true, vertexColors: true, alphaMap: dotTexture(), alphaTest: 0.5 });
+  m.userData.uBuild = { value: 0 };
+  m.onBeforeCompile = sh => {
+    sh.uniforms.uBuild = m.userData.uBuild;
+    for(const k of Object.keys(DOTS_U)) sh.uniforms[k] = DOTS_U[k];
+    sh.vertexShader = 'varying vec3 vWorld;\n' + sh.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvWorld = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;')
+      .replace('#include <fog_vertex>', `gl_PointSize = clamp( gl_PointSize, 1.0, ${DOT_MAX_PX.toFixed(1)} );\n\t#include <fog_vertex>`);
+    sh.fragmentShader = 'varying vec3 vWorld;\nuniform float uBuild, uTime, uHeight, uMaxH, uCell, uLift;\n' + sh.fragmentShader
+      .replace('#include <color_fragment>', `
+	diffuseColor.rgb *= pow( vColor.rgb, vec3( 2.2 ) );          // the dots' colours are sRGB bytes
+	if ( uHeight > 0.5 ) {
+		// by height: how high on a log scale (a kerb's 10 cm shows, and so does a 20 m tree)
+		float L = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+		float t = clamp( log( 1.0 + max( vWorld.y, 0.0 ) / 0.05 ) / log( 1.0 + max( uMaxH, 0.2 ) / 0.05 ), 0.0, 1.0 );
+		vec3 c = t < 0.33 ? mix( vec3( 0.01, 0.07, 0.65 ), vec3( 0.0, 0.5, 0.62 ), t / 0.33 )
+		       : t < 0.66 ? mix( vec3( 0.0, 0.5, 0.62 ), vec3( 0.12, 0.7, 0.1 ), ( t - 0.33 ) / 0.33 )
+		       : mix( vec3( 0.12, 0.7, 0.1 ), vec3( 1.0, 0.8, 0.03 ), ( t - 0.66 ) / 0.34 );
+		diffuseColor.rgb = c * ( 0.35 + 2.4 * L );               // markings and light paving brighter
+	}
+	if ( uBuild > 0.0 ) {
+		// being built: a band of light sweeping across the square, and a slow pulse
+		float s = fract( ( vWorld.x + vWorld.z ) / ( 0.7 * uCell ) - uTime * 0.25 );
+		float band = 1.0 - smoothstep( 0.0, 0.06, abs( s - 0.5 ) );
+		diffuseColor.rgb = diffuseColor.rgb * ( 1.0 + 0.25 * uBuild * sin( uTime * 2.5 ) ) + uBuild * band * vec3( 0.45, 0.9, 1.0 );
+	}
+	diffuseColor.rgb *= uLift;                                    // the same on screen by day or night`);
+  };
+  m.customProgramCacheKey = () => 'dots1';
+  return m;
+}
+
+// the dots of a generation, for its 3D model as the settings are now (null: none)
+async function loadDots(gid){
+  const r = await fetch('/api/points', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...window.exportSettings(), generation: gid }) });
+  if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'the dots could not be made');
+  const buf = await r.arrayBuffer();
+  const n = new DataView(buf).getUint32(0, true);
+  const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+  const pos = new Float32Array(buf, 4 + n, head.count * 3), col = new Uint8Array(buf, 4 + n + head.count * 12, head.count * 3);
+  const group = new THREE.Group(); group.name = 'Map as dots';
+  const cells = new Map();
+  for(const c of head.cells){
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos.subarray(c.start * 3, (c.start + c.count) * 3), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col.subarray(c.start * 3, (c.start + c.count) * 3), 3, true));
+    geo.computeBoundingSphere();
+    const pts = new THREE.Points(geo, dotMaterial(head.spacing_m * 1.25));
+    pts.name = 'dots_' + c.id; pts.frustumCulled = true;
+    group.add(pts); cells.set(c.id, pts);
+  }
+  return { gid, head, group, cells, building: new Set(), all: false };
+}
+
+// the map as dots while it is built: shown at once (the server makes them in seconds)
+async function showDots(gid, all){
+  endDots();
+  if(DOTS_PREF.look !== 'dots') return null;
+  const mine = DOTS = { gid, loading: true };
+  try{
+    const d = await loadDots(gid);
+    if(DOTS !== mine){ disposeDots(d); return null; }
+    DOTS = d; d.all = all;
+    DOTS_U.uMaxH.value = Math.max(1, d.head.max_h); DOTS_U.uCell.value = d.head.patch_m;
+    DOTS_U.uHeight.value = DOTS_PREF.colours === 'height' ? 1 : 0;
+    scene.add(d.group);
+    groundVis();
+    return d;
+  }catch(e){
+    if(DOTS === mine) DOTS = null;
+    console.warn('Dots:', e);
+    return null;
+  }
+}
+
+function disposeDots(d){
+  if(!d || !d.group) return;
+  d.group.traverse(o => { if(o.isPoints){ o.geometry.dispose(); o.material.dispose(); } });
+  if(d.group.parent) d.group.parent.remove(d.group);
+}
+
+function endDots(){
+  if(DOTS) disposeDots(DOTS);
+  DOTS = null;
+}
+
+// which squares show dots, which the flat texture: the dots wherever no patch is in
+// (all of them while one whole model is built), else the flat squares as before
+function groundVis(){
+  const dots = DOTS && DOTS.group && !DOTS.suspended;
+  if(dots){
+    for(const [id, pts] of DOTS.cells){
+      const it = PATCHES && PATCHES.items.get(id);
+      pts.visible = !(it && it.obj);
+      pts.material.userData.uBuild.value = DOTS.all || (it && it.state === 'building') ? 1 : 0;
+    }
+  }
+  if(PATCHES) for(const sq of PATCHES.flat.children){
+    const it = PATCHES.items.get(sq.name.slice(5));
+    sq.visible = !(it && it.obj) && !dots;
+  }
+}
+
+// ----------------------------------------------------------------- build from a point
+// Which part of a big map is built first: where you look, or a point you pick (it
+// stays first until you go back to following the view). A beam marks it.
+let buildPicking = false, buildMark = null;
+
+function markBuildPoint(p){
+  if(buildMark){ scene.remove(buildMark); buildMark.traverse(o => { if(o.geometry) o.geometry.dispose(); if(o.material) o.material.dispose(); }); buildMark = null; }
+  if(!p) return;
+  buildMark = new THREE.Group(); buildMark.name = 'Build from here';
+  const ring = new THREE.Mesh(new THREE.RingGeometry(18, 24, 48), new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide, toneMapped: false }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.6;
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 160, 12, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xffb020, transparent: true, opacity: 0.55, depthWrite: false, toneMapped: false }));
+  beam.position.y = 80;
+  buildMark.add(ring, beam);
+  buildMark.position.set(p.x, 0, p.z);
+  scene.add(buildMark);
+}
+
+function buildFromUI(){
+  const b = $('#btnBuildFrom');
+  if(!b) return;
+  b.hidden = !PATCHES || PATCHES.finished;
+  b.textContent = buildPicking ? 'Click the map where to build first…' : PATCHES && PATCHES.pin ? 'Follow the view again' : 'Build from a point';
+}
+
+// the last part of the frame: the dots' clock and brightness
+function dotsTick(){
+  if(!DOTS || !DOTS.group) return;
+  DOTS_U.uTime.value = performance.now() / 1000;
+  DOTS_U.uLift.value = 1 / Math.max(renderer.toneMappingExposure, 1e-3);
 }
 
 // the parts of the model the server builds again on their own (app/model3d.py)
@@ -1557,6 +1734,7 @@ function unstage(st){
 async function startPhoto(){
   if(!world || busy || BAKE.busy) return;
   if(photo && photo.on){ stopPhoto(); return; }
+  if(DOTS && DOTS.group){ DOTS.group.visible = false; DOTS.suspended = true; groundVis(); }
   busy = true;
   note('Preparing the photo render: building the ray-tracing structure of the scene…');
   await new Promise(r => setTimeout(r, 30));
@@ -1631,6 +1809,7 @@ function wetForPhoto(on){
 }
 
 function stopPhoto(why){
+  if(DOTS && DOTS.group && DOTS.suspended){ DOTS.group.visible = true; DOTS.suspended = false; groundVis(); }
   if(!photo || !photo.on) return;
   photo.on = false;
   wetForPhoto(false);
@@ -2782,6 +2961,7 @@ function loop(){
   if(!visible){ running = false; return; }
   walk();
   if(!(photo && photo.on)) controls.update();                        // the photo's camera stays exactly put
+  dotsTick();
   draw();
   requestAnimationFrame(loop);
 }
@@ -2801,6 +2981,37 @@ window.addEventListener('view3d', e => {
   if(!running){ running = true; requestAnimationFrame(loop); }
 });
 $('#btnScene3d').addEventListener('click', () => generate(false));
+// the map as dots while it is built, and where a big map is built first
+$('#dotsLook').value = DOTS_PREF.look; $('#dotsColour').value = DOTS_PREF.colours;
+const saveDots = () => { try{ localStorage.setItem('rta.dots', JSON.stringify(DOTS_PREF)); }catch(_){} };
+$('#dotsLook').addEventListener('change', () => {
+  DOTS_PREF.look = $('#dotsLook').value; saveDots();
+  if(DOTS_PREF.look !== 'dots'){ endDots(); groundVis(); if(world) world.visible = true; }
+  else if(PATCHES && renderer) showDots(PATCHES.gid, false);
+});
+$('#dotsColour').addEventListener('change', () => {
+  DOTS_PREF.colours = $('#dotsColour').value; saveDots();
+  DOTS_U.uHeight.value = DOTS_PREF.colours === 'height' ? 1 : 0;
+});
+$('#btnBuildFrom').addEventListener('click', () => {
+  if(!PATCHES) return;
+  if(buildPicking){ buildPicking = false; host.style.cursor = ''; }
+  else if(PATCHES.pin){ PATCHES.pin = null; markBuildPoint(null); PATCHES.focusAt = 0; patchFocus(); }
+  else{ buildPicking = true; host.style.cursor = 'crosshair'; }
+  buildFromUI();
+});
+host.addEventListener('click', e => {
+  if(!buildPicking) return;
+  buildPicking = false; host.style.cursor = '';
+  const p = PATCHES && onGround(rayAt(e.clientX, e.clientY));
+  if(p){
+    PATCHES.pin = [p.x, p.z]; markBuildPoint(p); PATCHES.focusAt = 0; patchFocus();
+    note('Building from the point you picked: the patches round it come first, wherever you look. '
+      + 'Press Follow the view again to build where you look.');
+  }
+  buildFromUI();
+  e.stopPropagation();
+}, true);
 $('#btnScene3dUpdate').addEventListener('click', () => generate(true));
 window.addEventListener('materials', staleCheck);
 // settings changed in the Generate tab show when coming back here
