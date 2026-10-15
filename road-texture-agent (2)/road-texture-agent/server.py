@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-merge1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -3662,6 +3662,101 @@ async def no_cache_for_interface(request, call_next):
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store, must-revalidate"
     return response
+
+
+# --------------------------------------------------------------- coordinates
+# The Generate tab's other input: an area by its coordinates, downloaded through
+# Universal Maps Downloader as a satellite map and a street map, the alpha made from the
+# street map's roads (app/coords.py). Its files: workspace/coords/<area key>/.
+COORDS = WORK / "coords"
+
+
+@app.get("/api/coords/settings")
+def coords_settings():
+    from app import coords as CO
+    return CO.load_settings(COORDS)
+
+
+@app.post("/api/coords/settings")
+def coords_settings_save(payload: dict):
+    from app import coords as CO
+    s = CO.load_settings(COORDS)
+    for k in ("downloader", "pbf"):
+        if k in payload:
+            s[k] = str(payload[k] or "").strip().strip('"')
+    if "zoom" in payload:
+        try:
+            s["zoom"] = max(15, min(22, int(payload["zoom"])))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "zoom: a whole number, 15 to 22")
+    return CO.save_settings(COORDS, s)
+
+
+@app.post("/api/coords/estimate")
+def coords_estimate(payload: dict):
+    from app import coords as CO
+    try:
+        return CO.estimate(payload.get("bounds") or {}, payload.get("zoom", 20))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _coords_register(alpha_path, info):
+    """An area's alpha as a street mask (a copy, so asking for the area again leaves this one as it was)."""
+    image_id = uuid.uuid4().hex[:12]
+    path = UPLOADS / f"{image_id}.png"
+    import shutil
+    shutil.copyfile(alpha_path, path)
+    w, h = I.size_of(path)
+    meta = {"pair": "", "road_px": I.road_pixels(path), "coords": info}
+    l, r, t, b = info["bounds"]
+    name = f"area {t:.5f}N {l:.5f}E, zoom {info['zoom']}.png"
+    mem.add_image(image_id, "gen_mask", name, path, w, h, I.sha256_file(path), meta)
+    step = mem.record("upload", f"alpha from coordinates: {name} ({w} x {h})",
+                      {"image_id": image_id, "role": "gen_mask", "width": w, "height": h, "coords": info})
+    return {"id": image_id, "role": "gen_mask", "name": name, "width": w, "height": h,
+            "url": f"/api/image/{image_id}", "step": step, **meta}
+
+
+@app.post("/api/coords/start")
+def coords_start(payload: dict):
+    from app import coords as CO
+    s = CO.load_settings(COORDS)
+    try:
+        jid = CO.start(payload.get("bounds") or {}, payload.get("zoom", s.get("zoom", 20)), s, COORDS,
+                       _coords_register, jid=str(payload["progress"])[:64] if payload.get("progress") else None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"job": jid}
+
+
+@app.get("/api/coords/job/{jid}")
+def coords_job(jid: str):
+    from app import coords as CO
+    st = CO.job_state(jid)
+    if not st:
+        raise HTTPException(404, "unknown job")
+    return st
+
+
+@app.post("/api/coords/cancel/{jid}")
+def coords_cancel(jid: str):
+    from app import coords as CO
+    return {"ok": CO.cancel(jid)}
+
+
+@app.get("/api/coords/area/{key}/{name}")
+def coords_file(key: str, name: str):
+    """An area's picture: satellite, street, alpha, check (the alpha's edge over the satellite), overlay."""
+    files = {"satellite": "satellite_preview.jpg", "street": "street_preview.png", "alpha": "alpha_preview.png",
+             "check": "check_preview.jpg", "overlay": "overlay.png", "satellite_full": "satellite.png",
+             "street_full": "street.png", "alpha_full": "alpha.png"}
+    if not re.fullmatch(r"[0-9a-f]{12}", key) or name not in files:
+        raise HTTPException(404, "unknown file")
+    path = COORDS / key / files[name]
+    if not path.is_file():
+        raise HTTPException(404, "not made yet")
+    return FileResponse(path)
 
 
 app.mount("/", StaticFiles(directory=ROOT / "ui", html=True), name="ui")

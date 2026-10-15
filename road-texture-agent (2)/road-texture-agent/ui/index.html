@@ -317,6 +317,18 @@
   .btn.secondary.attention{ border-color:var(--blue); box-shadow:0 0 0 2px rgba(70,130,220,.45); color:#fff; }
   .btn.attention{ box-shadow:0 0 0 2px rgba(70,130,220,.55); }
   .btn.secondary.toggle[aria-pressed="true"]{ background:rgba(70,130,220,.28); border-color:var(--blue); }
+  .co-grid{ display:grid; grid-template-columns:1fr 1fr; gap:6px 8px; margin:2px 0 4px; }
+  .co-grid label, .co-files label{ display:grid; gap:3px; color:var(--muted); font-size:12px; }
+  .co-grid input, .co-files input{ background:var(--field); border:1px solid var(--line); border-radius:4px; padding:5px 7px; width:100%; min-width:0; color:var(--ink); font:inherit; }
+  .co-files{ margin-top:6px; } .co-files summary{ cursor:pointer; color:var(--muted); font-size:12.5px; }
+  .co-files label{ margin-top:6px; } .co-files summary span{ color:var(--faint); }
+  .co-bar{ position:relative; height:18px; border-radius:4px; background:var(--field); border:1px solid var(--line); margin-top:8px; overflow:hidden; }
+  .co-bar i{ position:absolute; left:0; top:0; bottom:0; width:0; background:rgba(70,130,220,.55); transition:width .4s; }
+  .co-bar span{ position:relative; display:block; font-size:11.5px; line-height:18px; padding:0 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .co-thumbs{ display:grid; grid-template-columns:repeat(4, 1fr); gap:6px; margin-top:8px; }
+  .co-thumbs figure{ margin:0; cursor:pointer; } .co-thumbs .thumb{ width:100%; height:52px; }
+  .co-thumbs .thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+  .co-thumbs figcaption{ font-size:11px; color:var(--muted); text-align:center; margin-top:2px; }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
   .note.bad{ color:var(--red); }
 
@@ -549,6 +561,38 @@
       <section class="panel">
         <div class="panel-h">Input</div>
         <div class="panel-b tight">
+          <div class="btn-row" id="inputMode" style="margin-bottom:6px">
+            <button type="button" class="btn secondary toggle" data-mode="alpha" aria-pressed="true" style="margin-top:0">Alpha map</button>
+            <button type="button" class="btn secondary toggle" data-mode="coords" aria-pressed="false" style="margin-top:0">Coordinates</button>
+          </div>
+          <div id="coordsBox" hidden>
+            <div class="co-grid">
+              <label>Left longitude<input type="number" id="coLeft" step="0.0001" placeholder="46.6702"></label>
+              <label>Right longitude<input type="number" id="coRight" step="0.0001" placeholder="46.6735"></label>
+              <label>Top latitude<input type="number" id="coTop" step="0.0001" placeholder="24.7198"></label>
+              <label>Bottom latitude<input type="number" id="coBottom" step="0.0001" placeholder="24.7178"></label>
+            </div>
+            <div class="field"><label for="coZoom">Zoom</label><input type="number" id="coZoom" min="15" max="22" step="1" value="20"></div>
+            <div class="note" id="coEstimate">Decimal degrees, as in the OSM tool. Zoom 20: 0.136 m a pixel in Riyadh.</div>
+            <details class="co-files" id="coFiles">
+              <summary>Downloader and PBF <span id="coFilesState"></span></summary>
+              <label>Universal Maps Downloader: downloader.exe (with combiner.exe beside it)
+                <input type="text" id="coDownloader" spellcheck="false" placeholder="C:\…\Universal Maps Downloader\downloader.exe"></label>
+              <label>Saudi Arabia OSM file (.osm.pbf)
+                <input type="text" id="coPbf" spellcheck="false" placeholder="C:\…\gcc-states-latest.osm.pbf"></label>
+              <div class="note" id="coFilesNote">Paste each file's full path (in Explorer: Shift + right-click the file, Copy as path).</div>
+            </details>
+            <button type="button" class="btn" id="btnCoords">Download and make the alpha</button>
+            <button type="button" class="btn secondary" id="btnCoordsStop" hidden>Stop</button>
+            <div class="co-bar" id="coBar" hidden><i></i><span></span></div>
+            <div class="co-thumbs" id="coThumbs" hidden>
+              <figure data-k="satellite"><div class="thumb"></div><figcaption>Satellite</figcaption></figure>
+              <figure data-k="street"><div class="thumb"></div><figcaption>Street map</figcaption></figure>
+              <figure data-k="alpha"><div class="thumb"></div><figcaption>Alpha</figcaption></figure>
+              <figure data-k="check"><div class="thumb"></div><figcaption>Check</figcaption></figure>
+            </div>
+            <div class="note" id="coNote"></div>
+          </div>
           <div class="imgrow" id="genMaskRow">
             <div class="thumb">+</div>
             <div><div class="imgrow-t">Street mask</div><div class="imgrow-s">White is road</div></div>

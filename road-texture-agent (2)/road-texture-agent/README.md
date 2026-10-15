@@ -81,6 +81,48 @@ file: `UPDATE_NOTES.md`, `MARKING_LOGIC_FIX.txt`, `SAUDI_FIT_UPDATE.txt` and
   to gap ratio comes from the line image measured in priming; the cycle length
   in metres and the marking width are yours to set.
 
+## Coordinates instead of an alpha map
+
+The Generate tab's **Input** has two choices: *Alpha map* (load a black and white
+street mask, as always) and **Coordinates** (an area of Riyadh, or anywhere, by its
+Left and Right longitude and its Top and Bottom latitude, in decimal degrees as in
+the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
+
+- **What it needs** (*Downloader and PBF*, saved once): the path of Universal Maps
+  Downloader's `downloader.exe` (with `combiner.exe` beside it), and the Saudi
+  Arabia OSM file (`.osm.pbf`). The downloader's path is taken from the OSM tool's
+  settings when it has one, and the OSM tool's road index of the PBF is used when it
+  has made one (its first reading of the whole file takes several minutes; else the
+  program makes its own, once, in `workspace/coords/osm_index`). Without the PBF the
+  alpha is made without the OSM check below.
+- **As you type** the size of the area shows: metres, pixels, metres a pixel and
+  tiles a map. One area is at most 80 million pixels and 1,600 tiles a map (about
+  1.4 × 1.4 km at zoom 20).
+- **Download and make the alpha** runs in the background, its bar under the button
+  and its line in the console with the time left: the **satellite map** (Google
+  Satellite, map id 1) and the **street map without labels** (Google Street Map, id
+  66) are downloaded and combined to TIFFs in metres, both cut to the same pixels
+  (the satellite's own, not resampled), the satellite's **missing tiles** found
+  (whole tiles of one flat white or black: they come out as red squares on the
+  check picture and count as unseen in the analysis), the **OSM roads** of the PBF
+  drawn over the area, and the **alpha** made from the street map: its white and
+  its yellow to orange (the streets and the main roads), small holes in a road
+  filled (the one-way arrows drawn on a street), small specks dropped, and, with
+  the PBF, any white area with no OSM road within 15 m left out (a plaza, a
+  car park). The colours can be tuned in `workspace/coords/palette.json` (the
+  built-in ones, in `app/coords.py`, when it is not there).
+- **Then** the alpha is the street mask, its scale set from the zoom and the
+  latitude, and the four thumbnails show under the coordinates: Satellite, Street
+  map, Alpha and **Check** (the alpha's edge in amber and the OSM roads in cyan over
+  the satellite). Click one to see it in the viewport. **Generate texture** works
+  from it as from a loaded mask.
+- **Every area keeps its files** in `workspace/coords/<key>/` (satellite, street
+  map, alpha and overlay as PNGs with world files, the OSM roads as GeoJSON, the
+  downloads): asking for the same area at the same zoom again downloads nothing.
+- The street map's roads are drawn by Google at map widths, close to but not
+  exactly the asphalt. The alpha keeps them; the satellite is for the details
+  (the analysis, next).
+
 ## Memory tab and the ordered libraries
 
 Every pair keeps its own library for each part of the road: junction, kerb and

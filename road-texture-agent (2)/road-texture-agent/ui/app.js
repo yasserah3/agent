@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-merge1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords1';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -816,7 +816,11 @@ const UI_VERSION = '2026.10.15-merge1';   // must match VERSION in server.py
   const loadGen = () => pick(async f => {
     status('Uploading…');
     try{
-      const rec = await upload(f, 'gen_mask');
+      await useGenMask(await upload(f, 'gen_mask'));
+    }catch(e){ log('Upload failed: ' + e.message, 'bad'); status('Upload failed.'); }
+  });
+  // a street mask to generate from: a loaded alpha map, or an area's alpha from its coordinates
+  async function useGenMask(rec){
       S.gen.mask = rec; S.gen.junctions = null;
       drawInto($('.thumb', genRow), rec.img);
       $('.imgrow-s', genRow).textContent = `${rec.name}, ${rec.width} × ${rec.height}`;
@@ -838,9 +842,125 @@ const UI_VERSION = '2026.10.15-merge1';   // must match VERSION in server.py
         drawBridges();
       }catch(_){}
       status('Ready.'); updateGen(); renderInfo(); renderMemory();
-    }catch(e){ log('Upload failed: ' + e.message, 'bad'); status('Upload failed.'); }
-  });
+  }
   $('.load', genRow).addEventListener('click', e => { e.stopPropagation(); loadGen(); });
+
+  /* ---- Coordinates: an area by its longitudes and latitudes, downloaded through Universal Maps
+     Downloader as a satellite map and a street map; the street map's roads are the alpha
+     (app/coords.py). The satellite is for the analysis of the next steps. */
+  const CO = { running: false, job: null, area: null };
+  function setInputMode(m){
+    $$('#inputMode button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
+    $('#coordsBox').hidden = m !== 'coords';
+    try{ localStorage.setItem('rta.inputMode', m); }catch(_){}
+    if(m === 'coords') coEstimate();
+  }
+  $$('#inputMode button').forEach(b => b.addEventListener('click', () => setInputMode(b.dataset.mode)));
+  const CO_FIELDS = ['coLeft', 'coRight', 'coTop', 'coBottom'];
+  const coBounds = () => ({ left: +$('#coLeft').value, right: +$('#coRight').value, top: +$('#coTop').value, bottom: +$('#coBottom').value });
+  const coFilled = () => CO_FIELDS.every(k => $('#' + k).value.trim() !== '');
+  const fmtLen = m => m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
+  let coEstTimer = null;
+  function coEstimate(){
+    clearTimeout(coEstTimer);
+    coEstTimer = setTimeout(async () => {
+      try{ localStorage.setItem('rta.coords', JSON.stringify(Object.fromEntries(CO_FIELDS.map(k => [k, $('#' + k).value])))); }catch(_){}
+      const el = $('#coEstimate');
+      if(!coFilled()){ el.className = 'note'; el.textContent = 'Decimal degrees, as in the OSM tool. Zoom 20: 0.136 m a pixel in Riyadh.'; $('#btnCoords').disabled = true; return; }
+      try{
+        const e = await api('/api/coords/estimate', { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ bounds: coBounds(), zoom: +$('#coZoom').value }) });
+        el.className = e.ok ? 'note' : 'note bad';
+        el.textContent = `${fmtLen(e.width_m)} × ${fmtLen(e.height_m)} · ${fmt(e.width_px)} × ${fmt(e.height_px)} px · ${e.mpp.toFixed(3)} m a pixel · ${fmt(e.tiles)} tiles a map`
+          + (e.ok ? '' : `. Too big: ${e.problems.join('; ')}.`);
+        $('#btnCoords').disabled = !e.ok || CO.running;
+      }catch(err){ el.className = 'note bad'; el.textContent = err.message; $('#btnCoords').disabled = true; }
+    }, 250);
+  }
+  CO_FIELDS.concat(['coZoom']).forEach(k => $('#' + k).addEventListener('input', coEstimate));
+  async function coSettings(save){
+    try{
+      const s = save ? await api('/api/coords/settings', { method:'POST', headers:{'Content-Type':'application/json'},
+                         body: JSON.stringify({ downloader: $('#coDownloader').value, pbf: $('#coPbf').value, zoom: +$('#coZoom').value }) })
+                     : await api('/api/coords/settings');
+      $('#coDownloader').value = s.downloader || ''; $('#coPbf').value = s.pbf || '';
+      if(!save) $('#coZoom').value = s.zoom || 20;
+      const from = [s.downloader_from && `downloader from ${s.downloader_from}`, s.pbf_from && `PBF from ${s.pbf_from}`].filter(Boolean);
+      $('#coFilesState').textContent = s.downloader ? (s.pbf ? '· set' : '· no PBF') : '· not set';
+      $('#coFilesNote').textContent = (from.length ? `Found: ${from.join(', ')}. ` : '')
+        + 'Paste each file\'s full path (in Explorer: Shift + right-click the file, Copy as path). Without the PBF the alpha is made without the OSM check.';
+      if(!s.downloader) $('#coFiles').open = true;
+      return s;
+    }catch(e){ $('#coFilesNote').textContent = e.message; return null; }
+  }
+  ['coDownloader', 'coPbf'].forEach(k => $('#' + k).addEventListener('change', () => coSettings(true)));
+  function coBar(frac, text){
+    const b = $('#coBar'); b.hidden = false;
+    $('i', b).style.width = `${Math.round(Math.max(0, Math.min(1, frac || 0)) * 100)}%`;
+    $('span', b).textContent = text;
+  }
+  async function coShowArea(area){
+    CO.area = area;
+    const v = Date.now().toString(36);
+    $$('#coThumbs figure').forEach(f => {
+      const img = new Image(); img.src = `${API}/api/coords/area/${area.key}/${f.dataset.k}?v=${v}`;
+      img.alt = f.dataset.k; $('.thumb', f).innerHTML = ''; $('.thumb', f).appendChild(img);
+    });
+    $('#coThumbs').hidden = false;
+    const a = area.alpha || {};
+    const bits = [`${fmt(area.width)} × ${fmt(area.height)} px at ${area.mpp.toFixed(3)} m a pixel`];
+    if(area.osm_roads != null) bits.push(`${fmt(area.osm_roads)} OSM road ways, ${Math.round((area.osm_on_road || 0) * 100)}% of them on the alpha's roads`);
+    if(a.far_from_osm) bits.push(`${a.far_from_osm} white area(s) with no OSM road near left out (${fmt(Math.round(a.far_from_osm_m2))} m²)`);
+    if(area.missing_tiles) bits.push(`${area.missing_tiles} satellite tile(s) missing`);
+    $('#coNote').className = area.missing_tiles ? 'note bad' : 'note';
+    $('#coNote').textContent = bits.join('; ') + '. Check: the alpha\'s edge (amber) and the OSM roads (cyan) over the satellite.';
+  }
+  $$('#coThumbs figure').forEach(f => f.addEventListener('click', async () => {
+    if(!CO.area) return;
+    const img = await loadImage(`${API}/api/coords/area/${CO.area.key}/${f.dataset.k}?v=${Date.now().toString(36)}`);
+    genVp.show(img, { satellite: 'Satellite', street: 'Street map', alpha: 'Alpha', check: 'Check: the alpha\'s edge and the OSM roads over the satellite' }[f.dataset.k]);
+  }));
+  async function coStart(){
+    if(CO.running) return;
+    const s = await coSettings(true);
+    if(!s || !s.downloader){ log('Coordinates: set the path of Universal Maps Downloader\'s downloader.exe first (Downloader and PBF).', 'bad'); $('#coFiles').open = true; return; }
+    const job = trackJob('Coordinates: downloading the maps and making the alpha');
+    CO.running = true; $('#btnCoords').disabled = true; $('#btnCoordsStop').hidden = false;
+    coBar(0, 'starting…');
+    const end = (ok, extra) => { job.done(ok, extra); CO.running = false; CO.job = null; $('#btnCoordsStop').hidden = true; coEstimate(); };
+    try{
+      const r = await api('/api/coords/start', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ bounds: coBounds(), zoom: +$('#coZoom').value, progress: job.id }) });
+      CO.job = r.job;
+      for(;;){
+        await new Promise(res => setTimeout(res, 1000));
+        const st = await api('/api/coords/job/' + r.job);
+        if(st.state === 'queued' || st.state === 'running'){
+          coBar(st.done, `${st.stage || 'waiting for the downloader'}${st.done != null ? ` · ${Math.floor(st.done * 100)}%` : ''}${st.left != null ? ` · about ${fmtTime(st.left)} left` : ''}`);
+          continue;
+        }
+        if(st.state !== 'done'){ coBar(0, st.error || st.state); log('Coordinates: ' + (st.error || st.state), 'bad'); end(false, st.error || st.state); return; }
+        const { area, mask } = st.result;
+        coBar(1, 'done');
+        mask.img = await loadImage(API + mask.url);
+        await coShowArea(area);
+        $('#scale').value = +area.mpp.toFixed(4);
+        $('#scale').dispatchEvent(new Event('change', { bubbles: true }));
+        await useGenMask(mask);
+        S.gen.coords = area;
+        log(`Coordinates: the alpha is the street mask (${fmt(area.width)} × ${fmt(area.height)} px, scale ${area.mpp.toFixed(4)} m a pixel): press Generate texture.`, 'ok');
+        end(true, `${fmt(area.width)} × ${fmt(area.height)} px`);
+        return;
+      }
+    }catch(e){ coBar(0, e.message); log('Coordinates: ' + e.message, 'bad'); end(false, e.message); }
+  }
+  $('#btnCoords').addEventListener('click', coStart);
+  $('#btnCoordsStop').addEventListener('click', () => { if(CO.job) api('/api/coords/cancel/' + CO.job, { method:'POST' }).catch(() => {}); });
+  try{
+    const saved = JSON.parse(localStorage.getItem('rta.coords') || '{}');
+    CO_FIELDS.forEach(k => { if(saved[k] != null) $('#' + k).value = saved[k]; });
+  }catch(_){}
+  coSettings(false).then(() => { let m = 'alpha'; try{ m = localStorage.getItem('rta.inputMode') || 'alpha'; }catch(_){} setInputMode(m); });
   genRow.addEventListener('click', () => S.gen.mask ? genVp.show(S.gen.mask.img, `Mask, ${S.gen.mask.width} × ${S.gen.mask.height}`) : loadGen());
   $('#genMaskPrev').addEventListener('click', () => { if(S.gen.mask) genVp.show(S.gen.mask.img, 'Mask'); });
 
