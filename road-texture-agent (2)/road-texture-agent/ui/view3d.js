@@ -917,11 +917,13 @@ async function generate(keep = false){
   // a whole new model: the map as dots meanwhile, every square of it being built (the
   // last model hidden; an update keeps the view as it is)
   const fresh = !(keep && world);
-  if(fresh) showDots(gid, true).then(d => {
+  const shown = fresh ? showDots(gid, true).then(d => {
     if(!d || DOTS !== d) return;
     if(world) world.visible = false;
     if(!world || !keep) frame(new THREE.Vector3(0, 0, 0), Math.max(60, Math.hypot(...d.head.size_m) / 2));
-  });
+  }) : null;
+  // the dots first, as for patches: alongside the model's build (the same process) they come many times slower
+  if(shown) await Promise.race([shown, new Promise(r => setTimeout(r, 10000))]);
   try{
     const r = await fetch('/api/export3d', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...window.exportSettings(), generation: gid, mesh: 'tiled', progress: job ? job.id : undefined,
@@ -1010,8 +1012,10 @@ async function generatePatches(keep, gid){
   stopPhoto();
   const update = keep && PATCHES && PATCHES.gid === gid && world;
   const job = window.trackJob ? window.trackJob(update ? 'Updating the 3D scene (patches)' : 'Building the 3D scene in 1 km patches') : null;
-  // the dots asked for at once, alongside the patches (the server makes them in seconds)
+  // the dots first, then the patches: alone the server makes them in about a second (2.2 x 1.7 km
+  // map), alongside the map's preparation for the patches (the same process) they took 17 s
   const early = !update && DOTS_PREF.look === 'dots' ? loadDots(gid).catch(e => { console.warn('Dots:', e); return null; }) : null;
+  if(early) await Promise.race([early, new Promise(r => setTimeout(r, 10000))]);
   try{
     const t = controls.target;
     const r = await fetch('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },

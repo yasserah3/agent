@@ -999,8 +999,11 @@ from the first seconds, and you see what is being built:
   object a cloud on the ellipsoid that fills its box, standing up from the map.
   At most 2.5 million, so the spacing grows with the map: 1.2 m on the 2.2 ×
   1.7 km map of narrow streets, 2.6 m on the 4.8 × 3.6 km one, 6.6 m on the
-  12 × 9 km city (0.5 m at least). Made in about 4 to 7 s the first time, kept
-  on disk after that (0.2 s), about 38 MB to the browser.
+  12 × 9 km city (0.5 m at least). Made in about 1 to 7 s the first time (1.3 s
+  for the 2.2 × 1.7 km map), kept on disk after that (0.2 s), about 38 MB to
+  the browser. They are asked for first and the build starts when they are in
+  (10 s at most): made alongside the build's preparation, in the same server
+  process, the same dots took 17 s.
 - **Colours**: *By height* (blue on the road, cyan on the sidewalks and blocks,
   green to yellow up the objects, on a log scale so a 10 cm kerb shows as well
   as a 20 m tree; markings brighter), or *The map's own
