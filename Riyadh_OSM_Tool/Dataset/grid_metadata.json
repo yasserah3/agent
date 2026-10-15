@@ -1,0 +1,20 @@
+{
+  "source": "gcc-states-261011.osm.pbf",
+  "bounds_wgs84": [
+    46.4832,
+    47.0222,
+    24.9823,
+    24.5375
+  ],
+  "crs": "EPSG:32638",
+  "square_size_m": 500,
+  "grid_anchor": "Multiples of 500 UTM metres",
+  "candidate_squares": 7938,
+  "selected_squares": 40,
+  "selected_min_road_length_m": 8068.02,
+  "selected_min_coverage_bins": 25,
+  "method": "Clipped motor-road length and occupied 100m subcells; excludes explicit unpaved surfaces, tracks, paths, construction, proposed and area roads.",
+  "limitation": "OSM coverage is not visual proof of paved surfaces. Regional node filtering uses a 0.02 degree buffer; segments with either endpoint outside the buffer are omitted.",
+  "zoom_recommendation": 20,
+  "source_sha256": "146b0eee40cd3e5d36f497dc834eff9cc62cead909308eb14c6f9ba7db6aa400"
+}
