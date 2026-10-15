@@ -614,6 +614,15 @@
       </section>
 
       <section class="panel">
+        <div class="panel-h">Project Area <small id="pareaCount"></small></div>
+        <div class="panel-b">
+          <div class="note" id="pareaNote" style="margin:0 0 6px">Load a street mask, then pick the islands (blocks, squares, traffic islands) your project takes.</div>
+          <div class="lanes-bar"><button type="button" id="btnParea" aria-pressed="false" disabled title="Click islands on the map to make them street; Done builds them in at once">Select islands</button>
+            <button type="button" id="btnPareaClear" disabled title="Take every island out of the Project Area">Clear</button></div>
+        </div>
+      </section>
+
+      <section class="panel">
         <div class="panel-h">Objects <small id="objCount"></small></div>
         <div class="panel-b">
           <button class="btn secondary" id="btnImportObj">Import object (GLB, OBJ, FBX)</button>
@@ -810,11 +819,6 @@
           <div class="note" id="mareaNote" style="margin:2px 0 6px">Markings everywhere. Markings area puts a rectangle on the map: lane lines and decals only inside it (move it, size it from its corners, turn it from its handle).</div>
           <div class="lanes-bar"><button type="button" id="btnMarea" aria-pressed="false" disabled title="A rectangle on the map: lane lines and decals only inside it">Markings area</button>
             <button type="button" id="btnMareaAll" disabled title="Take the area away: markings everywhere again">Everywhere</button></div>
-          <div style="margin-top:12px;font-weight:600;font-size:13px">Project areas</div>
-          <div class="note" id="pareaNote" style="margin:2px 0 6px">None. Add project area puts a rectangle on the map where your project goes: flat as the streets, in the street material, no sidewalks, kerbs or blocks, and no lane lines or decals inside (move it, size it from its corners, turn it from its handle).</div>
-          <div class="lanes-bar"><button type="button" id="btnParea" disabled title="A new rectangle in the middle of the view">Add project area</button>
-            <button type="button" id="btnPareaEdit" aria-pressed="false" disabled title="Move, size and turn the project areas; click one to choose it">Edit</button>
-            <button type="button" id="btnPareaDel" disabled title="Take the chosen project area away">Remove</button></div>
           <div class="field"><label for="quality">Quality (1 to 3)</label><input type="number" id="quality" value="1" step="1" min="1" max="3"></div>
           <div class="field"><label for="outScale">Output size</label>
             <select id="outScale" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">

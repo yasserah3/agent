@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords7"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords8"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1792,7 +1792,7 @@ def generate(payload: dict):
         "marks": marks,
         "line_ends": line_ends,
         "lane_picks": lane_picks,
-        "mark_area": _with_holes(mark_area, streets["areas"]),
+        "mark_area": mark_area,
         "nomark": streets["nomark"],
         **({"lines_mask": streets["lines_path"]} if streets["lines_path"] else {}),
         "metres_per_pixel": float(payload.get("scale", 0.25)),
@@ -1845,7 +1845,8 @@ def generate(payload: dict):
         mem.tick_cooldowns(part)
     mem.add_artifact(f"{gid}_map", "generation_map", map_path,
                      {"mask": rec["id"], "base_mask": base["id"], "streets_sig": streets["sig"],
-                      **({"project_areas": streets["areas"], "lines_path": streets["lines_path"]} if streets["areas"] else {}),
+                      **({"project_islands": streets["project_areas"], "lines_path": streets["lines_path"]}
+                         if streets["project_areas"] else {}),
                       "soft_edges": bool(payload.get("soft_edges", True)),
                       "nomark": streets["nomark_path"], "scale": float(payload.get("scale", 0.25)),
                       "output_scale": int(res.get("output_scale", 1)),
@@ -1889,46 +1890,59 @@ def _street_material(payload):
             "match": tone, "name": e["name"] + (" (toned to your material)" if tone else "")}
 
 
-def _inner_streets(rec, mpp):
-    """
-    The mask with the inner streets of its saved placements added (app/streets.py), and
-    its project areas (flat road): {"mask": the new mask's image record or None,
-    "nomark": where the inner streets carry no markings, its file, a signature of what
-    was added, a report, the shapes the 3D model lays exactly (the inner streets', and
-    the project areas' rectangles), "base_path": the mask it lays the other roads from
-    then, and with project areas "lines_path": the mask without them, which the lane
-    lines and junction markings are traced from (the streets go on under them; their
-    lines and decals stop at their edges: _with_holes)}.
-    """
-    out = {"mask": None, "nomark": None, "nomark_path": None, "sig": None, "report": [], "shapes": [],
-           "base_path": rec["path"], "project_areas": 0, "areas": [], "lines_path": None}
-    import hashlib
-    gray, add, nomark = None, None, None
+def _inner_part(rec, mpp):
+    """The inner streets of a mask's saved placements (app/streets.py): (grey mask, added, nomark, report, shapes), or Nones."""
     f = ARTIFACTS / f"scatter_{rec['id']}.json"
     sc = _scatter_for_export(json.loads(f.read_text()), parts=False) if f.exists() else None
     if sc and any((p.get("streets") or {}).get("cells") for p in sc["placements"]):
         gray = np.array(Image.open(rec["path"]).convert("L"))
-        add, nomark, out["report"], out["shapes"] = ST.inner_streets(gray > 127, mpp, sc["placements"], sc["objects"],
-                                                                     sc["packages"])
+        add, nomark, report, shapes = ST.inner_streets(gray > 127, mpp, sc["placements"], sc["objects"], sc["packages"])
+        return gray, add, nomark, report, shapes
+    return None, None, None, [], []
+
+
+def _inner_streets(rec, mpp):
+    """
+    The mask with the inner streets of its saved placements added (app/streets.py), and
+    the islands of its project area (road: flat, the street material, no sidewalks or
+    kerbs): {"mask": the new mask's image record or None, "nomark": where the inner
+    streets carry no markings, its file, a signature of what was added, a report, the
+    inner streets' shapes, which the 3D model lays exactly, "base_path": the mask it
+    lays the other roads from, and with a project area "lines_path": the mask without
+    it, which the lane lines, the junction markings and the decals are traced from (the
+    streets round its islands keep theirs as they were), "kerb_path": the mask with
+    only its islands added, which the 3D model's kerb line goes round, and
+    "project_areas": how many islands it has}.
+    """
+    out = {"mask": None, "nomark": None, "nomark_path": None, "sig": None, "report": [], "shapes": [],
+           "base_path": rec["path"], "project_areas": 0, "lines_path": None, "kerb_path": None}
+    import hashlib
+    gray, add, nomark, out["report"], out["shapes"] = _inner_part(rec, mpp)
     inner_on = bool(out["shapes"] or out["report"])
-    areas = _project_areas(rec)
-    if areas:
-        # the project areas: road (flat, the street material, no sidewalks, kerbs or blocks)
-        from shapely.geometry import Polygon
+    picks = _project_picks(rec)
+    if picks:
         gray = np.array(Image.open(rec["path"]).convert("L")) if gray is None else gray
-        out["project_areas"], out["areas"] = len(areas), areas
-        out["lines_path"] = rec["path"]
-        if add is not None and add.any():
-            lpath = UPLOADS / f"st{hashlib.sha1(np.packbits(add).tobytes()).hexdigest()[:10]}.png"
-            if not lpath.exists():
+        lab, isl = _ref_islands(rec, mpp, gray, add)
+        sel, ids = _project_island_mask(lab, picks)
+        if sel is not None:
+            out["project_areas"] = len(ids)
+            out["lines_path"] = rec["path"]
+            if add is not None and add.any():
+                lpath = UPLOADS / f"st{hashlib.sha1(np.packbits(add).tobytes()).hexdigest()[:10]}.png"
+                if not lpath.exists():
+                    g2 = gray.copy()
+                    g2[add] = 255
+                    Image.fromarray(g2).save(lpath)
+                out["lines_path"] = str(lpath)
+            # the 3D model: the mask without them (base_path) and the inner streets as before, the
+            # kerb line round the road with them made road
+            kpath = UPLOADS / f"pk{hashlib.sha1(np.packbits(sel).tobytes()).hexdigest()[:10]}.png"
+            if not kpath.exists():
                 g2 = gray.copy()
-                g2[add] = 255
-                Image.fromarray(g2).save(lpath)
-            out["lines_path"] = str(lpath)
-        out["shapes"] = list(out["shapes"]) + [{"road": Polygon(_area_corners(a)), "lines": [], "markings": False}
-                                               for a in areas]          # counted from the map's corner, as the inner streets
-        pa = _areas_mask(areas, gray.shape)
-        add = pa if add is None else (add | pa)
+                g2[sel] = 255
+                Image.fromarray(g2).save(kpath)
+            out["kerb_path"] = str(kpath)
+            add = sel if add is None else (add | sel)
     if add is None or not add.any():
         return out
     out["sig"] = hashlib.sha1(np.packbits(add).tobytes()).hexdigest()
@@ -1939,7 +1953,7 @@ def _inner_streets(rec, mpp):
         g2[add] = 255
         Image.fromarray(g2).save(path)
     if not mem.image(sid):
-        what = " + ".join(w for w, on in (("inner streets", inner_on), ("project areas", areas)) if on)
+        what = " + ".join(w for w, on in (("inner streets", inner_on), ("project area", out["project_areas"])) if on)
         mem.add_image(sid, "gen_mask_streets", f"{rec['name']} + {what or 'inner streets'}", path, gray.shape[1],
                       gray.shape[0], I.sha256_file(path), {"base": rec["id"]})
     out["mask"] = mem.image(sid)
@@ -2145,73 +2159,124 @@ def save_markarea(payload: dict):
     return {"ok": True, "area": area}
 
 
-# ------------------------------------------------------------------ project areas
-# Rectangles on the map (move, size, turn, as the markings area) where the project goes:
-# flat as the streets, in the street material, no sidewalks, kerbs or blocks, and no lane
-# lines or decals inside. Kept with the mask; Generate texture builds them in (the mask
-# copy the texture, the junctions and the 3D model are made from: _inner_streets).
-def _with_holes(area, holes):
-    """The markings area with a texture's project areas as holes in it (app/lanes.py): no lines or decals there."""
-    return LN.area_check(dict(area or {}, holes=holes)) if holes else area
-
-
-def _gen_holes(gid):
-    """The project areas a texture was generated with (its map's meta), [] for none."""
-    art = mem.artifact(f"{gid}_map")
-    return (art["meta"] or {}).get("project_areas") or [] if art else []
+# ------------------------------------------------------------------ project area
+# The islands (blocks, squares, traffic islands: the areas between the roads) picked for
+# the project: each becomes road, flat as the streets, in the street material, with no
+# sidewalks or kerbs, and none are added round it (the streets round it keep theirs, and
+# their lines and markings). Picked on the map by clicking them; kept with the mask by a
+# point well inside each, as the island material slots. Generate texture builds them in
+# (_inner_streets: the mask copy the texture and the 3D model are made from).
+_REF_ISLANDS = {}            # the islands picked from, for the last few masks
 
 
 def _projarea_key(rec):
     return f"projareas_{(rec.get('sha256') or rec['id'])[:20]}"
 
 
-def _project_areas(rec):
+def _project_picks(rec):
+    """A mask's project area: a point in each of its islands ([x, y], mask pixels), [] for none."""
     art = mem.artifact(_projarea_key(rec)) if rec else None
     if not art or not Path(art["path"]).exists():
         return []
     try:
-        return [a for a in (LN.area_check(x) for x in json.loads(Path(art["path"]).read_text()).get("areas") or []) if a]
-    except (OSError, ValueError):
+        raw = json.loads(Path(art["path"]).read_text()).get("picks") or []
+        return [[float(p[0]), float(p[1])] for p in raw if isinstance(p, (list, tuple)) and len(p) == 2]
+    except (OSError, ValueError, TypeError):
         return []
 
 
-def _area_corners(a):
-    """A rectangle's four corners (its own pixels)."""
-    r = math.radians(a["angle"])
-    ux, uy, vx, vy = math.cos(r), math.sin(r), -math.sin(r), math.cos(r)
-    return [(a["cx"] + ux * a["w"] / 2 * i + vx * a["h"] / 2 * j, a["cy"] + uy * a["w"] / 2 * i + vy * a["h"] / 2 * j)
-            for i, j in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+def _ref_islands(rec, mpp, gray, inner_add):
+    """
+    The islands a project area is picked from: those of the mask with its inner streets,
+    numbered as a texture without a project area numbers them (app/islands.py): (label
+    picture, list). Kept on disk, and for the last few masks in memory.
+    """
+    import hashlib
+    sig = hashlib.sha1(np.packbits(inner_add).tobytes()).hexdigest()[:10] if inner_add is not None and inner_add.any() else "none"
+    key = f"projisl_{rec['id']}_{sig}_{round(float(mpp), 4)}"
+    if key in _REF_ISLANDS:
+        return _REF_ISLANDS[key]
+    jp, npz = ARTIFACTS / f"{key}.json", ARTIFACTS / f"{key}.npz"
+    got = None
+    if jp.exists() and npz.exists():
+        try:
+            got = (ISL.load_labels(npz), json.loads(jp.read_text())["islands"])
+        except (OSError, ValueError, KeyError):
+            got = None
+    if got is None:
+        g = gray.copy()
+        if inner_add is not None and inner_add.any():
+            g[inner_add] = 255
+        lab, isl = ISL.find(g, mpp)
+        ISL.save(lab, isl, mpp, jp, npz)
+        got = (lab, isl)
+    _REF_ISLANDS[key] = got
+    for k in list(_REF_ISLANDS)[:-3]:
+        _REF_ISLANDS.pop(k)
+    return got
 
 
-def _areas_mask(areas, shape):
-    """Where the project areas lie: a boolean picture of shape (mask pixels, each pixel's middle inside)."""
-    yy, xx = np.mgrid[0:shape[0], 0:shape[1]]
-    inside = np.zeros(shape, bool)
-    for a in areas:
-        a1 = LN.area_scaled(a, 1)
-        r = math.hypot(a1["w"], a1["h"]) / 2
-        y0, y1 = max(0, int(a1["cy"] - r) - 1), min(shape[0], int(a1["cy"] + r) + 2)
-        x0, x1 = max(0, int(a1["cx"] - r) - 1), min(shape[1], int(a1["cx"] + r) + 2)
-        if y0 < y1 and x0 < x1:
-            inside[y0:y1, x0:x1] |= LN.in_area(a1, xx[y0:y1, x0:x1], yy[y0:y1, x0:x1])
-    return inside
+def _project_ids(lab, picks):
+    """The islands (numbers) the picks lie in, each once, in order."""
+    return sorted({ISL.label_at(lab, x, y) for x, y in picks} - {0})
+
+
+def _project_island_mask(lab, picks):
+    """
+    The picked islands as road: (the mask pixels they make road, their numbers), or
+    (None, []) when no pick lies in an island. Each reaches two pixels into the road round
+    it (never into another island), so it joins the streets with no seam: no kerb or
+    sidewalk is left along its edge, and none is added.
+    """
+    from scipy import ndimage as ndi
+    ids = _project_ids(lab, picks)
+    if not ids:
+        return None, []
+    sel = np.isin(lab, ids)
+    return ndi.binary_dilation(sel, iterations=2) & ~((lab > 0) & ~sel), ids
+
+
+def _project_area_out(rec, mpp, with_islands=True):
+    """A mask's project area for the page: its picks, the islands they lie in, and (with_islands) every island to pick from."""
+    gray, add, _, _, _ = _inner_part(rec, mpp)
+    gray = np.array(Image.open(rec["path"]).convert("L")) if gray is None else gray
+    lab, isl = _ref_islands(rec, mpp, gray, add)
+    picks = _project_picks(rec)
+    out = {"picks": picks, "selected": _project_ids(lab, picks), "count": len(isl), "mpp": mpp}
+    if with_islands:
+        out["islands"] = isl
+    return out
 
 
 @app.get("/api/projectareas")
-def get_project_areas(mask: str):
-    return {"areas": _project_areas(mem.image(mask))}
+def get_project_areas(mask: str, scale: float = 0.25):
+    rec = mem.image(mask)
+    if not rec:
+        raise HTTPException(404, "unknown mask")
+    return _project_area_out(rec, float(scale))
 
 
 @app.post("/api/projectareas")
 def save_project_areas(payload: dict):
+    """
+    A mask's project area, set: payload "picks", points on the map (mask pixels); each
+    is kept as the point well inside the island it lies in (one for each island; points
+    on a road are left out).
+    """
     rec = mem.image(payload.get("mask"))
     if not rec:
         raise HTTPException(400, "unknown mask")
-    areas = [a for a in (LN.area_check(x) for x in (payload.get("areas") or [])[:64]) if a]
+    mpp = float(payload.get("scale", 0.25))
+    gray, add, _, _, _ = _inner_part(rec, mpp)
+    gray = np.array(Image.open(rec["path"]).convert("L")) if gray is None else gray
+    lab, isl = _ref_islands(rec, mpp, gray, add)
+    pt = {i["id"]: i["pt"] for i in isl}
+    raw = [p for p in (payload.get("picks") or []) if isinstance(p, (list, tuple)) and len(p) == 2][:5000]
+    picks = [pt[k] for k in _project_ids(lab, [(float(p[0]), float(p[1])) for p in raw]) if k in pt]
     path = ARTIFACTS / f"{_projarea_key(rec)}.json"
-    _write_json(path, {"areas": areas})
-    mem.add_artifact(_projarea_key(rec), "project_areas", path, {"mask": rec["id"], "areas": len(areas)})
-    return {"ok": True, "areas": areas}
+    _write_json(path, {"picks": picks})
+    mem.add_artifact(_projarea_key(rec), "project_area", path, {"mask": rec["id"], "islands": len(picks)})
+    return dict(_project_area_out(rec, mpp, with_islands=False), ok=True)
 
 
 @app.post("/api/markarea/apply")
@@ -2297,8 +2362,7 @@ def _lanes_repaint(payload, new_ends=_SAME):
     with _repaint_lock:
         art = mem.artifact(f"{gid}_lanes")
         old_area = (art["meta"] or {}).get("area")
-        area = (_with_holes(LN.area_check(payload["mark_area"]), _gen_holes(gid)) if "mark_area" in payload
-                else LN.area_check(old_area))
+        area = LN.area_check(payload["mark_area"]) if "mark_area" in payload else LN.area_check(old_area)
         base = ARTIFACTS / f"gen_{gid}_result_base.png"
         full = mem.artifact(f"{gid}_full")
         files = {"result": result["path"], "markings": markings["path"],
@@ -2640,7 +2704,7 @@ def texture_update(payload: dict):
         dp, gp = dash.get("dash_px"), dash.get("gap_px")
         cfg = RM.lines_config(texture.get("marks") or {}, dp/(dp+gp) if dp and gp else None, dash.get("width_ratio"))
         lanes_art = mem.artifact(f"{gid}_lanes")
-        area = _with_holes(LN.area_check(texture.get("mark_area")), gm["meta"].get("project_areas"))
+        area = LN.area_check(texture.get("mark_area"))
         picks = LN.picks_list(texture.get("lane_picks"))
         layers = _layers_checked(now.get("layers") or [])
         _, ends, _ = _junction_marks(gm["meta"].get("lines_path") or rec["path"], float(gm["meta"]["scale"]), picks,
@@ -2847,7 +2911,6 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
     art, result = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_result")
     if not art or not result:
         raise HTTPException(400, "unknown generation: run Generate texture first")
-    area = _with_holes(area, art["meta"].get("project_areas"))      # none in the project areas
     rec = mem.image(art["meta"]["mask"])
     idx = _decal_index()
     layers = _layers_checked(raw_layers)
@@ -3168,8 +3231,7 @@ def _export_inputs(payload):
     dash_cfg = dict(art["meta"].get("dashes") or {})
     base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
     dash_cfg["lane_picks"] = LN.picks_list(payload["lane_picks"] if "lane_picks" in payload else _load_lanes(base_rec))
-    dash_cfg["mark_area"] = _with_holes(LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base_rec)),
-                                        art["meta"].get("project_areas"))
+    dash_cfg["mark_area"] = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base_rec))
     if art["meta"].get("nomark") and Path(art["meta"]["nomark"]).exists():
         dash_cfg["nomark"] = np.array(Image.open(art["meta"]["nomark"]).convert("L")) > 127
     stale, inner, streets_now = None, None, {"sig": None}
@@ -3179,10 +3241,11 @@ def _export_inputs(payload):
         if streets_now["sig"] != art["meta"].get("streets_sig"):
             stale = ("the inner streets or project areas have changed since this was generated: press Generate "
                      "texture again to build them in")
-        elif streets_now["shapes"] and base["id"] != rec["id"]:
-            # the inner streets as they were drawn and the project areas' rectangles, laid exactly; the
-            # other roads from the mask without them
-            inner = {"base_mask_path": streets_now["base_path"], "shapes": streets_now["shapes"]}
+        elif (streets_now["shapes"] or streets_now["kerb_path"]) and base["id"] != rec["id"]:
+            # the inner streets as they were drawn, laid exactly; the other roads from the mask without
+            # them; a project area's islands made road (the kerb line goes round them)
+            inner = {"base_mask_path": streets_now["base_path"], "shapes": streets_now["shapes"],
+                     **({"kerb_mask_path": streets_now["kerb_path"]} if streets_now["kerb_path"] else {})}
     return gid, art, result, rec, dash_cfg, inner, stale, streets_now
 
 
@@ -3492,9 +3555,11 @@ def patches_start(payload: dict):
         return [str(path), Path(path).stat().st_mtime if path and Path(path).exists() else None]
     from app import updates as UP
     surface_revision = max((e["revision"] for e in UP.since(ARTIFACTS,gid) if "surfaces" in e["parts"]), default=0)
+    kerb = inner.get("kerb_mask_path") if inner else None
     store_key = hashlib.sha1(json.dumps([gid, stamp(rec["path"]), stamp(inner["base_mask_path"]) if inner else None,
                                          scale, mpp, surface_revision,
-                                         kw["variation"]], default=str).encode()).hexdigest()[:16]
+                                         kw["variation"]] + ([stamp(kerb)] if kerb else []),
+                                        default=str).encode()).hexdigest()[:16]
     folder = PATCH_DIR / store_key
     folder.mkdir(parents=True, exist_ok=True)
     store = folder / "store"
@@ -3532,7 +3597,7 @@ def patches_start(payload: dict):
             pl["follow_prepare"] = True
         else:
             task = {"kind": "prepare", "store": str(store), "mask": rec["path"],
-                    "base": inner["base_mask_path"] if inner else None, "output_scale": scale, "mpp": mpp,
+                    "base": inner["base_mask_path"] if inner else None, "kerb": kerb, "output_scale": scale, "mpp": mpp,
                     "result": kw["result_path"], "markings": kw["markings_path"], "variation": kw["variation"]}
             pool.submit({"plan": plan_id, "kind": "prepare", "task": task,
                          "fn": functools.partial(_patch_prepare_done, plan_id)})

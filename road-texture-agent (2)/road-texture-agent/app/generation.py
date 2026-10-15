@@ -480,9 +480,6 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
                 q = pts + nrm * (off[:, None] if np.ndim(off) else off)
                 mid = starts + dash_len / 2
                 keep = LN.in_area(area, np.interp(mid, dist, q[:, 1]) + ox, np.interp(mid, dist, q[:, 0]) + oy)
-                for t_ in ((starts, starts + dash_len) if area.get("holes") else ()):
-                    # and clear of the project areas from end to end
-                    keep &= LN.clear_of_holes(area, np.interp(t_, dist, q[:, 1]) + ox, np.interp(t_, dist, q[:, 0]) + oy)
             gap_px = step - dash_len
             if gap_px < MERGE_GAP_PX or step < MERGE_CYCLE_PX:
                 # the dashes run together: the line is drawn whole (as a solid line, stopping
@@ -511,11 +508,6 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             hw_isl = (x1 - x0) / 2 / px
             _strokes(isl, spine, hw_isl, min(1.0, 2 * hw_isl), piece_px)
             _strokes(isl_top, spine, max(0.5, hw_isl - 0.12 / px), min(1.0, 2 * hw_isl), piece_px)
-    if area and area.get("holes") and isl.any():
-        # the islands are laid everywhere, but in the project areas (flat road)
-        hc = _area_cover({"holes": area["holes"]}, (H, W), origin)
-        isl *= hc
-        isl_top *= hc
     if area:
         ac = None
         if solid.any():
@@ -1199,8 +1191,8 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     line_ends = params.get("line_ends") or None
     det_lines = det
     if params.get("lines_mask"):
-        # with project areas: the streets the lines follow traced without them (they go on under
-        # them, their lines cut at the areas' edges), not around the areas as big junctions
+        # with a project area: the streets the lines follow traced from the mask without it, so
+        # the streets round its islands keep their lines and junction markings as they were
         prog.stage("junctions", "finding the streets under the project areas")
         det_lines = J.detect(prepare_mask(np.array(Image.open(params["lines_mask"]).convert("L")), scale)[0])
     (paint, yellow), dash_info, (island, island_top), streets, found = place_dashes(

@@ -206,12 +206,14 @@ _LOADED = {}                # store directory -> what load() gave (one copy per 
 
 
 def prepare(store, mask_path, base_mask_path, output_scale, mpp, result_path, markings_path, variation,
-            divider_limit=None):
+            divider_limit=None, kerb_mask_path=None):
     """
     Work out what every patch of a map shares and keep it in the folder store
     (arrays as .npy files the workers map instead of copying; the rest as one
     pickle). base_mask_path: the mask without the inner streets (they are laid
-    as exact shapes), else None. Returns the folder.
+    as exact shapes), else None. kerb_mask_path: that mask with a project
+    area's islands made road (the kerb line goes round them), else None.
+    Returns the folder.
     """
     from PIL import Image
     from scipy import ndimage as ndi
@@ -233,7 +235,8 @@ def prepare(store, mask_path, base_mask_path, output_scale, mpp, result_path, ma
     mpp_out = mpp / output_scale
     fac = M3.variation_factor(result_path, markings_path, coverage, mpp_out, variation)
     fb = ndi.gaussian_filter(fac, sigma=max(1.0, 25.0 / mpp_out))
-    lab, n = ndi.label(cov1 < 0.5)
+    cov_k = prepare_mask(np.array(Image.open(kerb_mask_path).convert("L")), 1)[1] if kerb_mask_path else None
+    lab, n = ndi.label((cov1 if cov_k is None else cov_k) < 0.5)
     det = city["det"]
     # the widest street, by its usual width (painted markings: what their textures span
     # across); not the widest point of the centreline, which is in a junction or a square
@@ -242,7 +245,8 @@ def prepare(store, mask_path, base_mask_path, output_scale, mpp, result_path, ma
     arrays = {"gray": gray, "mask1": mask1, "cov1": cov1.astype(np.float32),
               "coverage": coverage.astype(np.float32), "dt": det["dt"].astype(np.float32),
               "seg_lab": city["seg_lab"].astype(np.int32), "fac": fac.astype(np.float32),
-              "fb": fb.astype(np.float32), "blocks": lab.astype(np.int32)}
+              "fb": fb.astype(np.float32), "blocks": lab.astype(np.int32),
+              **({"cov_k": cov_k.astype(np.float32)} if cov_k is not None else {})}
     for k, a in arrays.items():
         np.save(tmp / f"{k}.npy", a)
     rest = {"junctions": det["junctions"], "clusters": city["clusters"], "piece_of": city["piece_of"],
@@ -268,12 +272,14 @@ def load(store):
     p = Path(store)
     a = {k: np.load(p / f"{k}.npy", mmap_mode="r") for k in
          ("gray", "mask1", "cov1", "coverage", "dt", "seg_lab", "fac", "fb", "blocks")}
+    if (p / "cov_k.npy").exists():
+        a["cov_k"] = np.load(p / "cov_k.npy", mmap_mode="r")
     with open(p / "shared.pkl", "rb") as f:
         r = pickle.load(f)
     city = {"det": {"dt": a["dt"], "junctions": r["junctions"]}, "clusters": r["clusters"],
             "seg_lab": a["seg_lab"], "piece_of": r["piece_of"], "seg_px": r["seg_px"],
             "road_w_m": r["road_w_m"], "boxes": r["boxes"], "shape": r["shape"]}
-    got = {"gray": a["gray"], "mask1": a["mask1"], "cov1": a["cov1"], "coverage": a["coverage"],
+    got = {"gray": a["gray"], "mask1": a["mask1"], "cov1": a["cov1"], "coverage": a["coverage"], "cov_k": a.get("cov_k"),
            "fac": a["fac"], "fb": a["fb"], "city": city, "widest_m": r["widest_m"],
            "blocks": {"labels": a["blocks"], "slices": r["slices"], "scale": r["output_scale"], "theta": {}}}
     _LOADED.clear()                     # one map at a time
@@ -393,7 +399,7 @@ def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=No
         return (cboxes[chains.index(e)] if e.get("chain") else streets.box_of(e["x"], e["y"])) if streets else None
     ends_b = [(e, end_box(e)) for e in (ends or [])]
     area_box = None
-    if mark_area and "cx" in mark_area and not mark_area.get("holes"):   # the turned rectangle's reach all round its middle
+    if mark_area:                                       # the turned rectangle's reach all round its middle
         r = math.hypot(mark_area["w"], mark_area["h"]) / 2
         area_box = (mark_area["cx"] - r, mark_area["cy"] - r, mark_area["cx"] + r, mark_area["cy"] + r)
     dpl = (decals or {}).get("placements") or []
@@ -566,7 +572,7 @@ def _worker():
             task = json.loads(line)
             if task.get("kind") == "prepare":
                 prepare(task["store"], task["mask"], task.get("base"), task["output_scale"], task["mpp"],
-                        task["result"], task.get("markings"), task["variation"])
+                        task["result"], task.get("markings"), task["variation"], kerb_mask_path=task.get("kerb"))
                 ans = {"ok": True, "info": {}}
             else:
                 info = build(task["store"], task["args"], task["patch"], task["out"])

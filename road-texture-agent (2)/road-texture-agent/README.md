@@ -932,44 +932,6 @@ markings go everywhere as before.
   laid as strips (a road texture is shared along its street). Only the lanes
   part of the model is built again: 0.2 s with strips, 3 s painted.
 
-### Project areas: flat road where your project goes
-
-Under the Markings area, **Add project area** puts a rectangle on the map, in
-the middle of what you see (60 × 40 m): the place your project goes. Inside it
-the map is **flat as the streets, in the street material**: no sidewalks, no
-kerbs, no blocks, no raised islands, and no lane lines or decals. Add as many
-as you need (up to 64).
-
-- **Move** one by dragging it, **size** it from a corner, **turn** it from the
-  round handle, as the markings area. **Edit** turns the handles on (click an
-  area to choose it), **Done** or Esc turns them off, **Remove** takes the
-  chosen one away. Each change is kept on the server with the mask at once, and
-  comes back with the mask.
-- **Generate texture builds them in**: the note says when they changed since
-  the texture. The texture's road takes in each rectangle (its pixels whose
-  middle lies inside), so the street material, its wear and the blocks' and
-  islands' outlines follow it; the blocks it crosses are cut back along its
-  edges and keep their sidewalks there.
-- **The streets go on under it.** The lane lines, the junction markings and
-  the decals are laid from the streets as the mask has them without the
-  project areas, then stopped at each area's edge: a street that runs into or
-  through one keeps its lines up to the edge (a dash that would cross it is
-  left out whole, a solid line stops at it, a highway's island stops at it). A
-  decal whose middle lies inside is not laid. (Traced as part of the road, a
-  rectangle across a street reads as one big junction, and the lines stopped
-  about 20 m before it.)
-- **In 3D** each area is laid as an exact rectangle of road (as the inner
-  streets are): its straight edges and sharp corners stay where they are, the
-  kerb line and the sidewalks go round it, and the blocks stop at it. Measured
-  on the test map with an area across a 25 m highway and one across an 18 m
-  street: inside them only road (flat, at the road's height); no sidewalk,
-  kerb, block, island, marking or decal triangles.
-- Later changes keep to them: the Lanes tool, the markings area (set,
-  changed or taken away), Update decals and the texture's quick updates lay
-  nothing inside them. With no project areas everything is laid as before,
-  byte for byte (decals, the Lanes tool's Done, the 3D model, and a fresh
-  Generate texture checked against the version before).
-
 ## Line width
 
 By default, lines are drawn as a **share of each street's width**, learned from
@@ -1753,6 +1715,41 @@ raised, hide the ones behind them, and the gaps between them stay in shade:
   every light and sky sample is shaded by the stones in its way, and the
   occlusion darkens the diffuse a little (the gaps a flat surface cannot trace).
   Puddles fill it (flat water).
+
+## Project Area
+
+The **Project Area** section of the Generate tab (under Input, before Objects)
+picks the islands your project takes (city blocks, squares, traffic islands,
+a roundabout's middle: the areas between the roads) and makes them **street**:
+flat as the streets, in the street material, with **no sidewalks and no
+kerbs**, and **none added round them**.
+
+- **Select islands** shows every island on the map with its number. Click
+  the ones your project takes (they fill orange), click one again to take it
+  out. Each click is kept with the mask at once (by a point well inside the
+  island, as the island material slots are), and comes back with the mask.
+- **Done** (or Esc) **builds them in at once**: the texture is made again with
+  the same settings, and everything that follows Generate texture comes with
+  it (decals, islands, the Top view). Nothing else to press. **Clear** takes
+  every island out (built in at once, or at Done while selecting). Before the
+  first texture, Generate texture builds them in.
+- **The streets round them keep everything they had**: their lane lines,
+  junction markings and decals are traced from the map without the Project
+  Area, so they are exactly as before; only the island itself changes.
+- **No kerbs at its edges.** The island meets the streets with no seam: its own
+  kerb and sidewalk ring goes, and the blocks across the streets keep theirs.
+  In 3D the streets, their widths and lines are still found from the map as it
+  was; only the kerb line and the road surface go round the road with the
+  island made street. Measured on the test map with a 13,031 m² block picked:
+  near it, blocks 11,904 to 0 m², kerb 45.5 to 0, sidewalk 1,116 to 0, road
+  1,656 to 14,471 m² (all flat); everywhere else blocks, kerbs and sidewalks
+  the same to the square centimetre. With a block and the roundabout's middle
+  picked: the same, both flat street. On the 4 × 3 km map (1 km patches) an
+  island across a patch seam: only road inside it, no seam.
+- Islands are counted from 4 m² (smaller specks are not islands), at the scale
+  set under Generate texture: change the scale and they are found again.
+- With no Project Area everything is made as before, byte for byte (decals,
+  the Lanes tool, the 3D model, and a fresh Generate texture checked).
 
 ## Blocks and islands
 

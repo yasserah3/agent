@@ -264,7 +264,7 @@ def _in_window(window, x0, y0, x1, y1):
 
 def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, across=2,
           divider_limit=J.DIVIDER_LIMIT_PX, coverage=None, kerb_band=False, dashes=None,
-          sidewalk=None, bridges=None, optimise=False, exact=None, shared=None, window=None):
+          sidewalk=None, bridges=None, optimise=False, exact=None, shared=None, window=None, kerb_coverage=None):
     """
     gray_mask: the road mask at its own size (already smooth-thresholded is fine)
     scale:     texture size / mask size (the output scale)
@@ -272,6 +272,10 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
                the inner streets (app/streets.py), each {"road": shapely shape,
                "lines": [(centreline points, half width)], "markings": bool} in
                mask pixels. The mask then holds only the other roads.
+    kerb_coverage: the road the kerb line goes round and the road surface fills, when
+               it is more than coverage (the islands of a project area, made road): the
+               streets, their widths and lines are found from gray_mask and coverage
+               as without it, and only the kerb line round those islands goes
     shared:    city()'s junctions and streets of the whole map, found once
     window:    (x0, y0, x1, y1) in mask pixels: build only what lies in it (a
                big map's patch with its margin, app/patches.py), in the whole
@@ -317,7 +321,7 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
     if sidewalk and coverage is not None:
         mesh.sw_cfg = dict({"share": 0.3, "min_m": 1.5, "max_m": 2.5, "height_m": 0.10,
                             "kerbstone_m": 0.15, "max_road_m": 20.0}, **sidewalk)
-        mesh.sw_cov, mesh.sw_mpp, mesh.sw_scale = coverage, mpp, scale
+        mesh.sw_cov, mesh.sw_mpp, mesh.sw_scale = coverage if kerb_coverage is None else kerb_coverage, mpp, scale
         # interchanges get no sidewalks
         # sidewalks go on every road. Leaving interchanges and very wide roads
         # without them is an option, off unless asked for
@@ -532,8 +536,8 @@ def build(gray_mask, scale, metres_per_pixel, straightness=0.7, spacing_m=2.0, a
             skipped += 1
             _fallback_fill(mesh, j)
 
-    holes = _cover_bare(mesh, coverage if coverage is not None else (gray_mask > 127).astype(float), scale,
-                        window=window)
+    holes = _cover_bare(mesh, kerb_coverage if kerb_coverage is not None
+                        else coverage if coverage is not None else (gray_mask > 127).astype(float), scale, window=window)
     cov_mask = coverage if coverage is not None else (gray_mask > 127).astype(float)
     mesh.fill_polys = [_scale_poly(q, scale) for q in cluster_fill_polys(mesh.clusters, cov_mask, 1, window=window)]
     # roads given exactly (the inner streets): laid as they are, so their straight
@@ -1000,13 +1004,6 @@ def _inside_at(pts, side, arc, t, off, area):
     return bool(LN.in_area(area, x, y)[0])
 
 
-def _clear_of_holes(pts, side, arc, ts, off, area):
-    """Whether the line's points at these arcs lie outside the area's holes (the project areas)."""
-    if not area.get("holes"):
-        return True
-    return bool(np.all(LN.clear_of_holes(area, *_at_arc(pts, side, arc, np.asarray(ts, float), off))))
-
-
 def _inside_runs(pts, side, arc, a, b, off, area, mpp):
     """The stretches of a line from arc a to b that lie inside the area, each end found to a centimetre or so."""
     k = max(2, int(math.ceil((b - a) * mpp / 0.25)) + 1)
@@ -1168,8 +1165,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
                             mesh.dash_yellow.append(bool(stl.get("yellow")))
                             kept += 1
                         continue
-                    if not _inside_at(pts, side, arc, (a + b) / 2, off, area) or not _clear_of_holes(pts, side, arc, (a, b), off, area):
-                        layout["clipped"] = True                                 # a dash whole, by its middle (clear of the holes)
+                    if not _inside_at(pts, side, arc, (a + b) / 2, off, area):
+                        layout["clipped"] = True                                 # a dash whole, by its middle
                         continue
                 mesh.dashes.append(_line_strip(pts, side, arc, a, b, off, halfw, scale))
                 mesh.dash_solid.append(solid or beyond)
@@ -1179,15 +1176,9 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     if island and lay["island"]:
         a, b = sorted((to_arc(sb0) / mpp, to_arc(L - sb1) / mpp))
         xi = isl_at if isl_at is not None else list(lay["island"])
-        runs = [(a, b)]
-        if area and area.get("holes"):
-            # laid everywhere, but in the project areas (flat road)
-            mid = sgn * (np.asarray(xi[0], float) + np.asarray(xi[1], float)) / 2 / mpp
-            runs = _inside_runs(pts, side, arc, a, b, mid, {"holes": area["holes"]}, mpp)
-        for ra, rb in runs:
-            edges = [_line_strip(pts, side, arc, ra, rb, sgn * x / mpp, 0.0, scale) for x in xi]
-            mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
-                                      "height_m": LN.ISLAND_H_M})
+        edges = [_line_strip(pts, side, arc, a, b, sgn * x / mpp, 0.0, scale) for x in xi]
+        mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
+                                  "height_m": LN.ISLAND_H_M})
     return layout
 
 

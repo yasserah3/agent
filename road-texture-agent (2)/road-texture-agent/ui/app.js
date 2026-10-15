@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords8';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -151,7 +151,7 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
   // the markings area (see markings area below)
   const MAREA = { area: null, on: false, mask: null, painted: 'null', busy: false, again: false, timer: null, drag: null };
   // project areas: rectangles where the project goes (flat road in the street material, no sidewalks, no markings)
-  const PAREA = { areas: [], on: false, sel: -1, mask: null, drag: null, built: '[]' };
+  const PAREA = { picks: [], sel: new Set(), data: null, on: false, mask: null, scale: null, built: '[]', busy: false };
   const AUTO = { pick: -1 };          // automatic placement: the placement picking its islands (-1: none)
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
@@ -1236,9 +1236,9 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
       S.gen.marksPainted = marksKey();                                     // the lines' settings the texture has
       S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
       MAREA.painted = JSON.stringify(res.mark_area || null);               // and its markings area
-      PAREA.built = JSON.stringify(PAREA.areas);                           // and its project areas
+      PAREA.built = pareaKey();                                             // and its project area
       renderParea();
-      if(res.project_areas) log(`  Project areas: ${res.project_areas} built in, flat as the streets in the street material, no sidewalks or markings inside.`);
+      if(res.project_areas) log(`  Project Area: ${res.project_areas} island(s) built in as street: flat, the street material, no sidewalks or kerbs.`);
       renderMarea();
       S.gen.top = null; S.gen.decals = null;
       renderMarks();
@@ -1844,7 +1844,8 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
   $('#genVp').addEventListener('vpview', scheduleOverlay);
   new ResizeObserver(scheduleOverlay).observe($('#genVp'));             // resized, or shown again (its tab)
   function drawOverlay(){
-    const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0 || AUTO.pick >= 0)) || (LANES.on && LANES.streets) || hasAuto());
+    const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0 || AUTO.pick >= 0)) || (LANES.on && LANES.streets) || hasAuto()
+                                  || (PAREA.data && (PAREA.on || PAREA.sel.size > 0)));
     ovl.hidden = !want;
     if(!want) return;
     const root = $('#genVp'), r = root.getBoundingClientRect(), { s, tx, ty } = genVp.view();
@@ -1862,6 +1863,7 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
     const v = { k, ox, oy, x0: -ox / k, y0: -oy / k, x1: (W - ox) / k, y1: (H - oy) / k, dpr,
                 hr: Math.max(4, genVp.canvas.width / 260) * dpr * s, minFont: 7 * dpr };
     drawIslandsOn(ctx, v);
+    drawPareaOn(ctx, v);
     drawAutoOn(ctx, v);
     drawLanesOn(ctx, v);
     drawHighwayGroups(ctx, v);
@@ -1896,7 +1898,6 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
     if(!S.gen.mask) return;
     drawLanes(f);
     drawMarea(f, Math.max(4, genVp.canvas.width / 260));
-    drawParea(f, Math.max(4, genVp.canvas.width / 260));
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
     // ramps and deck along the road, from the last preview
     S.gen.bridgePreview.forEach(p => {
@@ -2042,8 +2043,9 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
   const slotColour = i => ISLAND_COLOURS[i % ISLAND_COLOURS.length];
   let slotsTimer = null, slotsMask = null;
   // the island a point (mask pixels) lies in: its outline, even-odd over its rings
-  function islandAt(x, y){
-    const d = ISLS.data; if(!d) return 0;
+  function islandAt(x, y){ return islandIn(ISLS.data, x, y); }
+  function islandIn(d, x, y){
+    if(!d) return 0;
     for(const isl of d.islands){
       const b = isl.bbox;
       if(x < b[0] || y < b[1] || x > b[2] || y > b[3]) continue;
@@ -2170,7 +2172,7 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
   }
   function setPick(i){
     if(i >= 0 && LANES.on) lanesMode(false);
-    if(i >= 0) AUTO.pick = -1;
+    if(i >= 0){ AUTO.pick = -1; pareaStop(); }
     ISLS.pick = i;
     if(i >= 0) log(`Pick islands for slot ${i + 1} (${slotMaterial(i).name}): click an island to add it, click it again to take it out.`);
     renderSlots(); drawBridges();
@@ -2388,7 +2390,7 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
     LANES.on = on && !!LANES.streets;
     if(LANES.on && MAREA.on){ MAREA.on = false; renderMarea(); }
     if(LANES.on && ISLS.pick >= 0) setPick(-1);
-    if(LANES.on) AUTO.pick = -1;
+    if(LANES.on){ AUTO.pick = -1; pareaStop(); }
     if(!LANES.on){ LANES.sel = -1; paintLanes(); }
     else log('Set lanes: click a street to choose how many lanes each side has (the two sides show in blue and orange). Esc or Set lanes to finish.');
     renderLanes(); drawBridges();
@@ -2566,6 +2568,12 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
       }
       e.stopImmediatePropagation(); return;
     }
+    if(PAREA.on){
+      e.stopPropagation();
+      const id = PAREA.data ? islandIn(PAREA.data, x, y) : 0;
+      if(id) pareaToggle(id, x, y);
+      return;
+    }
     if(AUTO.pick >= 0 && ISLS.data){
       const id = islandAt(x, y);
       if(id){ e.stopPropagation(); autoPickIsland(id); return; }
@@ -2737,6 +2745,7 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
       if(LANES.on) lanesMode(false);
       if(ISLS.pick >= 0) setPick(-1);
       AUTO.pick = -1;
+      pareaStop();
       if(!MAREA.area){
         // a first rectangle: the middle half of the mask
         const W = S.gen.mask.width, H = S.gen.mask.height;
@@ -2820,134 +2829,138 @@ const UI_VERSION = '2026.10.15-coords7';   // must match VERSION in server.py
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && MAREA.on && !MAT.open) mareaMode(false); });
 
-  /* ---- project areas: rectangles on the map where the project goes. Generate texture builds them in:
-     flat as the streets, in the street material, no sidewalks, kerbs or blocks, no lane lines or decals
-     (server.py _inner_streets). { cx, cy, w, h (mask pixels), angle (degrees) } each, kept with the mask */
+  /* ---- Project Area: the islands (blocks, squares, traffic islands) picked for the project become street:
+     flat, the street material, no sidewalks or kerbs, and none added round them (server.py _inner_streets).
+     Select islands, click them, Done: the texture is made again with them at once. Kept with the mask by a
+     point in each island, as the island slots */
+  const pareaKey = () => JSON.stringify([...PAREA.picks].map(p => p.map(v => Math.round(v * 10) / 10)).sort());
+  const pareaScale = () => +$('#scale').value || 1.1;
   function renderParea(){
-    const has = !!S.gen.mask, n = PAREA.areas.length, m = mppMask();
-    $('#btnParea').disabled = !has;
-    $('#btnPareaEdit').disabled = !n;
-    $('#btnPareaEdit').setAttribute('aria-pressed', PAREA.on);
-    $('#btnPareaEdit').textContent = PAREA.on ? 'Done' : 'Edit';
-    $('#btnPareaDel').disabled = !(PAREA.on && PAREA.sel >= 0);
-    const changed = S.gen.result && JSON.stringify(PAREA.areas) !== PAREA.built;
-    $('#pareaNote').textContent = !n
-      ? 'None. Add project area puts a rectangle on the map where your project goes: flat as the streets, in the street material, no sidewalks, kerbs or blocks, and no lane lines or decals inside (move it, size it from its corners, turn it from its handle).'
-      : `${n} project area${n === 1 ? '' : 's'}: ` + PAREA.areas.map((a, i) => `${i + 1}: ${Math.round(a.w * m)} × ${Math.round(a.h * m)} m`
-          + (Math.round(a.angle) % 360 ? `, turned ${Math.round(((a.angle % 360) + 360) % 360)}°` : '')).join('; ') + '. '
-        + 'Flat as the streets, the street material, no sidewalks or markings inside.'
-        + (PAREA.on ? ' Click one to choose it; drag to move, a corner to size, the round handle to turn; Done or Esc to finish.' : '')
-        + (changed ? ' Changed since the texture: press Generate texture to build them in.' : !S.gen.result ? ' Generate texture builds them in.' : '');
+    const has = !!S.gen.mask, n = PAREA.sel.size;
+    $('#btnParea').disabled = !has || PAREA.busy;
+    $('#btnParea').setAttribute('aria-pressed', PAREA.on);
+    $('#btnParea').textContent = PAREA.on ? 'Done' : 'Select islands';
+    $('#btnPareaClear').disabled = !has || !n || PAREA.busy;
+    $('#pareaCount').textContent = n ? `${n} island${n === 1 ? '' : 's'}` : '';
+    const isl = PAREA.data ? PAREA.data.islands.filter(q => PAREA.sel.has(q.id)) : [];
+    const m2 = isl.reduce((a, q) => a + q.area_m2, 0);
+    const changed = S.gen.result && pareaKey() !== PAREA.built;
+    $('#pareaNote').textContent = !has ? 'Load a street mask, then pick the islands (blocks, squares, traffic islands) your project takes.'
+      : PAREA.on ? `Click islands to add them to the Project Area, click again to take them out (${n} picked`
+          + (n ? `, ${Math.round(m2).toLocaleString()} m²` : '') + '). Done (or Esc) builds them in at once.'
+      : !n ? 'None. Select islands, click the blocks or islands your project takes, then Done: they become street (flat, the street material, no sidewalks or kerbs) and the texture is made again with them.'
+      : `${n} island${n === 1 ? '' : 's'} (${isl.map(q => q.id).join(', ')}; ${Math.round(m2).toLocaleString()} m²) made street: flat, the street material, no sidewalks or kerbs.`
+        + (changed ? ' Changed since the texture: Select islands, then Done, builds them in (or Generate texture).'
+                   : !S.gen.result ? ' Generate texture builds them in.' : '');
   }
-  function drawParea(f, hr){
-    if(!PAREA.areas.length) return;
-    const shownW = genVp.canvas.getBoundingClientRect().width;
-    if(shownW > 0) hr = Math.max(hr, 7 * genVp.canvas.width / shownW);
-    PAREA.areas.forEach((a, i) => {
-      const pts = mareaCorners(a).map(q => [q[0] * f, q[1] * f]);
-      const sel = PAREA.on && i === PAREA.sel, g = el('g', {}, layer);
-      const body = el('polygon', { points: pts.map(q => q.join(',')).join(' '), fill: sel ? 'rgba(232,162,58,.26)' : 'rgba(232,162,58,.14)',
-        stroke: '#E8A23A', 'stroke-width': hr * (sel ? 0.55 : 0.35), class: PAREA.on ? 'grab' : '',
-        'pointer-events': PAREA.on ? 'all' : 'none' }, g);
-      const tl = pts[0];
-      const lab = el('text', { x: tl[0] + hr, y: tl[1] - hr * 0.8, 'font-size': hr * 1.8, fill: '#E8A23A', class: 'lane-lbl',
-                               'stroke-width': hr * 0.35, 'pointer-events': 'none' }, g);
-      lab.textContent = `Project area ${i + 1}`;
-      if(!PAREA.on) return;
-      body.addEventListener('pointerdown', e => { PAREA.sel = i; pareaStart(e, 'move'); renderParea(); });
-      if(!sel) return;
-      pts.forEach(q => {
-        const c = el('circle', { cx: q[0], cy: q[1], r: hr, class: 'corner', fill: '#fff', stroke: '#E8A23A', 'stroke-width': hr * 0.35 }, g);
-        c.addEventListener('pointerdown', e => pareaStart(e, 'size'));
-      });
-      const r = a.angle * Math.PI / 180, ex = (a.cx + Math.cos(r) * a.w / 2) * f, ey = (a.cy + Math.sin(r) * a.w / 2) * f;
-      const rx = ex + Math.cos(r) * hr * 5, ry = ey + Math.sin(r) * hr * 5;
-      el('line', { x1: ex, y1: ey, x2: rx, y2: ry, stroke: '#E8A23A', 'stroke-width': hr * 0.35 }, g);
-      const spin = el('circle', { cx: rx, cy: ry, r: hr * 1.15, class: 'spin', fill: '#E8A23A' }, g);
-      spin.addEventListener('pointerdown', e => pareaStart(e, 'rotate'));
-    });
+  // every island to pick from (the mask without a project area, numbered as its texture would be), and the picks
+  async function loadPareaData(){
+    if(!S.gen.mask) return;
+    const mask = S.gen.mask.id, scale = pareaScale();
+    if(PAREA.data && PAREA.mask === mask && PAREA.scale === scale) return;
+    const r = await api(`/api/projectareas?mask=${mask}&scale=${scale}`);
+    if(!S.gen.mask || S.gen.mask.id !== mask) return;
+    PAREA.data = { islands: r.islands || [], count: r.count }; PAREA.scale = scale; PAREA.mask = mask;
+    PAREA.picks = r.picks || []; PAREA.sel = new Set(r.selected || []);
   }
-  function pareaStart(e, mode){
-    e.stopPropagation(); e.preventDefault();
-    const a = PAREA.areas[PAREA.sel];
-    if(a) PAREA.drag = { mode, start: toMask(e), orig: { ...a } };
-  }
-  addEventListener('pointermove', e => {
-    const d = PAREA.drag, a = PAREA.areas[PAREA.sel];
-    if(!d || !a) return;
-    const o = d.orig, p = toMask(e);
-    if(d.mode === 'move'){ a.cx = o.cx + p[0] - d.start[0]; a.cy = o.cy + p[1] - d.start[1]; }
-    else if(d.mode === 'size'){
-      const r = o.angle * Math.PI / 180, dx = p[0] - o.cx, dy = p[1] - o.cy;
-      a.w = Math.max(4, 2 * Math.abs(dx * Math.cos(r) + dy * Math.sin(r)));
-      a.h = Math.max(4, 2 * Math.abs(-dx * Math.sin(r) + dy * Math.cos(r)));
-    }else a.angle = Math.atan2(p[1] - o.cy, p[0] - o.cx) * 180 / Math.PI;
+  async function loadParea(maskId){
+    PAREA.mask = maskId; PAREA.picks = []; PAREA.sel = new Set(); PAREA.data = null; PAREA.on = false; PAREA.scale = null;
+    try{
+      await loadPareaData();
+      if(PAREA.sel.size) log(`Project Area: ${PAREA.sel.size} island(s) restored for this mask.`);
+    }catch(_){}
+    PAREA.built = S.gen.result ? pareaKey() : '[]';
     renderParea(); drawBridges();
-  });
-  addEventListener('pointerup', () => {
-    if(!PAREA.drag) return;
-    PAREA.drag = null;
-    pareaChanged();
-  });
-  function pareaMode(on){
-    PAREA.on = on && !!S.gen.mask && PAREA.areas.length > 0;
-    if(PAREA.on){
+  }
+  // the island under a click, in or out; kept on the server at once (as a point well inside it)
+  async function pareaToggle(id, x, y){
+    const d = PAREA.data, isl = d.islands.find(q => q.id === id);
+    const had = PAREA.sel.has(id);
+    const picks = had ? PAREA.picks.filter(p => islandIn(d, p[0], p[1]) !== id) : [...PAREA.picks, [x, y]];
+    if(had) PAREA.sel.delete(id); else PAREA.sel.add(id);
+    renderParea(); drawBridges();
+    try{
+      const r = await api('/api/projectareas', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ mask: S.gen.mask.id, picks, scale: pareaScale() }) });
+      PAREA.picks = r.picks || []; PAREA.sel = new Set(r.selected || []);
+      log(had ? `Island ${id} taken out of the Project Area.`
+              : `Island ${id} (${Math.round(isl.area_m2).toLocaleString()} m²) into the Project Area: it becomes street.`);
+    }catch(e){ log('Project Area not saved: ' + e.message, 'bad'); }
+    renderParea(); drawBridges();
+  }
+  // Done: what changed is built in at once (the texture made again with the same settings, then everything
+  // that follows a Generate texture: decals, islands, the Top view)
+  function pareaBuild(){
+    if(!S.gen.result || pareaKey() === PAREA.built) return;
+    log(`Project Area changed: making the texture again with ${PAREA.sel.size} island(s) as street…`);
+    $('#btnGenerate').click();
+  }
+  // another tool taken up: the selecting ends, nothing built (Select islands, then Done, builds it in)
+  function pareaStop(){
+    if(!PAREA.on) return;
+    PAREA.on = false; renderParea(); drawBridges();
+  }
+  async function pareaMode(on){
+    if(on && !S.gen.mask) return;
+    if(on){
       if(MAREA.on) mareaMode(false);
       if(LANES.on) lanesMode(false);
       if(ISLS.pick >= 0) setPick(-1);
       AUTO.pick = -1;
-      if(PAREA.sel < 0) PAREA.sel = PAREA.areas.length - 1;
+      PAREA.busy = true; renderParea();
+      try{ await loadPareaData(); }catch(e){ log('Islands not found: ' + e.message, 'bad'); PAREA.busy = false; renderParea(); return; }
+      PAREA.busy = false;
+      PAREA.on = true;
+      log(`Project Area: ${PAREA.data.count} island(s) on the map. Click the ones your project takes, click again to take one out; Done when finished.`);
+    }else{
+      PAREA.on = false;
+      pareaBuild();
     }
     renderParea(); drawBridges();
   }
-  // kept with the mask (Generate texture reads them there), the 3D tab told
-  function pareaChanged(){
-    renderParea(); drawBridges();
-    window.dispatchEvent(new Event('materials'));
-    if(!S.gen.mask) return;
-    const mask = S.gen.mask.id, areas = PAREA.areas.map(a => ({ ...a }));
-    api('/api/projectareas', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mask, areas }) })
-      .catch(e => log('Project areas not saved: ' + e.message, 'bad'));
-  }
-  async function loadParea(maskId){
-    PAREA.mask = maskId; PAREA.areas = []; PAREA.on = false; PAREA.sel = -1;
+  $('#btnParea').addEventListener('click', () => pareaMode(!PAREA.on));
+  $('#btnPareaClear').addEventListener('click', async () => {
+    if(!S.gen.mask || !PAREA.sel.size) return;
     try{
-      const r = await api('/api/projectareas?mask=' + maskId);
-      if(PAREA.mask !== maskId) return;
-      PAREA.areas = r.areas || [];
-      if(PAREA.areas.length) log(`${PAREA.areas.length} project area(s) restored for this mask.`);
-    }catch(_){}
-    PAREA.built = S.gen.result ? JSON.stringify(PAREA.areas) : '[]';
-    renderParea();
-  }
-  $('#btnParea').addEventListener('click', () => {
-    if(!S.gen.mask) return;
-    // in the middle of what is on screen, 60 x 40 m
-    const vr = $('#genVp').getBoundingClientRect(), m = mppMask();
-    let [cx, cy] = toMask({ clientX: vr.left + vr.width / 2, clientY: vr.top + vr.height / 2 });
-    const W = S.gen.mask.width, H = S.gen.mask.height;
-    if(!(cx >= 0 && cx <= W && cy >= 0 && cy <= H)){ cx = W / 2; cy = H / 2; }
-    PAREA.areas.push({ cx, cy, w: Math.min(W / 2, 60 / m), h: Math.min(H / 2, 40 / m), angle: 0 });
-    PAREA.sel = PAREA.areas.length - 1;
-    log(`Project area ${PAREA.areas.length} added: move it, size it from its corners, turn it from its round handle. `
-      + 'Inside it the map is flat as the streets, in the street material, with no sidewalks or markings (Generate texture builds it in).');
-    pareaMode(true); pareaChanged();
-  });
-  $('#btnPareaEdit').addEventListener('click', () => pareaMode(!PAREA.on));
-  $('#btnPareaDel').addEventListener('click', () => {
-    if(!PAREA.on || PAREA.sel < 0) return;
-    PAREA.areas.splice(PAREA.sel, 1);
-    log(`Project area ${PAREA.sel + 1} taken away.`);
-    PAREA.sel = PAREA.areas.length - 1;
-    if(!PAREA.areas.length) PAREA.on = false;
-    pareaChanged();
+      const r = await api('/api/projectareas', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ mask: S.gen.mask.id, picks: [], scale: pareaScale() }) });
+      PAREA.picks = r.picks || []; PAREA.sel = new Set(r.selected || []);
+      log('Project Area cleared: its islands are islands again.');
+    }catch(e){ log('Project Area not saved: ' + e.message, 'bad'); }
+    renderParea(); drawBridges();
+    if(!PAREA.on) pareaBuild();
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && PAREA.on && !MAT.open) pareaMode(false); });
-  let pareaFrame = 0;
-  $('#genVp').addEventListener('vpzoom', () => {
-    if(!PAREA.on || pareaFrame) return;
-    pareaFrame = requestAnimationFrame(() => { pareaFrame = 0; drawBridges(); });
+  // the islands' sizes (and which small ones count) go by the scale: found again for a new one
+  $('#scale').addEventListener('change', async () => {
+    if(!S.gen.mask || !PAREA.data || PAREA.scale === pareaScale()) return;
+    try{ await loadPareaData(); }catch(_){}
+    renderParea(); drawBridges();
   });
+  // on the overlay: while selecting, every island (picked ones filled, with their numbers); else the picked ones' outlines
+  function drawPareaOn(ctx, v){
+    const d = PAREA.data;
+    if(!d || !(PAREA.on || PAREA.sel.size)) return;
+    const labels = [], mpp = mppMask();
+    for(const isl of d.islands){
+      const mine = PAREA.sel.has(isl.id);
+      if((!PAREA.on && !mine) || !inView(v, isl.bbox)) continue;
+      ctx.beginPath();
+      isl.rings.forEach(r => tracePath(ctx, v, r, true));
+      if(PAREA.on){
+        ctx.fillStyle = mine ? 'rgba(232,162,58,.55)' : 'rgba(255,255,255,.06)';
+        ctx.fill('evenodd');
+      }
+      ctx.setLineDash(PAREA.on ? [] : [6 * v.dpr, 5 * v.dpr]);
+      ctx.strokeStyle = mine ? '#E8A23A' : 'rgba(255,255,255,.55)';
+      ctx.lineWidth = Math.max(v.dpr, v.hr * (mine ? 0.45 : 0.22));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const r = isl.r_m / mpp * v.k, fs = Math.max(v.hr * 1.1, Math.min(v.hr * 3.2, r * 0.9));
+      if(PAREA.on && r > v.hr * 0.5 && fs >= v.minFont) labels.push([isl.pt[0] * v.k + v.ox, isl.pt[1] * v.k + v.oy, fs, String(isl.id)]);
+    }
+    overlayLabels(ctx, labels, 0.18);
+  }
   $('#btnAddSlot').addEventListener('click', () => {
     const first = MAT.lib && MAT.lib.materials.find(m => m.kind === 'ground');
     ISLS.slots.push({ material: first ? first.id : 'same', picks: [] });

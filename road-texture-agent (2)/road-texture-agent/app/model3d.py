@@ -260,6 +260,13 @@ def _extend_road_colour(tex_arr, coverage, px):
     return out
 
 
+def _kerb_cov(inner):
+    """The kerb line's road (a project area's islands made road): its coverage at mask size, or None."""
+    if not inner or not inner.get("kerb_mask_path"):
+        return None
+    return prepare_mask(np.array(Image.open(inner["kerb_mask_path"]).convert("L")), 1)[1]
+
+
 def export_road_quads_glb(mask_path, texture_path, metres_per_pixel, output_scale, out_path,
                           straightness=0.7, spacing_m=2.0, optimise=False, inner=None):
     """
@@ -270,9 +277,9 @@ def export_road_quads_glb(mask_path, texture_path, metres_per_pixel, output_scal
     """
     gray = np.array(Image.open(mask_path).convert("L"))
     exact = inner["shapes"] if inner and inner.get("shapes") else None
-    mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
+    mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if inner else gray, 1)
     mesh, det, rep = QM.build(mask1, output_scale, metres_per_pixel, straightness, spacing_m,
-                              coverage=cov1, optimise=optimise, exact=exact)
+                              coverage=cov1, optimise=optimise, exact=exact, kerb_coverage=_kerb_cov(inner))
 
     _, coverage = prepare_mask(gray, output_scale)
     H, W = coverage.shape
@@ -650,7 +657,9 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     "grain" from its own grain, False none.
     inner: the inner streets as exact shapes, {"base_mask_path": the mask
     without them, "shapes": app/streets.py's shapes}: the other roads are
-    built from the mask without them, and they are laid as they are.
+    built from the mask without them, and they are laid as they are. With a
+    project area also "kerb_mask_path": that mask with its islands made road,
+    which the kerb line goes round (quadmesh.build's kerb_coverage).
     islands: the island material slots (server.py's _islands_for): the islands
     picked for a slot are laid with its material, block and small paved island.
     decals: the decals laid on the streets (app/decals.py), {"placements",
@@ -668,13 +677,14 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     exact = inner["shapes"] if inner and inner.get("shapes") else None
     if shared is None:
         gray = np.array(Image.open(mask_path).convert("L"))
-        mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if exact else gray, 1)
+        mask1, cov1 = prepare_mask(np.array(Image.open(inner["base_mask_path"]).convert("L")) if inner else gray, 1)
+        kcov = _kerb_cov(inner)
     else:
-        mask1, cov1 = shared["mask1"], shared["cov1"]
+        mask1, cov1, kcov = shared["mask1"], shared["cov1"], shared.get("cov_k")
     mesh, det, rep = QM.build(mask1, output_scale, metres_per_pixel, straightness, spacing_m,
                               coverage=cov1, kerb_band=True, dashes=dash_cfg or {},
                               sidewalk=sidewalk if sidewalk and tileset["tiles"].get("sidewalk") else None,
-                              bridges=bridges or None, optimise=optimise, exact=exact,
+                              bridges=bridges or None, optimise=optimise, exact=exact, kerb_coverage=kcov,
                               shared=shared["city"] if shared is not None else None, window=window)
     coverage = prepare_mask(gray, output_scale)[1] if shared is None else shared["coverage"]
     H, W = coverage.shape
