@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords8';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1026,6 +1026,7 @@ const UI_VERSION = '2026.10.15-coords8';   // must match VERSION in server.py
       $('#satBtns').hidden = false;
     } else { $('#satSum').textContent = ''; $('#satBtns').hidden = true; }
     satPlaceState();
+    dsCardState();
   }
   async function satPoll(){
     if(!SAT.key) return;
@@ -1057,6 +1058,136 @@ const UI_VERSION = '2026.10.15-coords8';   // must match VERSION in server.py
     genVp.show(img, { findings: 'Findings: every mark found, in its colour', confidence: 'Confidence of every tile',
                       satellite: 'Satellite' }[k]);
   }));
+  /* ---- Save to the dataset (app/dataset.py): what the analysis found, kept as training examples, only the kinds
+     you tick. Saved in the background; its progress at the bottom right of the page: one bar, and when you click it
+     a bar for each kind of each area being saved */
+  const DS = { jobs: [], open: false, timer: null, ended: new Set(), first: true };
+  function dsCardState(){
+    const d = SAT.data, on = !!(d && d.state !== 'none');
+    $('#satSave').hidden = !on;
+    if(!on) return;
+    const done = d.state === 'done';
+    const busy = DS.jobs.some(j => j.key === SAT.key && (j.state === 'running' || j.state === 'waiting'));
+    $('#btnSatSave').disabled = !done || busy;
+    $('#satSaveNote').textContent = !done ? 'When the analysis is done: keep what it found as training examples.'
+      : busy ? 'Saving this area to the dataset: its progress is at the bottom right.'
+      : 'Keep what it found as training examples; you tick which kinds.';
+  }
+  async function dsOpen(){
+    if(!SAT.key) return;
+    let r;
+    try{ r = await api('/api/dataset/categories/' + SAT.key); }catch(e){ log('Dataset: ' + e.message, 'bad'); return; }
+    DS.key = SAT.key;
+    const skip = new Set(['car', 'unknown']);             // cars and unnamed paint: only when asked
+    $('#dsList').innerHTML = r.categories.map(c => `<label class="ds-row"><input type="checkbox" data-k="${c.id}"${skip.has(c.id) ? '' : ' checked'}>`
+      + `<span>${c.label}</span><small>${fmt(c.count)} here${c.in_dataset ? ` · ${fmt(c.in_dataset)} in the dataset` : ''}</small></label>`).join('');
+    const kept = r.categories.reduce((a, c) => a + (c.from_area || 0), 0);
+    $('#dsNote').textContent = 'What the satellite analysis of this area found. Tick what to keep as training examples: each mark as '
+      + 'the satellite round it with its label (kind, size, angle, which way, how sure); road tiles as the satellite with its alpha.'
+      + (kept ? ` ${fmt(kept)} from this area are kept already: a kind saved again replaces them (none twice).` : '');
+    $('#dsWhere').textContent = `Kept in ${r.folder}, a folder for each kind. Saving goes on in the background.`;
+    $$('#dsList input').forEach(b => b.addEventListener('change', dsAllState));
+    dsAllState();
+    $('#dsPop').hidden = false;
+  }
+  function dsAllState(){
+    const bs = $$('#dsList input'), n = bs.filter(b => b.checked).length;
+    $('#dsAll').checked = n === bs.length && n > 0;
+    $('#dsAll').indeterminate = n > 0 && n < bs.length;
+    $('#dsGo').disabled = !n;
+    $('#dsGo').textContent = !n ? 'Save' : `Save ${n === bs.length ? 'all' : n} ${n === 1 ? 'kind' : 'kinds'}`;
+  }
+  const dsClose = () => { $('#dsPop').hidden = true; };
+  $('#btnSatSave').addEventListener('click', dsOpen);
+  $('#dsAll').addEventListener('change', () => { $$('#dsList input').forEach(b => { b.checked = $('#dsAll').checked; }); dsAllState(); });
+  $('#dsClose').addEventListener('click', dsClose);
+  $('#dsCancel').addEventListener('click', dsClose);
+  addEventListener('keydown', e => { if(e.key === 'Escape' && !$('#dsPop').hidden) dsClose(); });
+  $('#dsGo').addEventListener('click', async () => {
+    const kinds = $$('#dsList input').filter(b => b.checked).map(b => b.dataset.k);
+    if(!kinds.length || !DS.key) return;
+    $('#dsGo').disabled = true;
+    try{
+      const j = await api('/api/dataset/save', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ key: DS.key, kinds }) });
+      dsClose();
+      log(`Dataset: saving ${j.total.toLocaleString()} example(s) of ${kinds.length} kind(s) in the background; its progress is at the bottom right (click it for each kind).`);
+      DS.jobs = [j, ...DS.jobs.filter(q => q.id !== j.id)];
+      bgRender(); dsCardState(); dsPoll();
+    }catch(e){ log('Dataset not saved: ' + e.message, 'bad'); $('#dsGo').disabled = false; }
+  });
+  const dsLive = j => j.state === 'running' || j.state === 'waiting';
+  async function dsPoll(){
+    clearTimeout(DS.timer);
+    try{ DS.jobs = (await api('/api/dataset/jobs')).jobs || []; }catch(_){ DS.timer = setTimeout(dsPoll, 3000); return; }
+    for(const j of DS.jobs){
+      if(dsLive(j) || DS.ended.has(j.id)) continue;
+      DS.ended.add(j.id);
+      if(DS.first) continue;                                   // finished before the page opened
+      const what = j.cats.filter(c => c.kept).map(c => `${c.label.toLowerCase()} ${fmt(c.kept)}`).join(', ');
+      if(j.state === 'done') log(`Dataset: ${fmt(j.kept)} example(s) of ${j.title} saved in ${fmtTime(j.elapsed)} (${what}).`, 'ok');
+      else if(j.state === 'stopped') log(`Dataset: saving ${j.title} stopped; ${fmt(j.kept)} example(s) kept (${what || 'none'}).`);
+      else log(`Dataset: saving ${j.title} failed: ${j.error}`, 'bad');
+    }
+    DS.first = false;
+    bgRender(); dsCardState();
+    if(DS.jobs.some(dsLive)) DS.timer = setTimeout(dsPoll, 700);
+  }
+  // the bottom right: one bar for every task; open, each task and each of its kinds
+  function bgRender(){
+    const jobs = DS.jobs;
+    $('#bgTasks').hidden = !jobs.length;
+    if(!jobs.length){ DS.open = false; $('#bgPanel').hidden = true; return; }
+    const live = jobs.filter(dsLive), run = live.find(j => j.state === 'running');
+    let title, sub, frac, cls = '';
+    if(live.length){
+      const total = live.reduce((a, j) => a + j.total, 0), done = live.reduce((a, j) => a + j.done, 0);
+      const rate = run && run.done && run.elapsed ? run.done / run.elapsed : null;   // examples a second
+      const left = rate ? (total - done) / rate : null;
+      title = `Saving to the dataset${live.length > 1 ? ` · ${live.length} areas` : ''}`;
+      frac = total ? done / total : 0;
+      sub = `${Math.floor(frac * 100)}%` + (left != null ? ` · about ${fmtTime(Math.max(1, left))} left` : '');
+    }else{
+      const last = jobs[0], kept = jobs.reduce((a, j) => a + j.kept, 0);
+      title = last.state === 'done' ? 'Saved to the dataset ✓' : last.state === 'stopped' ? 'Saving to the dataset stopped' : 'Saving to the dataset failed';
+      sub = `${fmt(kept)} example${kept === 1 ? '' : 's'}`;
+      frac = 1; cls = last.state === 'failed' ? 'bad' : 'done';
+    }
+    $('#bgTitle').textContent = title; $('#bgSub').textContent = sub;
+    $('#bgFill').style.width = `${Math.round(frac * 100)}%`;
+    $('#bgTrack').className = 'bg-track' + (cls ? ' ' + cls : '');
+    $('#bgTasks').classList.toggle('open', DS.open);
+    $('#bgPanel').hidden = !DS.open;
+    if(!DS.open) return;
+    const bar = (f, c) => `<span class="bg-track${c ? ' ' + c : ''}"><i style="width:${Math.round(f * 100)}%"></i></span>`;
+    $('#bgPanel').innerHTML = jobs.map(j => {
+      const f = j.total ? j.done / j.total : (dsLive(j) ? 0 : 1), state = { running: 'saving', waiting: 'waiting its turn',
+        done: 'saved', stopped: 'stopped', failed: 'failed' }[j.state];
+      const timeTxt = j.state === 'running' ? ` · ${fmtTime(j.elapsed)} so far` + (j.left != null ? ` · about ${fmtTime(Math.max(1, j.left))} left` : '')
+        : j.state === 'waiting' ? '' : ` in ${fmtTime(j.elapsed)}`;
+      return `<div class="bg-job"><div class="bg-jh"><b>${j.title}</b>`
+        + (dsLive(j) ? `<button type="button" data-stop="${j.id}" title="Stop saving this area (what is saved stays)">Stop</button>`
+                     : `<button type="button" data-dismiss="${j.id}" title="Take it off this list">×</button>`) + '</div>'
+        + `<div class="bg-js">${state} · ${fmt(j.done)} of ${fmt(j.total)}${timeTxt}${j.error ? ' · ' + j.error : ''}</div>`
+        + j.cats.map(c => `<div class="bg-cat"><b>${c.label}</b><span>${fmt(c.done)} / ${fmt(c.total)}`
+            + (c.state === 'running' && c.left != null ? ` · ${fmtTime(Math.max(1, c.left))}` : c.state === 'done' ? ' ✓' : c.state === 'stopped' ? ' · stopped' : '')
+            + `</span>${bar(c.total ? c.done / c.total : (c.state === 'done' ? 1 : 0), c.state === 'done' ? 'done' : c.state === 'stopped' ? 'bad' : '')}</div>`).join('')
+        + '</div>';
+    }).join('');
+    $$('#bgPanel [data-stop]').forEach(b => b.addEventListener('click', async e => {
+      e.stopPropagation();
+      try{ await api('/api/dataset/cancel/' + b.dataset.stop, { method:'POST' }); }catch(_){}
+      dsPoll();
+    }));
+    $$('#bgPanel [data-dismiss]').forEach(b => b.addEventListener('click', async e => {
+      e.stopPropagation();
+      try{ await api('/api/dataset/dismiss/' + b.dataset.dismiss, { method:'POST' }); }catch(_){}
+      DS.jobs = DS.jobs.filter(j => j.id !== b.dataset.dismiss); bgRender();
+    }));
+  }
+  $('#bgBar').addEventListener('click', () => { DS.open = !DS.open; bgRender(); });
+  dsPoll();                                                    // what was being saved when the page opened
+
   /* ---- Place decals from what the satellite saw (app/observed.py): in the tiles rated at or above the
      threshold the markings it found, where it found them; under it the rules, that tile only */
   const SAT_PRESET = { zebra: ['zebra crossing', 'zebra crossings'], stop: ['stop line', 'stop lines'],

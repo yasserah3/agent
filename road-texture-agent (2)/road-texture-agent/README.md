@@ -284,6 +284,40 @@ and 33 of 34 arrows of the right kind. With the threshold at 75% the tile at 71%
 (the missing picture) went to the rules: its 4 arrows by the rules, the rest from
 the satellite.
 
+### Save to the dataset
+
+When an area's satellite analysis is done, **Save to the dataset** on its card
+(under Decals from what it saw) keeps what it found as training examples. Nothing
+is saved by itself: you choose when, and what.
+
+- **The popup** lists every kind the analysis found in the area, each with how
+  many it found here and how many the dataset holds already: zebra crossings,
+  stop lines, give way lines, cyclist crossings, arrows, parking bays, lane lines
+  (dashed and solid), cars (what hides the road), unknown paint (to name later),
+  and the road tiles. Tick what to keep, or **Select all**; cars and unknown
+  paint start unticked. **Save** saves the ticked kinds.
+- **Saving runs in the background.** A bar at the **bottom right** of the page
+  shows how far it is and the time left; **click it** and it opens above itself
+  into a small window with a bar for each kind of each area being saved (how
+  many of how many, the time left, a tick when done), and **Stop** for an area
+  still saving (what is saved stays). Several areas wait their turn. A finished
+  one stays on the list (after a reload too) until you take it off with ×; the
+  console says what was saved.
+- **What is kept**, in the workspace's `dataset` folder, a folder for each kind:
+  - each mark as the satellite round it (its box and 2 m all round, at the
+    area's own resolution), and a line in the kind's `index.jsonl`: the area,
+    where it is (longitude, latitude, pixels), its label (kind, angle, size in
+    metres, which way an arrow points and its kind, a solid line's points), how
+    sure (its score, its tile's road and markings confidence) and the analysis
+    version;
+  - each analysed tile with road as two pictures of the same square, the
+    satellite (`_sat`) and the alpha (`_alpha`, white road), with its confidence
+    and its reasons: the pairs the street layout is learned from;
+  - `dataset.json`: every kind's total and the areas saved (bounds, zoom,
+    metres a pixel, when, how many of each).
+- **Saving an area again** replaces its examples of the kinds saved: none twice.
+- On the test area: 474 examples of 10 kinds in about a second.
+
 ## Memory tab and the ordered libraries
 
 Every pair keeps its own library for each part of the road: junction, kerb and

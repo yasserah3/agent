@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords8"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords9"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -4074,6 +4074,72 @@ def coords_analyse(key: str):
     if not (folder / "alpha.png").exists():
         raise HTTPException(409, "make the area's alpha first")
     return {"job": SA.start(folder, area)}
+
+
+# ------------------------------------------------------------------ the dataset
+# What an area's satellite analysis found, kept as training examples when asked (Save to
+# the dataset, on the satellite card): the kinds ticked, saved in the background
+# (app/dataset.py), each kind's progress shown at the bottom right of the page.
+DATASET = WORK / "dataset"
+
+
+def _area_of(key):
+    folder = COORDS / key
+    if not re.fullmatch(r"[0-9a-f]{12}", key or "") or not (folder / "area.json").exists():
+        raise HTTPException(404, "unknown area")
+    return folder, json.loads((folder / "area.json").read_text())
+
+
+@app.get("/api/dataset/categories/{key}")
+def dataset_categories(key: str):
+    """What an area's analysis can give the dataset (each kind: how many here, how many kept already)."""
+    from app import dataset as DS
+    folder, area = _area_of(key)
+    cats = DS.categories(DATASET, folder)
+    if not cats:
+        raise HTTPException(409, "the satellite analysis of this area is not done yet")
+    return {"key": key, "bounds": area.get("bounds"), "categories": cats, "folder": str(DATASET)}
+
+
+@app.post("/api/dataset/save")
+def dataset_save(payload: dict):
+    """Save an area's chosen kinds (payload "kinds") to the dataset, in the background: the job."""
+    from app import dataset as DS
+    folder, area = _area_of(payload.get("key"))
+    have = {c["id"] for c in DS.categories(DATASET, folder)}
+    if not have:
+        raise HTTPException(409, "the satellite analysis of this area is not done yet")
+    order = [k for k, _ in DS.KINDS] + [DS.ROAD]
+    kinds = [k for k in order if k in set(payload.get("kinds") or []) and k in have]
+    if not kinds:
+        raise HTTPException(400, "tick at least one kind to save")
+    b = area.get("bounds") or []
+    title = (f"Area {folder.name} ({b[0]:.5f} to {b[1]:.5f}, {b[3]:.5f} to {b[2]:.5f})" if len(b) == 4
+             else f"Area {folder.name}")
+    mem.record("dataset_save", f"saving {', '.join(kinds)} of area {folder.name} to the dataset",
+               {"key": folder.name, "kinds": kinds})
+    return DS.start(DATASET, folder, area, kinds, title)
+
+
+@app.get("/api/dataset/jobs")
+def dataset_jobs():
+    from app import dataset as DS
+    return {"jobs": DS.jobs()}
+
+
+@app.post("/api/dataset/cancel/{jid}")
+def dataset_cancel(jid: str):
+    from app import dataset as DS
+    j = DS.cancel(jid)
+    if j is None:
+        raise HTTPException(404, "no such job")
+    return j
+
+
+@app.post("/api/dataset/dismiss/{jid}")
+def dataset_dismiss(jid: str):
+    from app import dataset as DS
+    return {"ok": DS.dismiss(jid)}
 
 
 @app.post("/api/coords/place-decals")
