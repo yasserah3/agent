@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords3"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords4"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -3870,14 +3870,39 @@ def coords_place_decals(payload: dict):
             _write_json(DECALS / "layers.json", layers)
     st = OBS.check_settings(dict(payload, key=key, satellite_only=only + added))
     _write_json(OBS.settings_path(ARTIFACTS, gid), st)
-    area = LN.area_check(payload["mark_area"] if "mark_area" in payload
-                         else _load_area(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])))
+    base_rec = mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])
+    area = LN.area_check(payload["mark_area"] if "mark_area" in payload else _load_area(base_rec))
+    # the lane lines: each street's lanes as the satellite shows them, among the Lanes tool's choices
+    # (yours win), then the streets whose lanes changed laid again
+    saved = LN.picks_list(_load_lanes(base_rec))
+    lane_rep, sat_picks = None, []
+    streets_art = mem.artifact(f"{gid}_streets")
+    if st["on"] and streets_art and Path(streets_art["path"]).exists():
+        dashes = art["meta"].get("dashes") or {}
+        cfg = dict(dashes.get("marks") or RM.legacy_config(9.0, 0.6, 0.15, None, 2.0))
+        cfg.update({k: v for k, v in (_marks_overrides(payload.get("marks")) or {}).items() if v})
+        rec = mem.image(art["meta"]["mask"])
+        sat_picks, lane_rep = OBS.read_lanes(json.loads(Path(streets_art["path"]).read_text()).get("streets") or [],
+                                             OBS.load_analysis(COORDS / key), float(art["meta"]["scale"]),
+                                             (int(rec["height"]), int(rec["width"])), cfg, st["threshold"], st["fill"])
+    picks = OBS.merge_picks(saved, sat_picks)
+    lanes_moved = None
+    if picks != saved:
+        path = ARTIFACTS / f"{_lanes_key(base_rec)}.json"
+        _write_json(path, picks)
+        mem.add_artifact(_lanes_key(base_rec), "lane_picks", path, {"mask": base_rec["id"], "picks": len(picks)})
+    lanes_art = mem.artifact(f"{gid}_lanes")
+    if lanes_art and Path(lanes_art["path"]).exists() and LN.picks_list((lanes_art["meta"] or {}).get("picks")) != picks:
+        out = _lanes_repaint({"generation": gid, "lane_picks": picks, "mark_area": area})
+        lanes_moved = {"streets": len(out["changed"]), "seconds": out["seconds"]}
     res = _lay_decals(gid, layers, "painted" if payload.get("mode") == "painted" else "separate",
                       int(payload.get("seed", 7)), area, True, _marks_overrides(payload.get("marks")))
     mem.record("place_decals_satellite",
                f"decals from the satellite: {(res.get('observed') or {}).get('laid', 0)} seen, threshold {st['threshold']}%"
-               if st["on"] else "decals by the rules alone", {"generation": gid, "settings": st, "added": added})
-    return dict(res, settings=st, added=added, decal_layers=layers)
+               if st["on"] else "decals by the rules alone", {"generation": gid, "settings": st, "added": added,
+                                                            "lanes": lane_rep and {k: v for k, v in lane_rep.items() if k != "streets"}})
+    return dict(res, settings=st, added=added, decal_layers=layers, lane_picks=picks, lanes=lane_rep,
+                lanes_read_moved=lanes_moved)
 
 
 @app.get("/api/coords/placed/{gid}")
@@ -3885,7 +3910,7 @@ def coords_placed_picture(gid: str):
     """
     The decals laid on a generation made from coordinates, over its satellite: those
     the satellite saw in green, those the rules laid in amber, the tiles under the
-    threshold shaded (app/observed.py).
+    threshold shaded, and the lanes it read on each street it set (app/observed.py).
     """
     from app import observed as OBS
     art, dec = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_decals")
@@ -3924,6 +3949,18 @@ def coords_placed_picture(gid: str):
             # an arrow: a tick at its head
             hx, hy = q["x"] + q["ux"] * q["h_m"] / mpp / 2, q["y"] + q["uy"] * q["h_m"] / mpp / 2
             d.ellipse([hx * km - 2, hy * km - 2, hx * km + 2, hy * km + 2], fill=col)
+    # the lanes the satellite read: on each street it set, how many (cyan)
+    from app import sat_analysis as SA
+    font = SA._font(14)
+    for q in LN.picks_list(_load_lanes(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"]))):
+        if q.get("src") != "satellite":
+            continue
+        a, b = q["sides"]
+        t = f"{a} + {b} lanes" if a + b else "no lines"
+        x, y = q["pt"][0] * km, q["pt"][1] * km
+        w_ = d.textlength(t, font=font)
+        d.rectangle([x - w_ / 2 - 4, y - 10, x + w_ / 2 + 4, y + 10], fill=(10, 30, 40))
+        d.text((x - w_ / 2, y - 8), t, font=font, fill=(90, 220, 255))
     im.save(out, quality=88)
     return FileResponse(out)
 

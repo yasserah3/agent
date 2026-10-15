@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords4';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1104,6 +1104,11 @@ const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
       if(S.gen.islandTex && S.gen.islandTex.gid === gid) S.gen.islandTex.urls.full = res.urls.full;
       SAT.placed = res.settings; SAT.settingsFor = gid;
       $('#btnPlaceDecals').classList.remove('attention');
+      if(res.lane_picks && S.gen.mask){
+        // the satellite's lane choices are among the Lanes tool's now (yours win): already laid on the texture
+        LANES.picks = res.lane_picks; S.gen.lanesPainted = JSON.stringify(LANES.picks);
+        renderLanes(); drawBridges();
+      }
       const o = res.observed;
       if(o){
         log(`Decals from the satellite: ${satCount(o.observed) || 'none'} laid where it saw them, in ${o.tiles.seen} tile(s) at or over ${o.threshold}%`
@@ -1113,8 +1118,16 @@ const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
           + (o.ends.dropped ? `; at ${o.ends.dropped} it saw none, so they run on to the junction` : '') + '.');
         const sk = o.skipped;
         if(sk.faint || sk.overlap) log(`  Not laid: ${[sk.faint ? `${sk.faint} too faint to be sure` : '', sk.overlap ? `${sk.overlap} lying on another found mark` : ''].filter(Boolean).join(', ')}.`);
-        if(Object.keys(o.not_read).length) log(`  Seen but laid by the lane rules, not as decals: ${satCount(o.not_read)}.`);
-      } else log(`Decals by the rules alone again: ${res.count.toLocaleString()} laid (${res.seconds.toFixed(1)} s).`, 'ok');
+        const ln = res.lanes;
+        if(ln) log(`  Lane lines from the satellite: ${ln.read} street(s) read`
+          + (ln.read ? ` (${ln.same} as the rules have them, ${ln.changed} set from what is painted${ln.none ? `, ${ln.none} of them with no lines` : ''})` : '')
+          + (ln.not_seen ? `; ${ln.not_seen} not seen well enough: their lanes by the rules` : '')
+          + '. They are in the Lanes tool as "from the satellite": set one by hand and yours wins.');
+        (ln && ln.streets || []).filter(r => r.sides.join() !== r.rules.join()).slice(0, 12).forEach(r =>
+          log(`    Street ${r.id}: ${r.sides[0] + r.sides[1] ? r.sides.join(' + ') + ' lanes' : 'no lines'} (the rules: ${r.rules.join(' + ')}).`));
+        if(res.lanes_read_moved && res.lanes_read_moved.streets) log(`  Lane lines laid again on ${res.lanes_read_moved.streets} street(s) for their lanes (${res.lanes_read_moved.seconds.toFixed(1)} s).`);
+      } else log(`Decals by the rules alone again: ${res.count.toLocaleString()} laid (${res.seconds.toFixed(1)} s)`
+        + (res.lanes_read_moved && res.lanes_read_moved.streets ? `; the lanes by the rules again on ${res.lanes_read_moved.streets} street(s)` : '') + '.', 'ok');
       if(res.lanes_moved) log(`  Lane lines laid again on ${res.lanes_moved.streets} street(s) so they end at the markings (${res.lanes_moved.seconds.toFixed(1)} s).`);
       $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
       try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
@@ -2359,7 +2372,7 @@ const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
     const [ca, cb] = laneSides(s.width_m, [a, b]);
     let k = of.get(i);
     if(k == null){ LANES.picks.push({ pt: midOf(s.line).map(v => Math.round(v * 10) / 10), sides: [ca, cb] }); }
-    else LANES.picks[k].sides = [ca, cb];
+    else { LANES.picks[k].sides = [ca, cb]; delete LANES.picks[k].src; }        // set by hand: yours, not the satellite's
     lanesChanged();
   }
   function setEven(i){
@@ -2407,9 +2420,11 @@ const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
       const row = document.createElement('div'); row.className = 'll-row';
       const i = owner.get(k);
       row.innerHTML = `<span></span><button type="button" class="ll-x" title="Back to the even split">×</button>`;
-      $('span', row).textContent = i != null
-        ? `${streetName(LANES.streets[i])} (${LANES.streets[i].width_m.toFixed(1)} m): ${laneSides(LANES.streets[i].width_m, p.sides).slice(0, 2).join(' + ')} lanes`
-        : `${p.sides.join(' + ')} lanes at (${Math.round(p.pt[0])}, ${Math.round(p.pt[1])})${LANES.streets ? ': on no street now' : ''}`;
+      const lanesTxt = sd => sd[0] + sd[1] ? `${sd[0]} + ${sd[1]} lanes` : 'no lines';
+      $('span', row).textContent = (i != null
+        ? `${streetName(LANES.streets[i])} (${LANES.streets[i].width_m.toFixed(1)} m): ${lanesTxt(laneSides(LANES.streets[i].width_m, p.sides))}`
+        : `${lanesTxt(p.sides)} at (${Math.round(p.pt[0])}, ${Math.round(p.pt[1])})${LANES.streets ? ': on no street now' : ''}`)
+        + (p.src === 'satellite' ? ' · from the satellite' : '');
       row.addEventListener('click', () => { if(i != null){ LANES.sel = i; if(!LANES.on) lanesMode(true); else { renderLanes(); drawBridges(); } } });
       $('.ll-x', row).addEventListener('click', e => { e.stopPropagation(); LANES.picks.splice(k, 1); LANES.sel = -1; lanesChanged(); paintLanes(); });
       list.appendChild(row);

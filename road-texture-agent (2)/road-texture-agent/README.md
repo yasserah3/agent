@@ -202,8 +202,8 @@ it found them (app/observed.py):
   the junction); a crossing it saw anywhere cuts the lines it lies across.
 - A STOP word is laid in a seen tile only before a stop line the satellite saw;
   pictures (imported decals) and the yellow box are laid by their layers as before.
-  Lane dashes, solid lines and parking bays it saw are counted, not laid as decals
-  (the lane lines are the Lanes rules').
+  Parking bays it saw are counted, not laid (no decal for them yet).
+- **The lane lines** follow the satellite too (below).
 - A road marking layer missing from the Decals panel (say cyclist crossings) is added
   for what the satellite saw, and laid from it alone: the rules lay none of it.
 - **Rules only** lays the decals by the rules alone again, as before. **Show placed
@@ -212,6 +212,39 @@ it found them (app/observed.py):
 - The choice is kept with the texture: Update decals and Update 2D texture keep to
   it. A texture not made from coordinates, or one where Place decals was never
   pressed, is laid exactly as before.
+
+**Lane lines from the satellite.** Place decals also reads each street's lanes from
+the lines painted along it (app/observed.py, read_lanes), the satellite first and
+the width rules where it cannot:
+
+- The **width rules stay the frame**: a street holds at most as many lanes as its
+  width allows (3 m each at least, the island from 22 m, a highway from 18 m), the
+  lanes are equal, and the lines are drawn where those rules put them. The satellite
+  only chooses **which of the splits the width allows** is painted there: every split
+  (1 + 1, 2 + 1, 2 + 2, 3 one way, ...) has its lines laid where the rules put them
+  and set against the painted lines (dashes and solid lines along the street, not the
+  edge lines at the kerbs; the street map may lie up to 1.2 m off the satellite); the
+  split whose lines are painted, with no painted line left over, wins. Splits whose
+  lines lie in the same places are told apart by the arrows (one way when the arrows on
+  both halves of the road point the same way; driving on the right, which side has more
+  lanes from where each way's arrows are), then by a solid centre line where the guide
+  puts one, then the even split.
+- A street the satellite saw well (60% of its length in tiles at or above the
+  threshold) **with no lines at all** gets none (at least 25 m of it seen; with "Rules
+  also where it saw none" ticked, the rules' lanes instead).
+- A street mostly in tiles **under the threshold**, or too narrow for lines, keeps the
+  width rules' even split, as before.
+- The satellite's choices go into the **Lanes tool** as "from the satellite" (kept with
+  the mask, used by Generate texture, Update 2D texture and the 3D model). **Your own
+  choice on a street wins**; changing a satellite choice by hand makes it yours. Rules
+  only takes the satellite's choices away again.
+- Show placed decals writes each street's lanes as read (cyan).
+
+Measured on a second stand-in painted with lanes the width rules would not choose (a
+street with no lines, a 3-lane one-way, 1 + 1 and 2 + 2 where the rules give 2 + 2 and
+3 + 3, an uneven 2 + 1, a 4 + 4 highway where the Saudi highway setting gives 3 + 3):
+all 7 streets read as painted; on the first stand-in (painted by the rules) all 7 read
+as the rules have them, the 4 + 4 highway included.
 
 Measured on the stand-in area (the same as above): the rules alone laid 10 of the 15
 zebra crossings there, 7 of 11 stop lines, 3 of 4 give way lines, 10 of 15 cyclist

@@ -448,7 +448,10 @@ def canonical(p0, p1):
 
 
 def picks_list(raw):
-    """Lane choices as sent by the page, checked: [{"pt": [x, y] (mask pixels), "sides": [a, b]}]."""
+    """
+    Lane choices as sent by the page, checked: [{"pt": [x, y] (mask pixels), "sides": [a, b]}],
+    with "src": "satellite" on those read from the satellite (app/observed.py), not set by hand.
+    """
     out = []
     for p in (raw or [])[:5000]:
         try:
@@ -456,7 +459,10 @@ def picks_list(raw):
             a, b = int(p["sides"][0]), int(p["sides"][1])
         except (KeyError, TypeError, ValueError, IndexError):
             continue
-        out.append({"pt": [round(x, 1), round(y, 1)], "sides": [max(0, min(40, a)), max(0, min(40, b))]})
+        q = {"pt": [round(x, 1), round(y, 1)], "sides": [max(0, min(40, a)), max(0, min(40, b))]}
+        if isinstance(p, dict) and p.get("src") == "satellite":
+            q["src"] = "satellite"
+        out.append(q)
     return out
 
 
