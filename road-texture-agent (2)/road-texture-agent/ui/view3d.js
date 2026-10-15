@@ -1010,6 +1010,8 @@ async function generatePatches(keep, gid){
   stopPhoto();
   const update = keep && PATCHES && PATCHES.gid === gid && world;
   const job = window.trackJob ? window.trackJob(update ? 'Updating the 3D scene (patches)' : 'Building the 3D scene in 1 km patches') : null;
+  // the dots asked for at once, alongside the patches (the server makes them in seconds)
+  const early = !update && DOTS_PREF.look === 'dots' ? loadDots(gid).catch(e => { console.warn('Dots:', e); return null; }) : null;
   try{
     const t = controls.target;
     const r = await fetch('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1018,7 +1020,7 @@ async function generatePatches(keep, gid){
     const res = await r.json();
     if(!r.ok) throw new Error(res.detail || 'the 3D model could not be built');
     if(PATCHES && PATCHES.job && PATCHES.job !== job) PATCHES.job.done(true, 'replaced by a newer build');
-    if(update) updatePatches(res); else await startPatches(res, gid);
+    if(update) updatePatches(res); else await startPatches(res, gid, early);
     PATCHES.job = job;
     builtFrom = buildKey();
     staleCheck();
@@ -1064,7 +1066,7 @@ function disposeMaterial(m){
   m.dispose();
 }
 
-async function startPatches(res, gid){
+async function startPatches(res, gid, early){
   endPatches();
   if(world){ scene.remove(world); world.traverse(o => { if(o.geometry) o.geometry.dispose(); }); }
   dropBakes();
@@ -1104,7 +1106,7 @@ async function startPatches(res, gid){
     PATCHES.flat.add(sq);
   }
   updatePatches(res);
-  showDots(gid, false);                                              // the map as dots while it is built
+  showDots(gid, false, early);                                       // the map as dots while it is built
   frame(new THREE.Vector3(0, 0, 0), Math.min(900, Math.max(Wm, Hm) / 2));
   // as far out as the haze lets the map show (further, the sky's haze covers it all)
   controls.maxDistance = Math.min(4500, Math.max(Wm, Hm) * 1.1);
@@ -1339,12 +1341,12 @@ async function loadDots(gid){
 }
 
 // the map as dots while it is built: shown at once (the server makes them in seconds)
-async function showDots(gid, all){
+async function showDots(gid, all, early){
   endDots();
   if(DOTS_PREF.look !== 'dots') return null;
   const mine = DOTS = { gid, loading: true };
   try{
-    const d = await loadDots(gid);
+    const d = (early && await early) || await loadDots(gid);
     if(DOTS !== mine){ disposeDots(d); return null; }
     DOTS = d; d.all = all;
     DOTS_U.uMaxH.value = Math.max(1, d.head.max_h); DOTS_U.uCell.value = d.head.patch_m;
