@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords4"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords5"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -3955,6 +3955,8 @@ def coords_placed_picture(gid: str):
     for q in LN.picks_list(_load_lanes(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"]))):
         if q.get("src") != "satellite":
             continue
+        for t in q.get("trace") or []:                           # the lines as traced, where they are painted
+            d.line([(x * km, y * km) for x, y in t["pts"]], fill=(90, 220, 255), width=1)
         a, b = q["sides"]
         t = f"{a} + {b} lanes" if a + b else "no lines"
         x, y = q["pt"][0] * km, q["pt"][1] * km

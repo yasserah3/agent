@@ -67,8 +67,9 @@ from scipy import ndimage as ndi
 
 Image.MAX_IMAGE_PIXELS = None
 
-VERSION = 3                  # 2: an arrow's way (toward) and its box's middle; a zebra's span from its outer stripes
+VERSION = 4                  # 2: an arrow's way (toward) and its box's middle; a zebra's span from its outer stripes
                              # 3: an arrow's kind (straight, left, right, ...) from its shape
+                             # 4: a solid line's shape (pts: its middle every metre), so curved lines are followed
 TILE = 512
 CONTEXT_M = 20.0           # each tile sees this much of its neighbours (a lane line's dashes repeat every 9 to 12 m)
 OPEN_M = 2.6                 # the opening's square: marks narrower than this stand out
@@ -266,9 +267,10 @@ def analyse_tile(task):
                           "ang": float(ang[i]), "phi": math.degrees(phi), "th": th, "coh": ch, "edge_m": em,
                           "contrast": float(contrast[i]), "yellow": float(yel[i]) > 0.5, "dashed": dashed,
                           "toward": toward, "mid": mid})
-            if toward is not None:
+            if toward is not None or cls == "lane_solid":
                 sel = m["k"] == i
-                parts[-1]["_px"] = (m["xs"][sel], m["ys"][sel])      # its pixels: an arrow's kind from its shape
+                # its pixels: an arrow's kind from its shape, a solid line's path
+                parts[-1]["_px"] = (m["xs"][sel] + X0, m["ys"][sel] + Y0)
     # dark bodies and coloured bodies the size of a car
     for mask in (darks, coloured):
         lab2, n2, m2 = _components(mask)
@@ -437,6 +439,27 @@ def _arrow_kind(xs, ys, toward):
     return order[0][0], round(order[0][1], 3), round(order[1][1], 3)
 
 
+def _polyline(xs, ys, ang, mpp, step_m=1.0):
+    """
+    A long mark's middle line, [[x, y], ...] every step_m along it: its pixels in slices
+    across its long side (a line along a curving street bends; each slice's middle).
+    """
+    xs, ys = np.asarray(xs, np.float64), np.asarray(ys, np.float64)
+    if len(xs) < 4:
+        return [[round(float(xs.mean()), 1), round(float(ys.mean()), 1)]] if len(xs) else []
+    c, s_ = math.cos(ang), math.sin(ang)
+    t = (xs - xs.mean()) * c + (ys - ys.mean()) * s_
+    k = np.floor((t - t.min()) / max(step_m / mpp, 1.0)).astype(int)
+    n = np.bincount(k)
+    mx, my = np.bincount(k, xs) / np.maximum(n, 1), np.bincount(k, ys) / np.maximum(n, 1)
+    keep = n > 0
+    pts = np.column_stack([mx[keep], my[keep]])
+    # its two ends: the pixels furthest along it, so the line is as long as the paint
+    i0, i1 = int(np.argmin(t)), int(np.argmax(t))
+    pts = np.vstack([[xs[i0], ys[i0]], pts, [xs[i1], ys[i1]]])
+    return [[round(float(x), 1), round(float(y), 1)] for x, y in pts]
+
+
 def _classify(L, W, A, F, el, phi, edge_m):
     """
     A mark's first name from its size (metres), fill, length to width, angle to the road
@@ -481,6 +504,8 @@ def _group(parts, mpp):
 
     def emit(p, cls, s=None, **extra):
         x, y = float(p["x"]), float(p["y"])
+        if cls == "lane_solid" and p.get("_px") is not None:
+            extra = dict(extra, pts=_polyline(p["_px"][0], p["_px"][1], p["ang"], mpp))
         if cls == "arrow" and p.get("toward"):
             # an arrow at its box's middle (its centre of mass lies toward the head), pointing as its head does
             x, y = x + p["mid"] * math.cos(p["ang"]), y + p["mid"] * math.sin(p["ang"])

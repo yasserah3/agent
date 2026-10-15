@@ -238,7 +238,37 @@ the width rules where it cannot:
   the mask, used by Generate texture, Update 2D texture and the 3D model). **Your own
   choice on a street wins**; changing a satellite choice by hand makes it yours. Rules
   only takes the satellite's choices away again.
-- Show placed decals writes each street's lanes as read (cyan).
+- Show placed decals writes each street's lanes as read and draws its traced lines (cyan);
+  the Lanes tool draws the traced lines on the map too.
+
+**Each line where it is painted (traced).** The satellite also gives each line's own
+path: every line painted along a street is followed, however many there are, so the
+lines are laid as they are painted, not only as many as are painted:
+
+- A line **bends, drifts and weaves** as the paint does (followed step by step: each
+  next piece of paint where the last 10 m of the line heads), so lanes may be unequal and
+  a line off the street map's centre stays where it is painted.
+- A line **starts or stops** where its paint does (a lane added or ending part way), and
+  leaves a **gap** where the paint stops for 20 m or more (a junction the street runs
+  through), but not where the road is only hidden (shadow, trees, a car): the paint runs
+  on under them. Within 15 m of a street's end it runs on to the end, where the
+  junction's markings or the setback stop it, as before.
+- **Dashed or solid** as the satellite shows it; the dash length, gap, line width and
+  colour are the Road markings panel's (the Saudi sizes). The lines along an island or a
+  kerb stay solid. The kerb edge lines are left to the rules.
+- The 2D texture, the lanes laid again on Done and Update 2D texture, and the 3D model all
+  draw the traced lines (kept with the street's lane choice). The lane count read stays
+  for the arrows and the Lanes tool. Changing a street's lanes by hand takes its traced
+  lines away: the rules lay your lanes.
+- Analysis version 4 keeps the shape of every solid line (curved lines followed whole).
+
+Measured on a third stand-in with lines painted by hand where the rules would not put
+them (two lines weaving 0.9 m either way in a 60 m wave, three unequal lanes of 3.3, 4.0
+and 4.5 m under two building shadows, a lane line starting part way, two lines bending
+0.6 m): the traced lines lie 15 cm from the paint on average (95% within 30 cm), each
+weaving line traced the whole 86 m of its street, the unequal lanes unbroken under the
+shadows; on straight lines 7 cm. The 3D model's line strips lie on the traced lines (8 to
+9 cm from their middles, half a line's width).
 
 Measured on a second stand-in painted with lanes the width rules would not choose (a
 street with no lines, a 3-lane one-way, 1 + 1 and 2 + 2 where the rules give 2 + 2 and

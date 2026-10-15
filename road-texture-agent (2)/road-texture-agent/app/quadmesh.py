@@ -846,7 +846,7 @@ def _inner_lanes(mesh, picks, mpp):
         pt = Point(*pk["pt"])
         best = min(((ls.distance(pt), i, k, hw) for i, k, ls, hw in mesh.inner_lines), default=None)
         if best and best[0] <= best[3] + 1.0 / mpp:
-            out[(best[1], best[2])] = tuple(pk["sides"])
+            out[(best[1], best[2])] = LN.choice(pk)
     return out
 
 
@@ -866,7 +866,7 @@ def _chain_picks(mesh, picks):
     for p in picks:
         d, i = ci.tree.query(p["pt"])
         if d <= ci.W[i] / 2 / ci.px + 1.0:
-            out[int(which[i])] = tuple(p["sides"])
+            out[int(which[i])] = LN.choice(p)
     return out
 
 
@@ -955,7 +955,7 @@ def relane(mesh, picks, area=_KEEP, ends=_KEEP, marks=None):
         if (old is None) != (new is None):
             flipped = True
         if any((old or {}).get(k) != (new or {}).get(k) for k in ("lines", "island", "kept", "setback_m",
-                                                                  "setback_end_m")):
+                                                                  "setback_end_m", "traced")):
             changed.add(c["owner"])
         if c["owns"] and c["owner"] in mesh.streets:
             mesh.streets[c["owner"]]["dash"] = new
@@ -1103,10 +1103,20 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
         x_at, isl_at = LN.chain_offsets(lay, wid, marks["rules"], marks.get("edge_inset"))
     else:
         x_at, isl_at = [x for x, _ in lay["lines"]], None
+    kinds, outside = [kd for _, kd in lay["lines"]], [[] for _ in lay["lines"]]
+    traces = getattr(sides, "traces", None)
+    if traces:
+        # the satellite's lines (app/observed.py): each where it is painted, and only where it is
+        un = side / np.maximum(np.linalg.norm(side, axis=1, keepdims=True), 1e-9)
+        kinds, x_at, t_isl, outside = LN.traced_offsets(pts, un * sgn, arc, mpp, lay["lines"], lay["island"], traces)
+        isl_at = t_isl if t_isl is not None else isl_at
+        layout["traced"] = repr(traces)
+        for kd in set(kinds) - set(styles):
+            styles[kd] = dict(RM.kind_style(marks, kd, street_m))
     area = mesh.mark_area
     kept = 0
     reservations = LN.ReservationIndex(mesh.line_ends)
-    for li_, (_, kind) in enumerate(lay["lines"]):
+    for li_, kind in enumerate(kinds):
         stl = styles[kind]
         halfw = stl["width"] / 2 / mpp
         solid = kind in LN.SOLID_KINDS
@@ -1120,6 +1130,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
         for off in offs:
             q = pts + side * (off[:, None] if np.ndim(off) else off)
             blocked = reservations.blocked(q, arc, halfw + .2 / mpp)
+            if outside[li_]:
+                blocked = LN.merge_runs(blocked + outside[li_])
             for a_m, b_m in pieces:
                 a, b = sorted((to_arc(a_m) / mpp, to_arc(b_m) / mpp))
                 safe_runs = LN.clear_runs(a, b, blocked)

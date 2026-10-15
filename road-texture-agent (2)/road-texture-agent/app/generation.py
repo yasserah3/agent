@@ -428,6 +428,15 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             x_at = [x.astype(np.float32) for x in xs_]
         else:
             x_at, isl_at = [x for x, _ in lay["lines"]], None
+        kinds, outside = [k for _, k in lay["lines"]], [[] for _ in lay["lines"]]
+        traces = getattr(chosen.get(s), "traces", None)
+        if traces:
+            # the satellite's lines (app/observed.py): each where it is painted, and only where it is
+            kinds, x_at, t_isl, outside = LN.traced_offsets(pts[:, ::-1] + [ox, oy], nrm[:, ::-1], dist, px,
+                                                            lay["lines"], lay["island"], traces)
+            isl_at = t_isl if t_isl is not None else isl_at
+            for k in set(kinds) - set(styles):
+                styles[k] = dict(RM.kind_style(cfg, k, w_m))
 
         def along(off_px, a, b):
             """The line off_px to the side (one value, or one per point), from a to b along the centreline."""
@@ -436,7 +445,7 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             ends_ = [np.array([np.interp(v, dist, q[:, 0]), np.interp(v, dist, q[:, 1])], np.float32) for v in (a, b)]
             return np.vstack([ends_[0][None], inner, ends_[1][None]]) if len(inner) else np.vstack(ends_)
 
-        for li_, (_, kind) in enumerate(lay["lines"]):
+        for li_, kind in enumerate(kinds):
             stl = styles[kind]
             w_px = stl["width"] / px
             half_w, strength = max(0.5, w_px / 2), min(1.0, w_px)
@@ -448,13 +457,15 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
                 # Keep that cap outside the reserved pedestrian footprint too.
                 return reservations.blocked(q[:, ::-1] + [ox, oy], dist, half_w + 1.0 + .2 / px)
             blocked = blocks_for(off)
+            if outside[li_]:
+                blocked = LN.merge_runs(blocked + outside[li_])
             if kind in LN.SOLID_KINDS:
                 offs = [off]
                 if kind == "cdouble":                      # two lines, a gap between them
                     sep = (stl["width"] + stl.get("double_gap", 0.1)) / 2 / px
                     offs = [off - sep, off + sep]
                 for o_ in offs:
-                    for a_, b_ in LN.clear_runs(sb0, total - sb1, blocks_for(o_)):
+                    for a_, b_ in LN.clear_runs(sb0, total - sb1, LN.merge_runs(blocks_for(o_) + outside[li_])):
                         _strokes(tgt_solid, along(o_, a_, b_), half_w, strength, piece_px)
                 continue
             k_cycle = stl["cycle"] / px
@@ -662,7 +673,8 @@ def _same_lines(width_m, a, b, cfg=None):
     """Whether two lane choices lay the same lines and island on a street this wide."""
     rules, hw = (cfg or {}).get("rules", "simple"), (cfg or {}).get("highway")
     la, lb = LN.layout(width_m, a, rules=rules, hw=hw), LN.layout(width_m, b, rules=rules, hw=hw)
-    return la["lines"] == lb["lines"] and la["island"] == lb["island"]
+    return (la["lines"] == lb["lines"] and la["island"] == lb["island"]
+            and getattr(a, "traces", None) == getattr(b, "traces", None))
 
 
 def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress_level=1,
@@ -699,7 +711,7 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
     found = {int(k): ([tuple(p) for p in P[offs[i]:offs[i + 1]]], float(widths[i])) for i, k in enumerate(labels)}
 
     def scaled(picks):
-        return [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in picks or []]
+        return LN.picks_scaled(picks, scale)
     previous_cfg = lines_cfg(meta)
     cfg = new_cfg or previous_cfg
     e_old, e_new = ends_scaled(old_ends, scale), ends_scaled(new_ends, scale)
@@ -1174,7 +1186,7 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     # ---- 3. markings ----
     prog.stage("markings", "markings")
     paint_rgb = np.array(params.get("paint_colour", [235, 232, 222]), np.float32)
-    picks = [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in (params.get("lane_picks") or [])]
+    picks = LN.picks_scaled(params.get("lane_picks"), scale)
     marks = lines_cfg(params)
     line_ends = params.get("line_ends") or None
     (paint, yellow), dash_info, (island, island_top), streets, found = place_dashes(

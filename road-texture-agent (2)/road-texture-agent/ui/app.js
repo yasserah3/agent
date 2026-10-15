@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords4';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1122,6 +1122,7 @@ const UI_VERSION = '2026.10.15-coords4';   // must match VERSION in server.py
         if(ln) log(`  Lane lines from the satellite: ${ln.read} street(s) read`
           + (ln.read ? ` (${ln.same} as the rules have them, ${ln.changed} set from what is painted${ln.none ? `, ${ln.none} of them with no lines` : ''})` : '')
           + (ln.not_seen ? `; ${ln.not_seen} not seen well enough: their lanes by the rules` : '')
+          + (ln.traced ? `; on ${ln.traced} the lines are laid where they are painted (traced: their bends, drift, starts and stops)` : '')
           + '. They are in the Lanes tool as "from the satellite": set one by hand and yours wins.');
         (ln && ln.streets || []).filter(r => r.sides.join() !== r.rules.join()).slice(0, 12).forEach(r =>
           log(`    Street ${r.id}: ${r.sides[0] + r.sides[1] ? r.sides.join(' + ') + ' lanes' : 'no lines'} (the rules: ${r.rules.join(' + ')}).`));
@@ -2372,7 +2373,7 @@ const UI_VERSION = '2026.10.15-coords4';   // must match VERSION in server.py
     const [ca, cb] = laneSides(s.width_m, [a, b]);
     let k = of.get(i);
     if(k == null){ LANES.picks.push({ pt: midOf(s.line).map(v => Math.round(v * 10) / 10), sides: [ca, cb] }); }
-    else { LANES.picks[k].sides = [ca, cb]; delete LANES.picks[k].src; }        // set by hand: yours, not the satellite's
+    else { LANES.picks[k].sides = [ca, cb]; delete LANES.picks[k].src; delete LANES.picks[k].trace; }   // set by hand: yours, laid by the rules
     lanesChanged();
   }
   function setEven(i){
@@ -2490,6 +2491,12 @@ const UI_VERSION = '2026.10.15-coords4';   // must match VERSION in server.py
       labels.push([p[0] * v.k + v.ox, p[1] * v.k + v.oy, fs, L.lanes < 2 ? '–' : `${L.sides[0]}|${L.sides[1]}`, k != null ? '#ffd27a' : '#fff']);
     });
     ctx.setLineDash([]);
+    // the lines the satellite traced (app/observed.py): laid where they are painted
+    LANES.picks.forEach(p => (p.trace || []).forEach(t => {
+      if(!t.pts || t.pts.length < 2) return;
+      ctx.beginPath(); tracePath(ctx, v, t.pts, false);
+      ctx.strokeStyle = 'rgba(90,220,255,.9)'; ctx.lineWidth = Math.max(v.dpr, v.hr * 0.22); ctx.stroke();
+    }));
     overlayLabels(ctx, labels, 0.2);
   }
   function saveHighwayGroups(){

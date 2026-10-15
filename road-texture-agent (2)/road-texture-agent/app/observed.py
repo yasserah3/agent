@@ -90,7 +90,7 @@ def load_analysis(folder):
     w = max(x["core"][2] for x in tiles.values())
     h = max(x["core"][3] for x in tiles.values())
     return {"tiles": tiles, "findings": f.get("findings") or [], "summary": t.get("summary") or {},
-            "size": (w, h), "tile_px": int((t.get("summary") or {}).get("tile_px") or 512)}
+            "size": (w, h), "tile_px": int((t.get("summary") or {}).get("tile_px") or 512), "folder": Path(folder)}
 
 
 def _clamp(v, lo, hi):
@@ -355,24 +355,40 @@ END_M = 8.0                 # a street's lines read this far from its ends (junc
 KERB_M = 1.0                # lines this near the kerb are edge lines: not counted
 SHIFT_M = 1.2               # the street map may lie this far off the satellite: the lines looked for shifted so far
 SEEN_SHARE = 0.6            # a street read when this much of it lies in tiles at or above the threshold
-NONE_MIN_M = 25.0           # "no lines" only on a street at least this long (a dashed line repeats every 9 to 12 m)
+NONE_MIN_M = 25.0           # a street read only when this much of it lies clear of its ends (dashes repeat every 9 to 12 m)
+SECTION_M = 40.0            # a street's lines read in sections this long (half overlapping): each its own offset
+TRACE_REACH_M = 0.6         # a line followed through the paint this near where it should be
+GAP_M = 20.0                # no paint for this long along a line (two dash cycles): the line stops there and on after
+FOLLOW_M = 10.0             # a line followed by where its last this many metres head
 
 
 def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=False):
     """
-    Each street's lanes as the satellite shows them, for the Lanes tool's choices:
-    ([{"pt", "sides", "src": "satellite"}], report). streets: the generation's
-    streets (its streets file: id, line (x, y mask pixels, the canonical way),
-    width_m). On a street the satellite saw well (SEEN_SHARE of it in tiles at or
-    above the threshold), the painted lines along it (dashes and solid lines, not
-    the edge lines at the kerbs) are set against every split the street can hold:
-    each split's lines where app/lanes.py's layout puts them (equal lanes, a raised
-    island from 22 m), the street map allowed to lie up to SHIFT_M off; the split
-    whose lines are painted, with no painted line left over, wins (ties: two ways
-    over one, unless all its arrows point one way; then the split whose centre line
-    is painted solid where the guide puts a solid one; then the even split). A
-    street seen with no lines at all gets none (unless fill: the rules' lanes).
-    Only splits that differ from the rules' even split are returned.
+    Each street's lanes as the satellite shows them, and the path of each of its lines,
+    for the Lanes tool's choices: ([{"pt", "sides", "src": "satellite", "trace"}],
+    report). streets: the generation's streets (its streets file: id, line (x, y mask
+    pixels, the canonical way), width_m).
+
+    On a street the satellite saw well (SEEN_SHARE of it in tiles at or above the
+    threshold), the painted lines along it (dashes and solid lines, not the edge lines at
+    the kerbs) are read in sections SECTION_M long: in each, every split the street can
+    hold has its lines laid where app/lanes.py puts them (equal lanes, a raised island
+    from 22 m), the street map allowed to lie up to SHIFT_M off the paint there, and set
+    against the painted lines (a line where the split puts one and painted +1, where none
+    is painted -1, a painted line the split has no place for -2). The split with the
+    most over all sections wins (ties: two ways over one unless all its arrows point one
+    way; which side has more lanes from the arrows' ways; a solid centre line where the
+    guide puts one; the even split). A street seen with no lines at all gets none
+    (unless fill: the rules' lanes).
+
+    Then every line painted along it is followed (_trace), however many there are (a
+    lane added or ending part way is a line that starts or stops): it bends, drifts and
+    weaves as the paint does, stops where the paint stops for GAP_M or more (not where
+    the road is only hidden: shadow, trees, a car), and within 15 m of the street's end
+    runs on to it (the junction's markings stop it). Each is kept with the street's lane
+    choice ("trace") and drawn where it is painted (app/lanes.py traced_offsets), dashed
+    or solid as the satellite shows it, in the dash, gap, width and colour the Road
+    markings panel sets. The kerb edge lines are left to the rules.
     """
     import numpy as np
     from scipy.spatial import cKDTree
@@ -385,7 +401,8 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
     rules, hw = cfg.get("rules", "simple"), cfg.get("highway")
     drive = cfg.get("drive", "right")
     min_m = float(cfg.get("min_marking_m", 6.0))
-    rep = {"read": 0, "same": 0, "changed": 0, "none": 0, "not_seen": 0, "narrow": 0, "short": 0, "streets": []}
+    rep = {"read": 0, "same": 0, "changed": 0, "none": 0, "not_seen": 0, "narrow": 0, "short": 0, "traced": 0,
+           "streets": []}
 
     def conf(x, y):
         t = tiles.get(f"r{int((y / ky) // tpx)}c{int((x / kx) // tpx)}") or {}
@@ -405,7 +422,7 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
                        np.convolve(T[:, 1], np.ones(2 * k + 1) / (2 * k + 1), "same")]).T
         T /= np.maximum(np.linalg.norm(T, axis=1, keepdims=True), 1e-9)
         d = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(P, axis=0), axis=1))]) * px
-        geo[s["id"]] = (P, T, d, float(s["width_m"]))
+        geo[s["id"]] = (P, T, d, float(s["width_m"]), cKDTree(P))
         pts.append(P)
         labs.append(np.full(len(P), s["id"]))
         idx.append(np.arange(len(P)))
@@ -414,8 +431,8 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
     tree = cKDTree(np.concatenate(pts))
     labs, idx = np.concatenate(labs), np.concatenate(idx)
 
-    # the painted lines along the streets, and the arrows (which way the lanes run)
-    lines, arrows = {}, {}
+    # the painted lines along the streets, as samples (along, across, metres of paint, solid), and the arrows
+    samples, arrows = {}, {}
     for fd in analysis["findings"]:
         cls = fd.get("cls")
         if cls not in ("lane_dash", "lane_solid", "arrow"):
@@ -423,27 +440,72 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
         x, y = float(fd["x"]) * kx, float(fd["y"]) * ky
         dist, j = tree.query([x, y])
         sid, i = int(labs[j]), int(idx[j])
-        P, T, d, w_m = geo[sid]
+        P, T, d, w_m, stree = geo[sid]
         if dist * px > w_m / 2 + 1.0 or d[i] < END_M or d[i] > d[-1] - END_M:
             continue
         tx, ty = T[i]
-        off = ((x - P[i, 0]) * -ty + (y - P[i, 1]) * tx) * px      # across, metres: + to (-ty, tx), side 2
+        is_line = cls != "arrow"
         if cls == "arrow":
             t = fd.get("toward")
             if t:
+                off = ((x - P[i, 0]) * -ty + (y - P[i, 1]) * tx) * px
                 arrows.setdefault(sid, []).append((off, float(t[0]) * tx + float(t[1]) * ty))
-            continue
+            # a mark a dash's size the analysis took for an arrow (a dash or two on their own): offered to the
+            # lines' following as paint they may take, never counted as a line by itself
+            if not (1.5 <= float(fd.get("length_m", 0)) <= 4.5 and float(fd.get("width_m", 9)) <= 0.6):
+                continue
         a = math.radians(float(fd.get("angle", 0.0)))
         if abs(math.cos(a) * tx + math.sin(a) * ty) < math.cos(math.radians(15)):
             continue                                                   # not along the street
-        lines.setdefault(sid, []).append((off, float(fd.get("length_m", 1.0)), cls == "lane_solid"))
+        L = float(fd.get("length_m", 1.0))
+        if fd.get("pts") and len(fd["pts"]) >= 2:                      # a solid line's own path (analysis 4)
+            line = np.asarray(fd["pts"], float) * [kx, ky]
+        else:                                                          # a dash: its two ends
+            h = L / 2 / px
+            line = np.array([[x - math.cos(a) * h, y - math.sin(a) * h], [x + math.cos(a) * h, y + math.sin(a) * h]])
+        Q = _dense(line, max(1.0, 0.5 / px))
+        _, ii = stree.query(Q)
+        dd = Q - P[ii]
+        ss = d[ii] + (dd * T[ii]).sum(1) * px
+        oo = (dd[:, 0] * -T[ii, 1] + dd[:, 1] * T[ii, 0]) * px          # across, metres: + to (-ty, tx), side 2
+        wgt = L / len(Q)
+        samples.setdefault(sid, []).extend((float(a_), float(b_), wgt, cls == "lane_solid", is_line)
+                                           for a_, b_ in zip(ss, oo))
+
+    hidden = _hidden_at(analysis, kx, ky, px)
+
+    def judge(obs, cands, lays, half, need):
+        """Each split's best (score, shift) against these samples (across, metres of paint, solid)."""
+        out = {}
+        for shift in np.arange(-SHIFT_M, SHIFT_M + 1e-6, 0.15):
+            inner = sorted((x - shift, l, sol) for x, l, sol in obs if abs(x - shift) <= half - KERB_M)
+            clusters = []
+            for x, l, sol in inner:
+                if clusters and x - clusters[-1]["x1"] <= 0.5:
+                    c = clusters[-1]
+                    c["x1"], c["len"], c["sx"] = x, c["len"] + l, c["sx"] + x * l
+                    c["solid"] += l if sol else 0.0
+                else:
+                    clusters.append({"x1": x, "len": l, "solid": l if sol else 0.0, "sx": x * l})
+            real = [c["sx"] / c["len"] for c in clusters if c["len"] >= need]
+            for c in cands:
+                hit, used = 0, set()
+                for x, _ in lays[c]:
+                    near = [n for n, r in enumerate(real) if abs(r - x) <= LINE_REACH_M and n not in used]
+                    if near:
+                        used.add(min(near, key=lambda n: abs(real[n] - x)))
+                        hit += 1
+                sc = 2 * hit - len(lays[c]) - 2 * (len(real) - len(used))
+                if c not in out or (sc, -abs(shift)) > (out[c][0], -abs(out[c][1])):
+                    out[c] = (sc, round(float(shift), 2), len(real))
+        return out
 
     picks = []
     for s in streets:
         sid = s["id"]
         if sid not in geo:
             continue
-        P, T, d, w_m = geo[sid]
+        P, T, d, w_m, _ = geo[sid]
         if w_m + 1e-6 < min_m:
             rep["narrow"] += 1
             continue
@@ -455,14 +517,14 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
             continue
         usable = max(0.0, d[-1] - 2 * END_M)
         half = w_m / 2
-        obs = [(o, l, sol) for o, l, sol in lines.get(sid, []) if abs(o) <= half + SHIFT_M]
-        need = max(1.5, 0.12 * usable)                                  # a line is there: this much of it painted
+        allp = [q for q in samples.get(sid, []) if abs(q[1]) <= half + SHIFT_M]
+        smp = [q[:4] for q in allp if q[4]]                            # the lines' own paint: counted
         even = LN.layout(w_m, None, rules=rules, hw=hw)["sides"]
-        if not obs:
+        if usable < NONE_MIN_M:
+            rep["short"] += 1                                          # too little of it to read: the rules
+            continue
+        if not smp:
             if fill:
-                continue
-            if usable < NONE_MIN_M:
-                rep["short"] += 1
                 continue
             picks.append({"pt": _mid(P), "sides": [0, 0], "src": "satellite"})
             rep["none"] += 1
@@ -473,41 +535,35 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
         cands = [(a, b) for a in range(lim + 1) for b in range(lim + 1 - a) if a + b >= 2] + [(0, 0)]
         lays = {c: [(x, k) for x, k in LN.layout(w_m, c, rules=rules, hw=hw)["lines"] if abs(x) <= half - KERB_M]
                 for c in cands}
-        score = {}                                                    # each split: its best (score, shift, lines)
-        for shift in np.arange(-SHIFT_M, SHIFT_M + 1e-6, 0.1):
-            inner = sorted((x - shift, l, sol) for x, l, sol in obs if abs(x - shift) <= half - KERB_M)
-            # the painted lines, gathered: each a place across and how much of it is painted
-            clusters = []
-            for x, l, sol in inner:
-                if clusters and x - clusters[-1]["x1"] <= 0.5:
-                    c = clusters[-1]
-                    c["x1"], c["len"], c["sx"] = x, c["len"] + l, c["sx"] + x * l
-                    c["solid"] += l if sol else 0.0
-                else:
-                    clusters.append({"x1": x, "len": l, "solid": l if sol else 0.0, "sx": x * l})
-            real = [dict(c, x=c["sx"] / c["len"]) for c in clusters if c["len"] >= need]
+        # section by section: each split's score, and how far the street map lies off the paint there
+        lo, hi = END_M, max(END_M + 1e-6, d[-1] - END_M)
+        n_sec = max(1, int(math.ceil((hi - lo) / (SECTION_M / 2))) - 1) if hi - lo > SECTION_M else 1
+        centres = [lo + (hi - lo) / 2] if n_sec == 1 else list(np.linspace(lo + SECTION_M / 2, hi - SECTION_M / 2, n_sec))
+        win = min(SECTION_M, hi - lo)
+        need = max(1.5, 0.12 * win)
+        total, secs = {c: 0 for c in cands}, []
+        for sc_ in centres:
+            obs = [(o, l, sol) for a_, o, l, sol in smp if abs(a_ - sc_) <= win / 2]
+            if sum(l for _, l, _ in obs) < need:
+                continue
+            res = judge(obs, cands, lays, half, need)
+            secs.append((sc_, res))
             for c in cands:
-                hit, used = 0, set()
-                for x, k in lays[c]:
-                    near = [n for n, r in enumerate(real) if abs(r["x"] - x) <= LINE_REACH_M and n not in used]
-                    if near:
-                        used.add(min(near, key=lambda n: abs(real[n]["x"] - x)))
-                        hit += 1
-                # each line where the split puts one and painted: +1; where none is painted: -1; a painted
-                # line the split has no place for: -2
-                sc = 2 * hit - len(lays[c]) - 2 * (len(real) - len(used))
-                if c not in score or (sc, -abs(shift)) > (score[c][0], -abs(score[c][1])):
-                    score[c] = (sc, round(float(shift), 1), len(real))
-        top = max(v[0] for v in score.values())
-        ties = [c for c in cands if score[c][0] == top]
+                total[c] += res[c][0]
+        if not secs:
+            rep["short"] += 1
+            continue
+        top = max(total.values())
+        ties = [c for c in cands if total[c] == top]
         pick = ties[0]
         if len(ties) > 1:
             # the same lines: which way the lanes run (arrows on both halves, all one way: one-way), where the
-            # centre is (a solid line where the guide puts one), else the even split
+            # centre is (the arrows' ways, a solid line where the guide puts one), else the even split
             arr = [(x, t) for x, t in arrows.get(sid, []) if abs(t) > 0.7]
             halves = {x > 0 for x, _ in arr if abs(x) > 0.5}
             one_way = len(arr) >= 2 and len(halves) == 2 and len({t > 0 for _, t in arr}) == 1
             N = sum(ties[0])
+            one = None
             if one_way:
                 # driving on the right, the lanes running along the street (+) are side 2's
                 plus = arr[0][1] > 0
@@ -516,13 +572,12 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
             if one_way and one in ties:
                 pick = one
             elif two:
-                sh = score[two[0]][1]
+                sh = float(np.median([r[two[0]][1] for _, r in secs]))
+                both = len({t > 0 for _, t in arr}) == 2
 
                 def kind_fit(c):
                     return sum(1 for x, k in lays[c] if k in LN.SOLID_KINDS
-                               and any(abs(o - sh - x) <= LINE_REACH_M and sol for o, _, sol in obs))
-
-                both = len({t > 0 for _, t in arr}) == 2
+                               and any(abs(o - sh - x) <= LINE_REACH_M and sol for _, o, _, sol in smp))
 
                 def ways_fit(c):
                     # driving on the right, side 1's lanes (left of the centre) run against the street (-),
@@ -533,22 +588,198 @@ def read_lanes(streets, analysis, mpp, shape, cfg, threshold=THRESHOLD, fill=Fal
                     mid = LN.lane_spans(LN.layout(w_m, c, rules=rules, hw=hw))["centre"]
                     if mid is None:
                         return 0
-                    lo, hi = mid if isinstance(mid, tuple) else (mid, mid)
+                    lo_, hi_ = mid if isinstance(mid, tuple) else (mid, mid)
                     right = drive == "right"
-                    return sum(1 for x, t in arr if x - sh < lo - 0.5 and (t < 0) == right
-                               or x - sh > hi + 0.5 and (t > 0) == right)
+                    return sum(1 for x, t in arr if x - sh < lo_ - 0.5 and (t < 0) == right
+                               or x - sh > hi_ + 0.5 and (t > 0) == right)
                 pick = max(two, key=lambda c: (ways_fit(c), kind_fit(c), -abs(c[0] - c[1]), c == tuple(even)))
-        best = (score[pick][0], pick, 0, score[pick][1], score[pick][2])
+        # how far the street map lies off the paint, along the street (each section's, for the split chosen)
+        sc_at = np.array([c for c, _ in secs])
+        sh_at = np.array([r[pick][1] for _, r in secs])
+        if len(sh_at) >= 3:
+            sh_at = np.array([np.median(sh_at[max(0, i - 1):i + 2]) for i in range(len(sh_at))])
+        traces = _trace(allp, half, P, T, d, px, hidden)
+        n_lines = len(lays[pick])
         rep["read"] += 1
-        rep["streets"].append({"id": sid, "sides": list(pick), "rules": list(even), "lines": best[4], "shift_m": best[3]})
-        if tuple(pick) == tuple(even):
-            rep["same"] += 1
-            continue
-        rep["changed"] += 1
+        rep["traced"] += 1 if traces else 0
+        rep["streets"].append({"id": sid, "sides": list(pick), "rules": list(even), "lines": n_lines,
+                               "traced": len(traces), "drift_m": round(float(np.max(np.abs(sh_at))), 2)})
+        same = tuple(pick) == tuple(even)
+        rep["same" if same else "changed"] += 1
         if pick == (0, 0):
             rep["none"] += 1
-        picks.append({"pt": _mid(P), "sides": list(pick), "src": "satellite"})
+        if same and not traces:
+            continue
+        q = {"pt": _mid(P), "sides": list(pick), "src": "satellite"}
+        if traces:
+            q["trace"] = traces
+        picks.append(q)
     return picks, rep
+
+
+def _hidden_at(analysis, kx, ky, px):
+    """
+    How much of a path (N x 2 mask pixels) the satellite cannot see the road on: in
+    shadow (darker than 55% of the road's usual), under trees (green), or under a car it
+    found (within 2.5 m). None when the analysis' pictures are gone.
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+    a = analysis.get("folder")
+    try:
+        sat = np.load(Path(a) / "analysis" / "sat.npy", mmap_mode="r")
+        lum_med = float(json.loads((Path(a) / "analysis" / "stats.json").read_text())["lum_median"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    cars = np.array([[float(f["x"]) * kx, float(f["y"]) * ky] for f in analysis["findings"] if f.get("cls") == "car"])
+    ctree = cKDTree(cars) if len(cars) else None
+    H, W = sat.shape[:2]
+
+    def hidden(q):
+        q = np.asarray(q, float)
+        if not len(q):
+            return 0.0
+        xs = np.clip((q[:, 0] / kx).astype(int), 0, W - 1)
+        ys = np.clip((q[:, 1] / ky).astype(int), 0, H - 1)
+        rgb = np.asarray(sat[ys, xs], np.float32)
+        lum = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
+        out = (lum < 0.55 * lum_med) | ((rgb[:, 1] > rgb[:, 0] + 10) & (rgb[:, 1] > rgb[:, 2] + 6))
+        if ctree is not None:
+            out |= ctree.query(q)[0] * px <= 2.5
+        return float(out.mean())
+    return hidden
+
+
+def _trace(smp, half, P, T, d, px, hidden=None):
+    """
+    Every painted line along a street followed (as many as are painted, whatever the
+    split; a lane added or ending part way is one that starts or stops): from the 10 m
+    where the paint not yet followed is thickest, step by step forwards and back, each next
+    piece of paint taken when it lies near where the last FOLLOW_M of the line heads (so it
+    bends, drifts and weaves as the paint does); then smoothed into its path. The edge
+    lines at the kerbs are left to the rules. smp: the paint samples (along, across,
+    metres, solid). [{"pts": [[x, y], ...], "gaps": [[[x, y], [x, y]], ...]}] (mask
+    pixels, across the street in order; gaps: where no paint runs for GAP_M or more, from
+    where it stops to where it starts again: left unpainted). Within 15 m of an end of
+    the street's read part a line runs on to the street's end (the junction's markings
+    stop it there).
+    """
+    import numpy as np
+    if not smp:
+        return []
+    S = np.array([q[0] for q in smp])
+    O = np.array([q[1] for q in smp])
+    LINE = np.array([q[4] if len(q) > 4 else True for q in smp], bool)
+    SOLID = np.array([bool(q[3]) for q in smp], bool)
+    order = np.argsort(S)
+    S, O, LINE, SOLID = S[order], O[order], LINE[order], SOLID[order]
+    taken = np.zeros(len(S), bool)
+    out, found = [], []
+    for _ in range(40):
+        free = np.flatnonzero(~taken & LINE)                        # a line starts from lines' paint
+        if len(free) < 6:
+            break
+        # the seed: the 10 m along and half metre across with the most paint not yet followed
+        key = (np.floor(S[free] / 10.0).astype(int) * 100000 + np.round(O[free] / 0.5).astype(int))
+        u, inv, cnt = np.unique(key, return_inverse=True, return_counts=True)
+        if cnt.max() < 6:
+            break
+        seed = free[inv == int(np.argmax(cnt))]
+        o0 = float(np.median(O[seed]))
+        seed = free[(np.abs(S[free] - np.median(S[seed])) <= 5.0) & (np.abs(O[free] - o0) <= 0.35)]
+        c0 = float(np.median(S[seed]))
+        acc = np.zeros(len(S), bool)
+        acc[seed] = True
+        for step in (1, -1):
+            idx = np.flatnonzero(~taken & ~acc)
+            idx = idx[S[idx] > c0] if step > 0 else idx[S[idx] < c0][::-1]
+            front = c0
+            for i in idx:
+                back = acc & (np.abs(S - front) <= FOLLOW_M) & ((S <= front) if step > 0 else (S >= front))
+                if back.sum() >= 3 and np.ptp(S[back]) > 2.0:
+                    b, a = np.polyfit(S[back], O[back], 1)
+                    b = float(np.clip(b, -0.15, 0.15))                    # a line drifts slowly
+                    pred = a + b * S[i]
+                else:
+                    near = acc & (np.abs(S - front) <= FOLLOW_M)
+                    pred = float(np.median(O[near])) if near.any() else o0
+                gap = abs(S[i] - front)
+                if abs(O[i] - pred) <= 0.35 + 0.03 * min(gap, 20.0):    # further from its last paint: less sure
+                    acc[i] = True
+                    front = S[i]
+        taken |= acc
+        taken[seed] = True
+        if acc.sum() >= 4:
+            found.append(acc)
+    # pieces of one line (it was lost for a while: worn paint, a car over it, a sharp bend): joined when they
+    # never lie apart where both are painted, and one runs on from the other (within 12 m, where it heads)
+    def one_line(a, b):
+        sa, oa, sb, ob = S[a], O[a], S[b], O[b]
+        j = np.searchsorted(sa, sb)
+        for k in (np.clip(j - 1, 0, len(sa) - 1), np.clip(j, 0, len(sa) - 1)):
+            both = np.abs(sa[k] - sb) <= 1.0
+            if np.any(both & (np.abs(oa[k] - ob) > 0.4)):
+                return False                                           # side by side: two lines
+        for end in (sb.min(), sb.max()):
+            na = np.abs(sa - end) <= 12.0
+            nb = np.abs(sb - end) <= 6.0
+            if na.any() and abs(float(np.median(oa[na])) - float(np.median(ob[nb]))) <= 0.6:
+                return True
+        return False
+    found.sort(key=lambda a: -int(a.sum()))
+    joined = []
+    for acc in found:
+        for j, prev in enumerate(joined):
+            if one_line(prev, acc):
+                joined[j] = prev | acc
+                break
+        else:
+            joined.append(acc)
+    for acc in joined:
+        s, o = S[acc], O[acc]
+        if len(s) < 4 or s[-1] - s[0] < 10.0 or abs(float(np.median(o))) > half - KERB_M or LINE[acc].mean() < 0.3:
+            continue                                                   # too short to be sure, an edge line, or arrows
+        # a station every 2 m: the median of its paint within 3 m, then smoothed lightly
+        st = np.arange(s[0], s[-1] + 1e-6, 2.0)
+        med = np.array([np.median(o[np.abs(s - t) <= 3.0]) if np.any(np.abs(s - t) <= 3.0) else np.nan for t in st])
+        ok = ~np.isnan(med)
+        med = np.interp(st, st[ok], med[ok])
+        prof = np.convolve(np.pad(med, 1, mode="edge"), np.ones(3) / 3, "valid")
+        # to the street's ends when the paint reaches near them (the markings or the setback stop it there)
+        if st[0] <= END_M + 15.0:
+            st, prof = np.concatenate([[0.0], st]), np.concatenate([[prof[0]], prof])
+        if st[-1] >= d[-1] - END_M - 15.0:
+            st, prof = np.concatenate([st, [d[-1]]]), np.concatenate([prof, [prof[-1]]])
+
+        def at(q, st=st, prof=prof):
+            q = np.atleast_1d(np.asarray(q, float))
+            cx, cy = np.interp(q, d, P[:, 0]), np.interp(q, d, P[:, 1])
+            tx, ty = np.interp(q, d, T[:, 0]), np.interp(q, d, T[:, 1])
+            n = np.maximum(np.hypot(tx, ty), 1e-9)
+            o_ = np.interp(q, st, prof)
+            return np.column_stack([cx + (-ty / n) * o_ / px, cy + (tx / n) * o_ / px])
+        tr = {"pts": _simplify(at(np.arange(st[0], st[-1] + 1e-6, 1.0) if st[-1] - st[0] > 1 else st), 0.03 / px),
+              # how much of its own paint is solid (not broken): dashed or solid as the satellite shows it
+              "solid": round(float(SOLID[acc & LINE].mean()) if (acc & LINE).any() else 0.0, 2)}
+        # where the paint stops for a while (a junction the street runs through, a lane that ends); not where
+        # the road is hidden (shadow, trees, a car): the paint may run on under them
+        gaps = [(s[i] + 1.0, s[i + 1] - 1.0) for i in range(len(s) - 1) if s[i + 1] - s[i] >= GAP_M]
+        if hidden is not None:
+            gaps = [(a_, b_) for a_, b_ in gaps if hidden(at(np.arange(a_, b_, 0.5))) < 0.3]
+        if gaps:
+            tr["gaps"] = [[[round(float(v), 1) for v in q] for q in at([a_, b_])] for a_, b_ in gaps]
+        out.append((float(np.median(o)), tr))
+    return [tr for _, tr in sorted(out, key=lambda q: q[0])]
+
+
+def _simplify(line, tol):
+    """A path with only the points it needs to stay within tol of itself (rounded as choices keep them)."""
+    try:
+        from shapely.geometry import LineString
+        q = list(LineString(line).simplify(tol).coords)
+    except Exception:
+        q = [tuple(p) for p in line]
+    return [[round(float(x), 1), round(float(y), 1)] for x, y in q]
 
 
 def _dense(P, step):

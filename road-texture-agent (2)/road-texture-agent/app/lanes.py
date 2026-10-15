@@ -462,8 +462,160 @@ def picks_list(raw):
         q = {"pt": [round(x, 1), round(y, 1)], "sides": [max(0, min(40, a)), max(0, min(40, b))]}
         if isinstance(p, dict) and p.get("src") == "satellite":
             q["src"] = "satellite"
+            tr = _trace_list(p.get("trace"))
+            if tr:
+                q["trace"] = tr
         out.append(q)
     return out
+
+
+def _trace_list(raw):
+    """A choice's traced lines (the satellite's, app/observed.py), checked: [{"pts": [[x, y], ...]}] (mask pixels)."""
+    out = []
+    for t in (raw or [])[:16] if isinstance(raw, list) else []:
+        try:
+            pts = [[round(float(x), 1), round(float(y), 1)] for x, y in (t.get("pts") or [])[:4000]]
+            gaps = [[[round(float(x), 1), round(float(y), 1)] for x, y in g[:2]] for g in (t.get("gaps") or [])[:200]]
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if len(pts) >= 2 and all(math.isfinite(v) for q in pts + [q for g in gaps for q in g] for v in q):
+            q = {"pts": pts}
+            if gaps:
+                q["gaps"] = [g for g in gaps if len(g) == 2]
+            if isinstance(t.get("solid"), (int, float)) and math.isfinite(t["solid"]):
+                q["solid"] = round(min(1.0, max(0.0, float(t["solid"]))), 2)
+            out.append(q)
+    return out
+
+
+def picks_scaled(picks, scale):
+    """Lane choices in a picture scale times the mask's size: their points, and their traced lines."""
+    out = []
+    for p in picks or []:
+        q = dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale])
+        if p.get("trace"):
+            q["trace"] = [dict(t, pts=[[x * scale, y * scale] for x, y in t["pts"]],
+                               **({"gaps": [[[x * scale, y * scale] for x, y in g] for g in t["gaps"]]} if t.get("gaps") else {}))
+                          for t in p["trace"]]
+        out.append(q)
+    return out
+
+
+class Sides(tuple):
+    """
+    A street's lane choice, (side 1, side 2), and the lines the satellite traced on
+    it (.traces: [{"pts"}] in the picture's pixels, or None): two choices are the same
+    when both are.
+    """
+    def __new__(cls, ab, traces=None):
+        obj = super().__new__(cls, (int(ab[0]), int(ab[1])))
+        obj.traces = traces or None
+        return obj
+
+    def __eq__(self, other):
+        return tuple(self) == tuple(other or ()) and self.traces == getattr(other, "traces", None)
+
+    def __ne__(self, other):
+        return not self == other
+
+    def __hash__(self):
+        return hash((tuple(self), repr(self.traces)))
+
+    def __reduce__(self):
+        return (Sides, (tuple(self), self.traces))
+
+
+def choice(p):
+    """A Lanes tool choice as the streets take it: its sides, with its traced lines if it has any."""
+    return Sides(p["sides"], p.get("trace"))
+
+
+def traced_offsets(pts, nrm, arc, px, lines, island, traces):
+    """
+    A street's lines where the satellite traced them (app/observed.py): every traced line
+    drawn where it is painted, and only there, in the kind (dash, solid, centre line) of
+    the line of the street's layout nearest it (lines: [(x, kind)], metres across from the
+    centre; none within 1.5 m: a lane line, "dash"). pts: the street's points (N x 2, x
+    and y in the traces' pixels), nrm: the unit direction of +x at each (N x 2), arc: the
+    distance along it at each (pixels), px: metres a pixel. A traced line's "solid" (the
+    share of its paint that is unbroken) sets whether it is laid dashed or solid (a centre
+    line as the centre line's broken or solid kind). Returns (kinds: each drawn
+    line's kind; x_at: its offset at each point (metres); isl_at: the island's (x0, x1)
+    arrays when the lines either side of it were traced, else None; outside: for each
+    drawn line, where along the street it is not painted ([(a, b)] pixels: before its
+    paint starts, after it stops, and its gaps)).
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+    P, N, arc = np.asarray(pts, float), np.asarray(nrm, float), np.asarray(arc, float)
+    if not traces or len(P) < 2:
+        return [k for _, k in lines], [x for x, _ in lines], None, [[] for _ in lines]
+    tg = np.gradient(P, axis=0)
+    tg /= np.maximum(np.linalg.norm(tg, axis=1, keepdims=True), 1e-9)
+    tree = cKDTree(P)
+    kinds, x_at, outside, mids = [], [], [], []
+    for t in traces:
+        T = np.asarray(t["pts"], float)
+        if len(T) < 2:
+            continue
+        # every point of the traced line every half metre, as (along, across) on this street
+        seg = np.hypot(*np.diff(T, axis=0).T)
+        k = np.maximum(1, np.ceil(seg / max(0.5 / px, 1.0))).astype(int)
+        T = np.vstack([T[i] + (T[i + 1] - T[i]) * (np.arange(k[i])[:, None] / k[i]) for i in range(len(T) - 1)] + [T[-1:]])
+        _, i = tree.query(T)
+        d = T - P[i]
+        s = arc[i] + (d * tg[i]).sum(1)
+        o = (d * N[i]).sum(1) * px
+        order = np.argsort(s)
+        s, o = s[order], o[order]
+        mid = float(np.median(o))
+        near = min(lines, key=lambda ln: abs(ln[0] - mid)) if lines else None
+        nk = near[1] if near is not None and abs(near[0] - mid) <= 1.5 else "dash"
+        if t.get("solid") is not None and nk != "solid":
+            # dashed or solid as the satellite shows it; a centre line stays a centre line (its paint); the
+            # solid lines along an island or a kerb stay solid (an island's edge can read as broken paint)
+            solid = t["solid"] >= 0.5
+            if nk in CENTRE_KINDS:
+                nk = (nk if nk != "cdash" else "csolid") if solid else "cdash"
+            else:
+                nk = "solid" if solid else "dash"
+        kinds.append(nk)
+        x_at.append(np.interp(arc, s, o).astype(np.float32))
+        out = []
+        for g in t.get("gaps") or []:
+            G = np.asarray(g, float)
+            _, gi = tree.query(G)
+            ga = arc[gi] + ((G - P[gi]) * tg[gi]).sum(1)
+            out.append((float(ga.min()), float(ga.max())))
+        if s[0] > arc[0] + 1e-6:
+            out.append((arc[0] - 1e6, float(s[0])))
+        if s[-1] < arc[-1] - 1e-6:
+            out.append((float(s[-1]), arc[-1] + 1e6))
+        outside.append(merge_runs(out))
+        mids.append(mid)
+    isl_at = None
+    if island and mids:
+        x0, x1 = island
+        below = [j for j, m in enumerate(mids) if m <= x0 + 0.5]
+        above = [j for j, m in enumerate(mids) if m >= x1 - 0.5]
+        if below and above:
+            a, b = max(below, key=lambda j: mids[j]), min(above, key=lambda j: mids[j])
+            la = max((ln for ln in lines if ln[0] <= x0 + 1e-6), key=lambda ln: ln[0], default=None)
+            lb = min((ln for ln in lines if ln[0] >= x1 - 1e-6), key=lambda ln: ln[0], default=None)
+            if la is not None and lb is not None:
+                isl_at = ((x_at[a] + (x0 - la[0])).astype(np.float32), (x_at[b] + (x1 - lb[0])).astype(np.float32))
+    return kinds, x_at, isl_at, outside
+
+
+def merge_runs(runs):
+    """Intervals (a, b) sorted and joined where they meet."""
+    merged = []
+    for a, b in sorted(runs):
+        if merged and a <= merged[-1][1] + 1e-6:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    return merged
 
 
 def match_picks(picks, points, labels, reach):
@@ -483,7 +635,7 @@ def match_picks(picks, points, labels, reach):
     for p, dd, ii in zip(picks, d, i):
         lab = int(labels[int(ii)])
         if reach(lab, float(dd)):
-            out[lab] = tuple(p["sides"])
+            out[lab] = choice(p)
     return out
 
 
