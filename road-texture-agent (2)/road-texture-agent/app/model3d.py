@@ -999,7 +999,48 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
                              fb=shared["fb"] if shared is not None else None)
     deck_info = _deck_edges(mesh, plans, world, tiles, tile_m, bcfg["deck_m"], images, materials, meshes, surface) \
         if plans else None
-    base = (meshes, materials, images)
+    surface_base = (meshes, materials, images)
+    base = ([], [], [])
+
+    def surfaces_part(config=None):
+        """Replace surface materials and colours on the cached road geometry."""
+        nonlocal tiles, fac, vfac, vfac_raw, road_rep, variation
+        if config is None:
+            return surface_base, {}
+        tiles = config["tileset"]["tiles"]
+        variation = config.get("variation", variation)
+        fac = variation_factor(result_path, markings_path, coverage, mpp_out, variation)
+        vfac_raw = map_coordinates(fac, [V[:, 1], V[:, 0]], order=1, mode="nearest")
+        vfac = vfac_raw * vtone
+        imgs, mats, ms = [], [], []
+        original_ms, original_mats, _ = surface_base
+        remap = {}
+        for i, mat in enumerate(original_mats):
+            name = mat.get("name", "Road")
+            part = "junction" if name.startswith("Road_junction") and tiles.get("junction") else "open"
+            if name.startswith("Bridge") or name.startswith("Deck"):
+                part = "kerbstone" if tiles.get("kerbstone") else "open"
+            variants = tiles[part]
+            try:
+                variant = int(name.rsplit("_", 1)[-1]) - 1
+            except ValueError:
+                variant = 0
+            tile = variants[variant % len(variants)]
+            remap[i] = tile_material(name, Image.open(tile["path"]), imgs, mats, (tile_m,tile_m),
+                                    "asphalt" if part in ("open", "junction") else "concrete", .9, surface,
+                                    own=LIB.own_maps(tile))
+        for obj in original_ms:
+            prims = []
+            for prim in obj["primitives"]:
+                q = dict(prim, material=remap[prim["material"]])
+                if "colors" in q:
+                    p = q["positions"]
+                    c = map_coordinates(fac, [p[:,2]/mpp_out + H/2, p[:,0]/mpp_out + W/2],order=1,mode="nearest")
+                    q["colors"] = np.column_stack([c,c,c,np.ones(len(c))])
+                prims.append(q)
+            ms.append(dict(obj, primitives=prims))
+        return (ms,mats,imgs), {}
+
 
     # The parts of the model that a change on its own can build again (rebuild): each
     # makes its own meshes, materials and pictures, and the model is the base and
@@ -1140,8 +1181,8 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
     if keep is not None:
         keep_world = (keep[0] * metres_per_pixel - W * mpp_out / 2, keep[1] * metres_per_pixel - H * mpp_out / 2,
                       keep[2] * metres_per_pixel - W * mpp_out / 2, keep[3] * metres_per_pixel - H * mpp_out / 2)
-    parts = (("paving", paving_part), ("objects", objects_part), ("decals", decals_part), ("lanes", lanes_part))
-    inputs = {"paving": islands, "objects": scatter, "decals": decals, "lanes": None}
+    parts = (("surfaces", surfaces_part), ("paving", paving_part), ("objects", objects_part), ("decals", decals_part), ("lanes", lanes_part))
+    inputs = {"surfaces": None, "paving": islands, "objects": scatter, "decals": decals, "lanes": None}
     built = {name: fn(inputs[name]) for name, fn in parts}
 
     if keep_world is not None:
@@ -1197,15 +1238,21 @@ def export_road_tiled_glb(mask_path, result_path, markings_path, tileset, metres
         when a street gains its first lines or loses all of them with painted
         markings: its road was built for the lines it had, so build it all.
         """
+        nonlocal tiles, dash_cfg
+        if "surfaces" in changes:
+            tiles = changes["surfaces"]["tileset"]["tiles"]
+        if "paving" in changes and isinstance(changes["paving"], dict) and "tileset" in changes["paving"]:
+            tiles = changes["paving"]["tileset"]["tiles"]
+            changes["paving"] = changes["paving"]["islands"]
         lanes_changed = None
         if "lanes" in changes:
             ch = changes["lanes"]
             ends_before = mesh.line_ends
-            lanes_changed, flipped = (QM.relane(mesh, ch["picks"], ch.get("area"),
+            lanes_changed, flipped = (QM.relane(mesh, ch["picks"], ch.get("area"), marks=ch.get("marks"),
                                                 **({"ends": ch["ends"]} if "ends" in ch else {}))
                                       if isinstance(ch, dict) else QM.relane(mesh, ch))
-            if painted and (flipped or (mesh.line_ends or None) != (ends_before or None)):
-                return None             # painted lines whose runs moved: their road quads were built for the old ones
+            if ch.get("marks"):
+                dash_cfg = dict(dash_cfg or {}, marks=ch["marks"])
         for name, fn in parts:
             if name in changes:
                 built[name] = fn(changes[name])

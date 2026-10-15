@@ -709,6 +709,11 @@
             <div class="note">Drawn to the road marking guide's measurements and laid where each junction needs them: crossings, stop and give way lines, an arrow in each lane, at junctions and roundabout entries. Each is a layer you can change; add the same one again for a second layer.</div>
           </div>
           <button class="btn secondary" id="btnImportDecal">Import decal (PNG)</button>
+          <div class="rm-row" style="margin-top:6px">
+            <button type="button" class="btn secondary" id="btnFitAllDecals">Fit all decals to roads</button>
+            <button type="button" class="btn secondary" id="btnFixedAllDecals">Turn relative fit off</button>
+          </div>
+          <div class="note">Fit is optional for each layer. Saudi markings retain prescribed paint widths and gaps. Imported artwork scales from a 6 m reference road; arrows and words fit their lane. Press Update 2D texture after changing fit.</div>
           <div class="note" style="margin-top:6px">A picture laid on the streets: an arrow, a crossing, a manhole cover, a stain. A PNG with a transparent background; the top of the picture is its front, its width goes across the road. Each decal is a layer with where it goes. How they lie in the 3D model: 3D model, Decals.</div>
           <div id="decalList" style="margin-top:4px"></div>
           <button class="btn" id="btnPlaceDecals" disabled title="Lay the decals on the generated texture (Generate texture lays them too)">Place decals</button>
@@ -768,6 +773,8 @@
           <div class="field"><label for="matTone">Match the tone of your tiles</label><input type="checkbox" id="matTone" style="justify-self:start;accent-color:var(--blue)" title="A scanned material takes on the mean colour of what it replaces, so it fits the generated texture's tone. Unticked: its own colour"></div>
           <div class="note" style="margin:-2px 0 6px" id="matNote">Generate texture lays the street surface into the texture; its Top view and the 3D tab show streets, sidewalks and kerbs.</div>
           <button class="btn secondary" id="btnGenJunctions" disabled>Detect junctions</button>
+          <button class="btn secondary" type="button" id="btnUpdate2d" disabled>Update 2D texture</button>
+          <div id="textureLogs" class="note" hidden><a id="textureSettingsLog" download>Saved values</a> · <a id="textureUpdatesLog" download>Update history</a></div>
           <button class="btn" id="btnGenerate" disabled>Generate texture</button>
           <div style="margin-top:14px;font-weight:600;font-size:13px">3D model</div>
           <div class="field"><label for="meshMode">Mesh</label>

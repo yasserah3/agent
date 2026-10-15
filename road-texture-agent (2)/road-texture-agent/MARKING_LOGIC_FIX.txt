@@ -1,0 +1,23 @@
+Road Texture Agent: marking logic correction
+Version 2026.10.12-marking-logic2
+
+INSTALL
+Close the server. Extract this ZIP into your existing road-texture-agent folder, replacing the included program files. Restart and refresh the browser with Ctrl+F5. This package also includes the earlier preset-loading fix.
+
+APPLY
+If a generated texture is still loaded, press Update 2D texture, then Update view. Saved textures from the earlier update are recognized automatically and their markings/decals are refreshed; their road material and geometry are retained. After a browser refresh, upload the same mask and generate once if the previous result is no longer available in the page.
+
+FIXES
+- Width variation no longer fragments a continuous highway into arbitrary short marking runs.
+- Pixel-graph shortcuts no longer create false junction arms at staircase bends.
+- Highway direction checks use points belonging to the same continuous highway, rather than neighbouring points from unrelated chains.
+- Crossings are not placed across a highway at ordinary side-road openings.
+- Genuine highway-to-highway junctions, including T-junctions, stop the approaching lines.
+- Only genuine highway junctions create highway-end setbacks; ordinary image boundaries do not.
+- Selected centre-line groups still apply when a recognized highway narrows locally.
+
+VALIDATION
+Reproduced using the original 2048 x 1536 alpha map. Checked before/after marking placement on the real map and the same material, lane, decal, partial-3D, persistence, and painted-marking checks used for the prior update. Added checks for migration of earlier saved textures and genuine highway T-junctions.
+
+SCOPE
+No workspace, uploads, training data, source alpha maps, road geometry edits, or replacement material assets are included.

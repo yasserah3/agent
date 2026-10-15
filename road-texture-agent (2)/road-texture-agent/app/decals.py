@@ -57,7 +57,7 @@ def layer_list(raw, known):
              # Place intersections, at some, all or two opposite edges
              "inter": bool(l.get("inter")), "junctions": bool(l.get("junctions")), "all_edges": bool(l.get("all_edges")),
              "even_edges": bool(l.get("even_edges")), "chance": num("chance", 0.0, 100.0, 50.0),
-             "fit": bool(l.get("fit")), "back_m": num("back_m", 0.0, 500.0, 0.0),
+             "fit": bool(l.get("fit")), "relative_fit": bool(l.get("relative_fit")), "back_m": num("back_m", 0.0, 500.0, 0.0),
              # Place on streets, on junctions, junction edge (right or left), each with its weight
              "streets": bool(l.get("streets")), "streets_w": num("streets_w", 0.0, 1000.0, 50.0),
              "jn": bool(l.get("jn")), "jn_w": num("jn_w", 0.0, 1000.0, 50.0),
@@ -74,6 +74,17 @@ def layer_list(raw, known):
             L["all_edges"] = True
         out.append(L)
     return out
+
+
+def relative_size(width_m, aspect, road_m):
+    """Artwork width on a 6 m reference road, uniformly scaled, inside kerbs."""
+    if not all(math.isfinite(float(t)) for t in (width_m, aspect, road_m)) or min(width_m, aspect, road_m) <= 0:
+        return None
+    usable = road_m - 2 * KERB_M
+    if usable <= .01:
+        return None
+    w = min(width_m * road_m / 6.0, usable)
+    return w, w * aspect
 
 
 def _in_bridge(x, y, bridges):
@@ -311,6 +322,7 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
     det = _detect(gray)
     road = det["road"]
     H, W = road.shape
+    mpp = max(float(mpp), 1e-6)
     junctions = [j for j in det["junctions"] if j["type"] != "interchange (flagged)"]
     edges = {}                                                # (junction, arm) -> edge, worked out once
 
@@ -336,6 +348,20 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
         ev = np.linalg.eigh(c.T @ c)[1][:, -1]
         return float(ev[1]), float(ev[0])
 
+    road_distance = ndi.distance_transform_edt(road) if any(L.get("relative_fit") for L in layers) else None
+
+    def road_frame(x, y, ux, uy):
+        """Width and kerb direction near this sample, without moving its centre."""
+        yi, xi = int(np.clip(round(y), 0, H - 1)), int(np.clip(round(x), 0, W - 1))
+        if near_sk is None or road_distance is None or not road[yi, xi]:
+            return ux, uy, 0.0
+        sy, sx = near_sk[:, yi, xi]
+        half = float(road_distance[sy, sx])
+        frame = kerb_frame(road, float(sx), float(sy), ux, uy, half, max(8.0, 2 * half))
+        if frame is not None:
+            ux, uy, half = frame[2], frame[3], frame[4]
+        return ux, uy, 2 * half * mpp
+
     # each kind of place in turn, every layer's: the crossings first (they belong right at the
     # edges), then the decals beside the kerbs at the edges (behind any crossing there), then
     # inside the junctions, then anywhere on the road; each keeps clear of those laid before it
@@ -359,10 +385,14 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
 
     def make(li, cx, cy, ux, uy, w, h, at, gap=1.0, share=0.0, others=True):
         """Lay one decal there if it can go (on the road, off any bridge, clear of the others), else None."""
+        if not all(math.isfinite(float(t)) for t in (cx, cy, ux, uy, w, h)) or min(w, h) < .001:
+            return None
         xi, yi = int(round(cx)), int(round(cy))
         if not (0 <= xi < W and 0 <= yi < H) or not road[yi, xi] or _in_bridge(cx, cy, bridges):
             return None
         n = math.hypot(ux, uy) or 1.0
+        if layers[li].get("relative_fit") and not _fits(cx, cy, ux / n, uy / n, w / mpp, h / mpp, road):
+            return None
         p = {"layer": li, "decal": layers[li]["decal"], "x": round(float(cx), 2), "y": round(float(cy), 2),
              "ux": round(ux / n, 5), "uy": round(uy / n, 5), "w_m": round(w, 3), "h_m": round(h, 3), "at": at}
         # two of a layer never on each other (a short street between two junctions: one crossing, not
@@ -382,7 +412,7 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
 
     def lying(L, rng, x, y):
         """A decal's top direction: along the road (either way), or any way with spin."""
-        if L["spin"]:
+        if L["spin"] and not L.get("relative_fit"):
             a = rng.uniform(0, 2 * math.pi)
             return math.cos(a), math.sin(a)
         dx, dy = along(x, y)
@@ -414,8 +444,17 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
                 if e is None:
                     continue
                 ex, ey, ox, oy, half = e
-                w = 2 * half * mpp * 0.96 if L["fit"] else L["width_m"]
-                h = w * aspect
+                if L.get("relative_fit"):
+                    fr = kerb_frame(road, ex, ey, ox, oy, half, max(8.0, 3 * half))
+                    if fr is not None:
+                        ex, ey, ox, oy, half = fr
+                size = relative_size(L["width_m"], aspect, 2 * half * mpp) if L.get("relative_fit") else (L["width_m"], L["width_m"] * aspect)
+                if size is None:
+                    continue
+                w, h = size
+                if L["fit"]:
+                    w = max(.001, 2 * half * mpp * .96)
+                    h = w * aspect
                 far = (L["back_m"] + h / 2 + GAP_M) / mpp
                 make(li, ex + ox * far, ey + oy * far, -ox, -oy, w, h, "intersection", share=0.25, others=False)
 
@@ -430,6 +469,14 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
                 if e is None:
                     continue
                 ex, ey, ox, oy, half = e
+                if L.get("relative_fit"):
+                    fr = kerb_frame(road, ex, ey, ox, oy, half, max(8.0, 3 * half))
+                    if fr is not None:
+                        ex, ey, ox, oy, half = fr
+                    size = relative_size(L["width_m"], aspect, 2 * half * mpp)
+                    if size is None:
+                        continue
+                    w, h = size
                 # driving towards the junction (-out), the right is (out y, -out x) on the map
                 rx, ry = (oy, -ox) if L["edge_side"] == "right" else (-oy, ox)
                 # clear of the kerb by KERB_M, plus half a mask pixel (the kerb line is smoothed across it)
@@ -460,13 +507,19 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
                 for _try in range(12):
                     a, r = rng.uniform(0, 2 * math.pi), core * math.sqrt(rng.random())
                     cx, cy = j["cx"] + r * math.cos(a), j["cy"] + r * math.sin(a)
-                    if L["spin"]:
+                    if L["spin"] and not L.get("relative_fit"):
                         t2 = rng.uniform(0, 2 * math.pi)
                         ux, uy = math.cos(t2), math.sin(t2)
                     else:                                         # along one of its streets
                         arm = j["arms"][int(rng.integers(len(j["arms"])))] if j["arms"] else {"angle": 0}
                         t2 = math.radians(arm["angle"]) + (math.pi if rng.random() < 0.5 else 0)
                         ux, uy = math.cos(t2), -math.sin(t2)
+                    if L.get("relative_fit"):
+                        ux, uy, road_m = road_frame(cx, cy, ux, uy)
+                        size = relative_size(L["width_m"], aspect, road_m)
+                        if size is None:
+                            continue
+                        w, h = size
                     if _fits(cx, cy, ux, uy, w / mpp, h / mpp, road) and make(li, cx, cy, ux, uy, w, h, "junction", gap=1.2):
                         break
 
@@ -483,6 +536,12 @@ def place(gray, mpp, layers, sizes, seed=7, bridges=None):
                 break
             cx, cy = xs[k] + rng.random() - 0.5, ys[k] + rng.random() - 0.5
             ux, uy = lying(L, rng, cx, cy)
+            if L.get("relative_fit"):
+                ux, uy, road_m = road_frame(cx, cy, ux, uy)
+                size = relative_size(L["width_m"], aspect, road_m)
+                if size is None:
+                    continue
+                w, h = size
             if _fits(cx, cy, ux, uy, w / mpp, h / mpp, road) and make(li, cx, cy, ux, uy, w, h, "street", gap=1.2):
                 laid += 1
     return [p for li in range(len(layers)) for p in placed[li]]

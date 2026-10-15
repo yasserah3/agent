@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.12-placement4';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -857,13 +857,15 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     renderInfo(); renderMemory();
     $('#btnGenJunctions').disabled = false;
   });
-  $('#btnGenerate').addEventListener('click', async () => {
-    if(!S.gen.mask) return;
-    $('#btnGenerate').disabled = true; status('Generating…');
-    log('Generating: junctions first, then material, wear and markings.');
-    try{
-      const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the texture',
-        body: JSON.stringify({ mask: S.gen.mask.id, scale: +$('#scale').value,
+  function renderTextureLogs(){
+    const gid=S.gen.result && S.gen.result.id;
+    $('#textureLogs').hidden=!gid;
+    if(gid){$('#textureSettingsLog').href='/api/texture/log/'+gid+'/settings';$('#textureUpdatesLog').href='/api/texture/log/'+gid+'/updates';}
+  }
+  function textureSnapshot(){
+    const model = {...exportSettings()};
+    delete model.decal_version;
+    return JSON.parse(JSON.stringify({texture: { mask: S.gen.mask.id, scale: +$('#scale').value,
           wear: +$('#noiseAmt').value, seed: +$('#seed').value,
           marks: marksPayload(), cycle_m: MARKS.values['lane.dash_m'] + MARKS.values['lane.gap_m'],
           marking_width_m: MARKS.values['lane.width_m'],
@@ -872,8 +874,49 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
           line_width_mode: MARKS.opts.sizes === 'learned' ? 'learned' : 'fixed',
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks,
-          mark_area: MAREA.area }) });
+          mark_area: MAREA.area }, model, layers: DEC.layers}));
+  }
+  async function updateTexture2D(quiet=false){
+    if(!S.gen.result) return false;
+    if(S.gen.updating) return false;
+    S.gen.updating=true; $('#btnUpdate2d').disabled=true;
+    const gid=S.gen.result.id;
+    try{
+      const res=await api('/api/texture/update',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({generation:gid,snapshot:textureSnapshot()}),job:'Updating the 2D texture'});
+      if(S.gen.result.id!==gid) return false;
+      if(res.generation_result){
+        S.gen.result=res.generation_result; await loadIslands(S.gen.result);await loadStreets(S.gen.result);
+      }
+      Object.assign(S.gen.result.urls,res.urls || {});
+      if(res.decals){S.gen.decals=res.decals;S.gen.decalVersion=Date.now();}
+      if(res.islands) S.gen.islandTex={...res.islands,gid:S.gen.result.id};
+      else if(S.gen.islandTex && res.urls.full) S.gen.islandTex.urls.full=res.urls.full;
+      S.gen.updateRevision=res.revision;renderTextureLogs();
+      S.gen.marksPainted=marksKey();S.gen.lanesPainted=JSON.stringify(LANES.picks);MAREA.painted=JSON.stringify(MAREA.area);
+      if(res.changed.length){
+        log(`2D texture updated: ${res.changed.map(c=>c.field).join(', ')}. Saved update ${res.revision}.`,'ok');
+        if(S.gen.layer==='top'){S.gen.topStale=S.gen.result.id;refreshTopView(S.gen.result.id,true);}
+        else await showLayer(S.gen.layer,true);
+        await renderLayerThumbs();await loadStreets(S.gen.result);
+        window.dispatchEvent(new Event('materials'));
+      } else if(!quiet) log('2D texture: no values changed.','ok');
+      renderMarks();renderDecals();renderSlots();drawBridges();return true;
+    }catch(e){log('2D texture not updated: '+e.message,'bad');return false;}
+    finally{S.gen.updating=false;$('#btnUpdate2d').disabled=!S.gen.result;status('Ready.');}
+  }
+  $('#btnUpdate2d').addEventListener('click',()=>updateTexture2D());
+  window.updateTexture2D=updateTexture2D;
+
+  $('#btnGenerate').addEventListener('click', async () => {
+    if(!S.gen.mask) return;
+    $('#btnGenerate').disabled = true; status('Generating…');
+    log('Generating: junctions first, then material, wear and markings.');
+    try{
+      const res = await api('/api/generate', { method:'POST', headers:{'Content-Type':'application/json'}, job:'Generating the texture',
+        body: JSON.stringify({ ...textureSnapshot().texture, snapshot: textureSnapshot() }) });
       S.gen.result = res;
+      S.gen.updateRevision=0;$('#btnUpdate2d').disabled=false;renderTextureLogs();
       S.gen.marksPainted = marksKey();                                     // the lines' settings the texture has
       S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
       MAREA.painted = JSON.stringify(res.mark_area || null);               // and its markings area
@@ -1087,6 +1130,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
           bridges: S.gen.bridges, bridge_height_m: +$('#brHeight').value,
           bridge_ramp_m: +$('#brRamp').value, bridge_deck_m: +$('#brDeck').value });
   window.exportSettings = exportSettings;
+  window.textureRevision = () => S.gen.updateRevision || 0;
   window.lastGeneration = () => S.gen.result ? S.gen.result.id : null;
 
   // Download 3D model: a window in the middle of the screen for the format (GLB, FBX,
@@ -1279,7 +1323,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
 
   /* ------------------------------------------------ review */
   genVp.canvas.addEventListener('click', async e => {
-    if(!S.gen.result || genVp.wasDrag && genVp.wasDrag()) return;
+    if(GROUPS.picking || !S.gen.result || genVp.wasDrag && genVp.wasDrag()) return;
     const c = e.currentTarget, r = c.getBoundingClientRect();
     // in the texture's own pixels (the top view is drawn finer than the texture)
     const size = S.gen.result.summary && S.gen.result.summary.size;
@@ -1484,6 +1528,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     drawIslandsOn(ctx, v);
     drawAutoOn(ctx, v);
     drawLanesOn(ctx, v);
+    drawHighwayGroups(ctx, v);
   }
   // a line (mask pixels) as a path on the overlay, its points closer than half a pixel there left out
   function tracePath(ctx, v, pts, close){
@@ -2134,6 +2179,26 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     ctx.setLineDash([]);
     overlayLabels(ctx, labels, 0.2);
   }
+  function saveHighwayGroups(){
+    if(!S.gen.mask) return;
+    api('/api/highway-groups',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mask:S.gen.mask.id,picks:GROUPS.picks,enabled:GROUPS.enabled})}).catch(e=>log(e.message,'bad'));
+  }
+  function groupOf(s){
+    return GROUPS.picks.find(p => distToLine(p.pt, s.line) <= s.width_m / 2 / LANES.mpp);
+  }
+  function groupHighway(s){ return s.id >= 1000000 || s.width_m >= MARKS.values['highway.min_m'] - 0.3; }
+  function drawHighwayGroups(ctx, v){
+    if(!GROUPS.picking) return;
+    for(const s of LANES.streets || []){
+      if(!groupHighway(s) || s.line.length < 2) continue;
+      const p = groupOf(s);
+      ctx.beginPath(); tracePath(ctx,v,s.line,false);
+      ctx.strokeStyle = p ? (p.group === 1 ? 'rgba(255,255,255,.7)' : 'rgba(232,172,36,.8)') : 'rgba(60,165,255,.65)';
+      ctx.lineWidth = Math.max(6*v.dpr,s.width_m/LANES.mpp*v.k*.7); ctx.stroke();
+      const q=midOf(s.line);overlayLabels(ctx,[[q[0]*v.k+v.ox,q[1]*v.k+v.oy,Math.max(12*v.dpr,v.hr*2),p ? 'Group '+p.group : 'Highway']],.2);
+    }
+  }
   function lineBox(line){
     const b = [Infinity, Infinity, -Infinity, -Infinity];
     line.forEach(q => { b[0] = Math.min(b[0], q[0]); b[1] = Math.min(b[1], q[1]); b[2] = Math.max(b[2], q[0]); b[3] = Math.max(b[3], q[1]); });
@@ -2146,6 +2211,16 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
   $('#genVp').addEventListener('click', e => {
     if(!S.gen.mask || (genVp.wasDrag && genVp.wasDrag()) || e.target.closest('.vp-tools') || onHandle(e)) return;
     const [x, y] = toMask(e);
+    if(GROUPS.picking){
+      const highways=(LANES.streets || []).filter(groupHighway);
+      const s=highways.sort((a,b)=>distToLine([x,y],a.line)-distToLine([x,y],b.line))[0];
+      if(s && distToLine([x,y],s.line) <= s.width_m/2/LANES.mpp+2){
+        const old=groupOf(s);GROUPS.picks=GROUPS.picks.filter(p=>p!==old);
+        if(!old || old.group!==GROUPS.picking) GROUPS.picks.push({pt:midOf(s.line),group:GROUPS.picking});
+        saveHighwayGroups();renderMarks();drawBridges();window.dispatchEvent(new Event('materials'));
+      }
+      e.stopImmediatePropagation(); return;
+    }
     if(AUTO.pick >= 0 && ISLS.data){
       const id = islandAt(x, y);
       if(id){ e.stopPropagation(); autoPickIsland(id); return; }
@@ -2198,6 +2273,12 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     return best;
   }
   async function loadLanes(maskId){
+    GROUPS.picks = []; GROUPS.picking = 0;
+    try{
+      const groups=await api('/api/highway-groups?mask='+maskId);
+      if(S.gen.mask && S.gen.mask.id===maskId){ GROUPS.picks=groups.picks || [];GROUPS.enabled=groups.enabled!==false; }
+    }catch(_){}
+    renderMarks();
     LANES.mask = maskId; LANES.picks = []; LANES.streets = null; LANES.sel = -1; LANES.on = false;
     try{
       const r = await api('/api/lanes?mask=' + maskId);
@@ -2480,10 +2561,12 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
   function keepMarks(){
     try{ localStorage.setItem('rta.marks', JSON.stringify({ opts: MARKS.opts, values: MARKS.values, chain: MARKS.chain })); }catch(_){}
   }
-  const marksPayload = () => ({ ...MARKS.opts, values: { ...MARKS.values } });
+  const GROUPS = { picks: [], picking: 0, enabled: true };
+  const marksPayload = () => ({ ...MARKS.opts, values: { ...MARKS.values }, centre_groups: GROUPS.enabled ? GROUPS.picks : [], group_mpp: mppMask() });
   // what decides the lines in the texture (the drive side only moves the junction markings)
-  const marksKey = () => JSON.stringify([MARKS.opts.rules, MARKS.opts.colours, MARKS.opts.sizes, MARKS.opts.highways,
-    MARKS.values]);
+  addEventListener('keydown', e => { if(e.key === 'Escape' && GROUPS.picking){ GROUPS.picking=0;renderMarks();drawBridges(); } });
+  const marksKey = () => JSON.stringify([MARKS.opts.standard, MARKS.opts.speed, MARKS.opts.rules, MARKS.opts.colours, MARKS.opts.sizes, MARKS.opts.highways,
+    MARKS.opts.posted_speed, MARKS.values, GROUPS.enabled, GROUPS.picks]);
   async function loadMarks(){
     try{ MARKS.spec = await api('/api/marks/spec'); }
     catch(e){ $('#rmBox').innerHTML = '<div class="note">The road marking guide could not be loaded: ' + esc(e.message) + '</div>'; return; }
@@ -2525,6 +2608,12 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     const box = $('#rmBox');
     if(!MARKS.spec || !box) return;
     const o = MARKS.opts, L = MARKS.spec.lines, guide = o.rules === 'guide', learned = o.sizes === 'learned';
+    const speed = +o.speed || 60, postedSpeed = +o.posted_speed || 60, dash = speed >= 100 ? 6 : speed >= 80 ? 3 : 2;
+    const autoValues = o.standard === 'saudi' && o.sizes === 'saudi' ? {
+      'centre.dash_m':dash, 'centre.gap_m':dash*2, 'centre.width_m':.15,
+      'lane.dash_m':dash, 'lane.gap_m':dash*2, 'lane.width_m':speed>=100?.2:.15,
+      'double.width_m':speed>=80?.15:.1, 'edge.width_m':postedSpeed>100?.2:.15
+    } : {};
     const sel = (key) => {
       const d = L.opts.find(x => x.key === key);
       return `<select data-opt="${key}">${d.choices.map(([v, t]) => `<option value="${v}"${o[key] === v ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
@@ -2532,14 +2621,14 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     const COLNAME = { dash_m: 'Dash', gap_m: 'Gap', width_m: 'Width' };
     const cell = (key, col) => {
       if(!key) return '<div></div>';
-      const f = fieldOf(key), v = MARKS.values[key], g = guideOf(f), isOff = Math.abs(v - g) > 1e-6;
+      const f = fieldOf(key), v = autoValues[key] ?? MARKS.values[key], g = guideOf(f), isOff = Math.abs(v - g) > 1e-6;
       const name = key === 'setback_m' ? 'Distance' : key === 'edge.inset_m' ? 'From kerb'
         : key.endsWith('.' + col) && key !== 'double.gap_m' ? COLNAME[col] : f.label;
-      const dis = (learned && key.endsWith('width_m')) || (f.group === 'highway' && o.highways !== 'on') ? ' disabled' : '';
+      const dis = ((learned || o.standard === 'saudi' && o.sizes === 'saudi') && ['centre','lane','double','edge'].includes(f.group) && key !== 'double.gap_m' && key !== 'edge.inset_m') || (f.group === 'highway' && o.highways !== 'on') ? ' disabled' : '';
       return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
         + `<span>${esc(name)}${f.int ? '' : ' (m)'}</span>`
         + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.01 : 0.1}" min="${f.min}" max="${f.max}" value="${num(v)}"${dis}>`
-        + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}</small></label>`;
+        + `<small>${key in autoValues ? 'Saudi '+num(v) : (f.src === 'ours' ? 'ours' : 'custom guide')+' '+num(g)}</small></label>`;
     };
     const rows = LINE_ROWS.filter(r => guide || r[3] === 'all').map(([name, sub, keys]) =>
       `<div class="rm-kind"><div class="rm-kn">${esc(name)} <small>${esc(sub)}</small></div>`
@@ -2547,9 +2636,13 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     const sb = fieldOf('setback_m');
     const fields = L.fields.filter(f => guide || !(f.group === 'centre' || f.group === 'double'));
     const stale = S.gen.result && S.gen.marksPainted && S.gen.marksPainted !== marksKey();
-    box.innerHTML = `<div class="rm-h"><div>Road markings<span class="rm-src">UTTIPEC guide, Delhi 2009</span></div>
+    box.innerHTML = `<div class="rm-h"><div>Road markings<span class="rm-src">${o.standard === 'saudi' ? 'Saudi SHC 602, Chapter 4' : 'UTTIPEC guide, Delhi 2009'}</span></div>
         ${chainButton(MARKS.chain, MARKS.chain ? 'Linked: changing a length changes the other lengths, and a width the other widths, '
           + 'in the guide\'s proportions. Press to change each on its own' : 'Unlinked: each value changes on its own. Press to keep the guide\'s proportions')}</div>
+      <label class="rm-l">Standard${sel('standard')}</label>
+      <label class="rm-l">Design speed (km/h)${sel('speed')}</label>
+      <label class="rm-l">Posted / approach speed (km/h)${sel('posted_speed')}</label>
+      <div class="note">Saudi mode uses white centre lines and yellow edge lines. Speed-based sizes follow SHC 602 Tables 4-1, 4-2, 4-3 and 4-6. Custom dimensions remain available. Traffic priority, signs and pedestrian demand cannot be read from an alpha map.</div>
       <label class="rm-l">Lines${sel('rules')}</label>
       <div class="rm-l">Traffic drives on the<div class="seg" data-opt-seg="drive">
         <button type="button" class="seg-b" data-v="right" aria-pressed="${o.drive === 'right'}">Right</button>
@@ -2557,6 +2650,16 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
       <label class="rm-l">Colours${sel('colours')}</label>
       <label class="rm-l">Dash and line sizes${sel('sizes')}</label>
       ${rows}
+      <div class="rm-kind"><div class="rm-kn">Minimum road width for markings</div><div class="rm-3">${cell('marking.min_m', 'x')}<div></div><div></div></div>
+        <div class="note">The same cutoff applies to lane markings and procedural crossings in 2D and 3D. Highway width below controls classification, not this cutoff.</div></div>
+      <div class="rm-kind"><div class="rm-kn">Highway centre-line groups</div>
+        <label class="dc-chk"><input id="groupsOn" type="checkbox"${GROUPS.enabled ? ' checked' : ''}> Use selected highway groups</label>
+        ${[1,2].map(g => `<div class="rm-row">Group ${g}: ${g === 1 ? 'double white line' : o.standard === 'saudi' ? 'single white centre line' : 'single yellow centre line'}
+          <button type="button" class="btn secondary" data-group="${g}"${!S.gen.result || !GROUPS.enabled ? ' disabled' : ''}>${GROUPS.picking === g ? 'Done' : 'Pick'}</button>
+          <small>${GROUPS.picks.filter(p => p.group === g).length} highways</small></div>`).join('')}
+        <div class="note">Saudi colours follow the selected standard; choose Custom / previous guide to retain the yellow centre-line style. Group assignments are manual, not inferred no-passing restrictions.</div>
+        <div class="note">Pick highlights all detected highways. Click to assign; click the same group again to remove. A highway belongs to one group.</div>
+      </div>
       <div class="rm-kind"><div class="rm-kn">${esc(sb.label)}</div><div class="rm-3">${cell('setback_m', 'x')}<div></div><div></div></div></div>
       <label class="rm-l">Highways${sel('highways')}</label>
       <div class="rm-kind"><div class="rm-kn">Highways <small>streets this wide or wider: their lines run on past side
@@ -2564,12 +2667,21 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
         <div class="rm-3">${cell('highway.min_m', 'x')}${cell('highway.lanes', 'x')}<div></div></div></div>
       ${!guide ? '<div class="note">Every line between two lanes is dashed alike, with the lane lines\' sizes, white (as before).</div>' : ''}
       ${learned ? '<div class="note">Widths and the dash\'s share of dash + gap come from your training images; the dash and gap together stay as set.</div>' : ''}
-      ${warnBox(fields, MARKS.values, null, f => `${{ centre: 'Centre line', double: 'Double centre line', lane: 'Lane lines', edge: 'Edge lines', ends: 'Lines end', highway: 'Highways' }[f.group]} ${f.label.toLowerCase()}`, 'lines')}
-      ${stale ? '<div class="rm-stale">These differ from the texture\'s lines: press Generate texture to lay them.</div>' : ''}`;
+      ${warnBox(fields, MARKS.values, null, f => `${{ centre: 'Centre line', double: 'Double centre line', lane: 'Lane lines', edge: 'Edge lines', ends: 'Lines end', highway: 'Highways', eligibility: 'Marking eligibility' }[f.group]} ${f.label.toLowerCase()}`, 'lines')}
+      ${stale ? '<div class="rm-stale">These differ from the texture\'s lines: press Update 2D texture to lay them.</div>' : ''}`;
+    $('#groupsOn', box).addEventListener('change', e => {
+      GROUPS.enabled = e.target.checked; GROUPS.picking = 0; saveHighwayGroups(); keepMarks(); renderMarks(); drawBridges();
+    });
+    $$('[data-group]', box).forEach(b => b.addEventListener('click', () => {
+      GROUPS.picking = GROUPS.picking === +b.dataset.group ? 0 : +b.dataset.group;
+      if(GROUPS.picking){ LANES.on = false; ISLS.pick = -1; AUTO.pick = -1; MAREA.on = false; }
+      renderMarks(); drawBridges();
+    }));
     // events
     $('.rm-chain', box).addEventListener('click', () => { MARKS.chain = !MARKS.chain; keepMarks(); renderMarks(); });
     $$('select[data-opt]', box).forEach(s => s.addEventListener('change', () => {
       MARKS.opts[s.dataset.opt] = s.value; keepMarks(); renderMarks(); marksMoved(s.dataset.opt);
+      if(['standard','speed','posted_speed'].includes(s.dataset.opt)) renderDecals();
     }));
     $$('[data-opt-seg] button', box).forEach(b => b.addEventListener('click', () => {
       MARKS.opts.drive = b.dataset.v; keepMarks(); renderMarks(); marksMoved('drive');
@@ -2591,11 +2703,11 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
   }
   const fieldLabel = key => {
     const f = fieldOf(key);
-    return `${{ centre: 'centre line', double: 'double centre line', lane: 'lane lines', edge: 'edge lines', ends: 'lines end', highway: 'highways' }[f.group]} ${f.label.toLowerCase()}`;
+    return `${{ centre: 'centre line', double: 'double centre line', lane: 'lane lines', edge: 'edge lines', ends: 'lines end', highway: 'highways', eligibility: 'marking eligibility' }[f.group]} ${f.label.toLowerCase()}`;
   };
   // the drive side and the colours move or change the junction markings: lay them again
   function marksMoved(what){
-    if(['drive', 'colours'].includes(what) && DEC.layers.some(L => L.preset) && S.gen.decals){
+    if(['standard', 'speed', 'posted_speed', 'drive', 'colours'].includes(what) && DEC.layers.some(L => L.preset) && S.gen.decals){
       $('#btnPlaceDecals').classList.add('attention');
       $('#decalNote').textContent = 'The road markings changed: press Update decals to lay the junction markings again.';
     }
@@ -2639,7 +2751,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     decalsChanged();
   });
   function presetWhere(L){
-    const o = L.opts, v = L.values, both = (a, b) => a && b ? 'every junction and roundabout entry' : a ? 'every junction' : b ? 'roundabout entries' : 'nowhere';
+    const o = L.opts, v = presetDisplayValues(L), both = (a, b) => a && b ? 'every junction and roundabout entry' : a ? 'every junction' : b ? 'roundabout entries' : 'nowhere';
     switch(L.preset){
       case 'zebra': return `${num(v.length_m)} m wide, ${num(v.stripe_m)} m stripes; ${both(o.junctions, o.roundabouts)}`;
       case 'stop': return `${o.double ? 'double' : 'single'}, ${num(v.dist_m)} m behind the crossing; ${o.minor_only ? 'side streets' : o.signals ? 'every street into a junction' : 'every street into a junction (at T-junctions the side street)'}${o.signals ? ', traffic lights' : ''}`;
@@ -2652,15 +2764,25 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     return '';
   }
   async function presetThumb(L, img){
-    const key = JSON.stringify([L.preset, L.values, L.opts, MARKS.opts.colours]);
+    const preview = { ...L, values: presetDisplayValues(L) };
+    const key = JSON.stringify([L.preset, preview.values, L.opts, MARKS.opts.colours]);
     if(PRESET_THUMB.has(key)){ img.src = PRESET_THUMB.get(key); return; }
     try{
       const r = await fetch(API + '/api/marks/preview', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ layer: L, colours: MARKS.opts.colours }) });
+        body: JSON.stringify({ layer: preview, colours: MARKS.opts.colours }) });
       if(!r.ok) return;
       const url = URL.createObjectURL(await r.blob());
       PRESET_THUMB.set(key, url); img.src = url;
     }catch(_){}
+  }
+  function presetDisplayValues(L){
+    const v = { ...L.values };
+    if(MARKS.opts.standard !== 'saudi') return v;
+    if(L.preset === 'zebra') Object.assign(v, {stripe_m:.5, gap_m:.5, length_m:Math.max(2,v.length_m), rb_back_m:Math.max(6,v.rb_back_m)});
+    if(L.preset === 'stop') Object.assign(v, {width_m:.3, dist_m:1});
+    if(L.preset === 'giveway') Object.assign(v, {seg_m:.5, gap_m:.2});
+    if(L.preset === 'stopword' && +(MARKS.opts.posted_speed || MARKS.opts.speed) > 50) v.height_m = Math.max(2.5,v.height_m);
+    return v;
   }
   function presetCard(L, i, box){
     if(!MARKS.spec) return;
@@ -2672,6 +2794,10 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     L.opts = L.opts || {}; L.values = L.values || {};
     P.opts.forEach(o => { if(!(o.key in L.opts)) L.opts[o.key] = o.default; });
     fields.forEach(f => { if(!isFinite(L.values[f.key])) L.values[f.key] = guideOf(f, L.opts); });
+    const displayed = presetDisplayValues(L);
+    const prescribed = MARKS.opts.standard === 'saudi' ? {
+      zebra:['stripe_m','gap_m'], stop:['width_m','dist_m'], giveway:['seg_m','gap_m']
+    }[L.preset] || [] : [];
     card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
         <button type="button" class="dc-x" title="Remove this road marking layer">×</button></div>
       <div class="rm-row"><select data-switch title="Which road marking this layer is">${MARKS.spec.order.map(k =>
@@ -2680,17 +2806,17 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
           : 'Unlinked: each value changes on its own. Press to keep the guide\'s proportions')}
         <label class="rm-on" title="Lay this layer, or keep it without laying it"><input type="checkbox"${L.off ? '' : ' checked'}> Laid on the map</label></div>
       <div class="rm-fields">${fields.map(f => {
-        const g = guideOf(f, L.opts), v = L.values[f.key], isOff = Math.abs(v - g) > 1e-6, r = rangeOf(f, L.opts);
+        const g = guideOf(f, L.opts), v = displayed[f.key], isOff = Math.abs(v - g) > 1e-6, r = rangeOf(f, L.opts);
         return `<label class="rm-in${isOff ? ' off' : ''}" data-k="${f.key}" title="${esc(f.note || '')} (${esc(MARKS.spec.sources[f.src])})">`
           + `<span>${esc(f.label)}${f.int || f.unit ? '' : ' (m)'}</span>`
-          + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.05 : 0.5}" min="${f.min}" max="${f.max}" value="${num(v)}">`
+          + `<input type="number" step="${f.int ? 1 : f.min < 0.1 ? 0.05 : 0.5}" min="${f.min}" max="${f.max}" value="${num(v)}"${prescribed.includes(f.key) ? ' disabled' : ''}>`
           + `<small>${f.src === 'ours' ? 'ours' : 'guide'} ${num(g)}${r && (r[0] !== r[1]) ? ` (${num(r[0])}–${num(r[1])})` : ''}</small></label>`;
       }).join('')}</div>
       ${P.opts.map(o => o.choices
         ? `<div class="rm-row"><select data-o="${o.key}" title="${esc(o.label)}">${o.choices.map(([v, t]) => `<option value="${v}"${L.opts[o.key] === v ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></div>`
         : `<label class="dc-chk"><input type="checkbox" data-o="${o.key}"${L.opts[o.key] ? ' checked' : ''}> ${esc(o.label)}</label>`).join('')}
       ${warnBox(fields, L.values, L.opts, f => f.label, 'p' + i)}
-      <div class="rm-note">${esc(P.note)}</div>`;
+      <div class="rm-note">${MARKS.opts.standard === 'saudi' ? esc(MARKS.spec.saudi_references[L.preset] || 'Custom geometry; no verified Saudi dimensions for this preset.') + '. Saudi mode overrides prescribed dimensions; relative fit may adapt the shown base sizes. Placement assumes the enabled crossing / traffic-control options are intended.' : esc(P.note)}</div>`;
     $('b', card).textContent = P.label;
     $('small', card).textContent = L.off ? 'off: kept, not laid' : presetWhere(L);
     presetThumb(L, $('.dc-thumb', card));
@@ -2736,6 +2862,16 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
   // of them, all of them, or two opposite ones per junction). Kept on the server for
   // every map; Place decals (and Generate texture) lays them on the generated texture
   const DEC = { decals: [], layers: [], timer: null };
+  function fitAllDecals(enabled){
+    DEC.layers.forEach(L => {
+      if(L.preset){ L.opts = L.opts || {}; L.opts.relative_fit = enabled; }
+      else L.relative_fit = enabled;
+    });
+    decalsChanged();
+    log(enabled ? 'Relative scale and road rotation enabled for all decal layers. Press Update 2D texture.' : 'Relative fit disabled for all decal layers. Press Update 2D texture.');
+  }
+  $('#btnFitAllDecals').addEventListener('click', () => fitAllDecals(true));
+  $('#btnFixedAllDecals').addEventListener('click', () => fitAllDecals(false));
   const decalById = id => DEC.decals.find(d => d.id === id);
   async function loadDecals(){
     try{ const r = await api('/api/decals'); DEC.decals = r.decals || []; DEC.layers = r.layers || []; }catch(_){}
@@ -2770,6 +2906,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
       const card = document.createElement('div'); card.className = 'dc-layer';
       card.innerHTML = `<div class="dc-head"><img class="dc-thumb" alt=""><div><b></b><small></small></div>
           <button type="button" class="dc-x" title="Remove this decal layer">×</button></div>
+        <label class="dc-chk" title="Width is the artwork size on a 6 m reference road. Scale uniformly for each road and align to its local direction; overrides random turning while on."><input type="checkbox" data-k="relative_fit"> Fit scale and rotation to each road</label>
         <label class="dc-chk" title="Across the street, right where it meets a junction, its top towards the junction (a crossing, a stop line)"><input type="checkbox" data-k="inter"> Place intersections</label>
         <div class="dc-sub" data-for="inter">
           <label class="dc-chk" title="At a random share of the junctions' edges"><input type="checkbox" data-k="junctions"> Place at junctions</label>
@@ -2798,14 +2935,15 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
           <label class="dc-w" title="More weight, more decals: 100 is one at every street end, 50 at half of them, 200 two one behind the other">Weight<input type="range" min="0" max="300" step="5" data-w="edge_w"><output></output></label>
         </div>
         <div class="dc-nums">
-          <label data-only="width" title="Across the road; its length along the road follows the picture's proportions">Width (m)<input type="number" step="0.1" min="0.1" data-n="width_m"></label>
+          <label data-only="width" title="When relative fitting is on, this is the width on a 6 m reference road; the picture keeps its proportions">Width / reference width (m)<input type="number" step="0.1" min="0.1" data-n="width_m"></label>
         </div>
         <label class="dc-chk" data-only="spin" title="On streets and junctions: turned any way (a manhole cover, a stain); off, it lies along the street, facing either way"><input type="checkbox" data-k="spin"> Turn randomly</label>`;
       $('.dc-thumb', card).src = API + d.url;
       $('b', card).textContent = d.name;
       const fitted = L.inter && L.fit && !(L.streets || L.jn || L.edge);
+      const relative = !!L.relative_fit;
       const len = L.width_m * d.height / d.width;
-      $('small', card).textContent = (fitted ? 'road width × in proportion' : `${L.width_m} m × ${len.toFixed(1)} m`) + ', ' + decalWhere(L);
+      $('small', card).textContent = (relative ? 'relative to each road (6 m reference)' : fitted ? 'road width × in proportion' : `${L.width_m} m × ${len.toFixed(1)} m`) + ', ' + decalWhere(L);
       $$('[data-k]', card).forEach(c => {
         const k = c.dataset.k; c.checked = !!L[k];
         c.addEventListener('change', () => {
@@ -2838,7 +2976,7 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
       $$('[data-for]', card).forEach(e => { e.hidden = !L[e.dataset.for]; });
       $$('[data-only]', card).forEach(e => {
         const o = e.dataset.only;
-        e.hidden = o === 'chance' ? !L.junctions : o === 'spin' ? !(L.streets || L.jn) : o === 'width' ? fitted : false;
+        e.hidden = o === 'chance' ? !L.junctions : o === 'spin' ? L.relative_fit || !(L.streets || L.jn) : o === 'width' ? fitted : false;
       });
       $('.dc-x', card).addEventListener('click', async () => {
         DEC.layers.splice(i, 1);
@@ -2918,8 +3056,8 @@ const UI_VERSION = '2026.10.11-estimate1';   // must match VERSION in server.py
     }catch(e){ log('Decals not laid: ' + e.message, 'bad'); }
     status('Ready.'); renderDecals();
   }
-  $('#btnPlaceDecals').addEventListener('click', applyDecals);
-  $('#decalMode').addEventListener('change', () => { if(S.gen.decals) applyDecals(); });
+  $('#btnPlaceDecals').addEventListener('click', () => updateTexture2D());
+  $('#decalMode').addEventListener('change', () => { if(S.gen.decals) updateTexture2D(); });
 
   /* ------------------------------------------------ objects: layers and placements */
   // An object is a layer. A placement is a rectangle of copies of one object:

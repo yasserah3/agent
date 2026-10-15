@@ -17,13 +17,6 @@ On Windows, if `python` is not recognised, install Python from python.org with
 "Add python.exe to PATH" ticked, and turn off the Store aliases under
 Settings > Apps > Advanced app settings > App execution aliases.
 
-**Updating.** An update zip holds only the files changed since the version just
-before it: unzip it over that version. If your copy is older, unzip the full
-download (part 1: `app`, part 2: the rest) into a new, empty folder and copy
-your `workspace` folder into it. A folder that mixes two versions is caught
-when the server starts: it names the files that are missing and says this,
-instead of stopping with an ImportError.
-
 ## What works today
 
 - **Uploads.** Every image is stored in `workspace/uploads` and recorded in memory.
@@ -444,12 +437,12 @@ guide's values*.
 
 | Marking | Measurements | Where it goes |
 | --- | --- | --- |
-| Pedestrian crossing (zebra) | 0.5 m stripes and gaps, 3 m wide along the road (guide: 2 to 4 m) | across every street at its junction edge, kerb to kerb (at a T-junction only the side street, below); at roundabout entries 5 m (a car length, ours) behind the give way line |
-| Stop line | 0.2 m; double: two 0.2 m lines 0.3 m apart; 2.5 m behind the crossing (2 to 3 m), 1 m with traffic lights | across the lanes coming in; every street (at a T-junction only the side street, unless the junctions have traffic lights), or only side streets |
+| Pedestrian crossing (zebra) | 0.5 m stripes and gaps, 3 m wide along the road (guide: 2 to 4 m) | across every street at its junction edge, kerb to kerb; at roundabout entries 5 m (a car length, ours) behind the give way line |
+| Stop line | 0.2 m; double: two 0.2 m lines 0.3 m apart; 2.5 m behind the crossing (2 to 3 m), 1 m with traffic lights | across the lanes coming in; every street, or only side streets |
 | Give way line | two broken lines, 0.6 m dashes, 0.3 m gaps, 0.2 m wide, 0.3 m apart | roundabout entries; side streets if asked |
 | Lane arrows | 3.5 m long (IRC 35, up to 50 km/h; 5 m above), first 15 m from the stop line, then every 15 m, four in each lane (guide) | in each lane coming in, the way it may go (below) |
 | STOP word | letters 1.25 m along the road (IRC 35), top 2.5 m before the stop line (2 to 3 m) | in each lane before a stop line |
-| Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side; only beside a crossing that was laid, where both fit |
+| Cyclist crossing | two 0.1 m lines, 2 m apart (the track, 1 to 3 m) | beside the pedestrian crossing, on the junction's side |
 | Yellow box (not in the guide) | 0.15 m lines, 1.5 m apart, ours | inside big open junctions (below), or every junction |
 
 How it finds where they go, from the mask:
@@ -470,23 +463,6 @@ How it finds where they go, from the mask:
   no crossing, stop line, give way line, arrow or STOP word, and its lines do
   not stop. The side streets there keep their crossing and their stop line
   (they give way to it), and the junction gets no yellow box.
-- **T-junctions**: where a side street meets a street that runs straight on
-  (three streets, two of them in line within 35°), the street running through
-  has the right of way and nothing is laid across it: no crossing, cyclist
-  crossing, stop line, give way line, arrow or STOP word (its lines end at the
-  junction as anywhere without a stop line). The side street gets its crossing and its stop line (or give way
-  line). With *The junctions have traffic lights* (Stop line), every arm gets
-  its markings, as before. (Before, a long street with a side street every
-  40 m got a crossing and a stop line on both sides of every one.)
-- **Two junctions close together** never lay on each other: each street into a
-  junction looks down the street for the next junction's edge facing it (up
-  to 80 m); its markings keep to its half of the street between them (less
-  0.5 m), or to all of it (less 0.5 m) when the other end lays nothing there
-  (a T-junction's through street). A crossing that does not fit is left out
-  (its cyclist crossing with it), and the stop line moves up to 1 m from the
-  edge, if it fits. No marking is laid on another one, of any kind (before,
-  a short street between a crossroads and a T-junction got two crossings back
-  to back, and each junction's stop line lay on the other's crossing).
 - **Each street into a junction** (its edge: where it meets the junction),
   its **lanes** (as Lanes lays them, the Lanes tool's choices included) and
   which way their traffic goes: with right-hand traffic the lanes coming in
@@ -875,12 +851,12 @@ machine:
   outline or line; the handles (bridges, the markings area, the street being
   set) are as before.
 - **Top view**: it is the whole 3D model drawn from above, and on a city that
-  model takes 20 minutes or more. When the estimate (*How long a whole model
-  takes*, below) is over a minute, it is no longer built by itself after
-  Generate texture or a change: its layer button says *click to build*, and a
-  click draws it from the model's 1 km patches (below): the whole map flat
-  first, then each patch drawn into its square as it is built. Smaller maps
-  work as before.
+  model takes 20 minutes or more. When the estimate (about 45 s for every km² of
+  road, from the measurements above) is over a minute, it is no longer built by
+  itself after Generate texture or a change: its layer button says *click to
+  build*, and a click draws it from the model's 1 km patches (below): the
+  whole map flat first, then each patch drawn into its square as it is built.
+  Smaller maps work as before.
 - **Generate 3D scene** on such a map builds it in patches (below).
 
 ### Big maps in 1 km patches
@@ -889,32 +865,8 @@ A city's 3D model as one piece took 23 minutes and 10.6 GB on the 6 m a pixel
 map above. On the same city at 2.5 m a pixel (4780 × 3584 px, 12 × 9 km) it
 had used 12.5 GB after 17.5 minutes and was stopped, with 15 GB in the machine:
 it does not fit. So when a map's model would take more than a minute (the same
-estimate as the Top view, below), the 3D tab builds it in **patches of 1 km ×
-1 km** instead (and Download 3D model, when the road's area alone says so):
-
-**How long a whole model takes** (the estimate, from the mask before Generate
-texture and from the generation after): the larger of 45 s for every km² of
-road (the city above) and **5 s + 0.376 s for each junction + 20.3 s for every
-km² of road**. A junction costs far more than its area (its crossings, corners,
-kerbs and sidewalks), so a map of narrow streets takes much longer than its
-road's area says. Measured with the current code on seven maps (4 cores;
-sidewalks, blocks and junction markings), each within 6%:
-
-| Map | Junctions | Road | Measured | Estimate | Road's area alone |
-| --- | --- | --- | --- | --- | --- |
-| Test map, 0.25 m a pixel | 9 | 0.022 km² | 8.7 s | 8.8 s | 1.0 s |
-| 2000 × 1500 map, a 377 px crop, 1.1 m | 41 | 0.043 km² | 21.2 s | 21.3 s | 1.9 s |
-| 4780 map, an 800 px crop, 1 m | 39 | 0.163 km² | 24.5 s | 23.0 s | 7.3 s |
-| the same crop at 2.5 m | 39 | 1.016 km² | 40.1 s | 40.3 s | 45.7 s |
-| 4780 map, a 1000 px crop, 1 m | 66 | 0.228 km² | 34.7 s | 34.5 s | 10.3 s |
-| 4780 map, a 1500 px crop, 1 m | 188 | 0.531 km² | 82.4 s | 86.5 s | 23.9 s |
-| 2000 × 1500 map, 1.1 m (2.2 × 1.7 km) | 1,079 | 0.82 km² | 433 s | 428 s | 37 s |
-
-The last map was built as one model (37 s by the road's area alone) and took
-7.2 minutes, the view empty until the end; in its 6 patches the part in view
-came in 81 s and the whole map in 2.2 minutes (three at a time). Download 3D
-model still gives such a map as one file (GLB, FBX or OBJ), as before: only
-maps whose road's area alone says over a minute download as patches.
+estimate as the Top view), the 3D tab and Download 3D model build it in
+**patches of 1 km × 1 km** instead:
 
 - **What every patch shares is worked out once** for the whole map (about
   40 s on the city): the cleaned mask and its road coverage, the junctions and

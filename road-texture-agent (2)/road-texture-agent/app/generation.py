@@ -305,7 +305,7 @@ def with_chains(found, ends, metres_per_pixel):
     # a highway's own segments are left out: its centreline lays its lines, takes its lane choices
     cidx = LN.ChainIndex(chains, max(metres_per_pixel, 1e-6))
     for k, (path, w) in list(out.items()):
-        if cidx.share(np.asarray(path, float)[:, ::-1]) >= 0.5:
+        if cidx.covers_path(np.asarray(path, float)[:, ::-1]):
             del out[k]
     for k, c in enumerate(chains):
         if len(c["pts"]) >= 2:
@@ -365,22 +365,24 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
     # the highways' whole centrelines (in found as streets of their own, numbered from
     # LN.CHAIN_ID, their own segments left out: with_chains): their lines are laid along them
     chains = LN.chains_of(ends_here)
+    reservations = LN.ReservationIndex(ends_here)
     last = max([k for k in found if k < LN.CHAIN_ID], default=1)
     for s, (path, w_m) in found.items():
         if s % 50 == 0 and s < LN.CHAIN_ID:
             prog.part(s / last)
         chain = chains[s - LN.CHAIN_ID] if s >= LN.CHAIN_ID and s - LN.CHAIN_ID < len(chains) else None
-        lay = LN.layout(w_m, chosen.get(s), rules=cfg["rules"], edge_inset=cfg.get("edge_inset"), hw=cfg.get("highway"))
+        lay = LN.layout(w_m, chosen.get(s), rules=cfg["rules"], edge_inset=cfg.get("edge_inset"), hw=cfg.get("highway"),
+                        group=LN.centre_group(np.asarray(path)[:, ::-1], px, cfg, w_m, on_chain=s >= LN.CHAIN_ID))
         layouts.append(lay)
         line = np.array(path[::-1] if not LN.canonical(path[0][::-1], path[-1][::-1]) else path, float)[:, ::-1]
         streets.append({"id": int(s), "line": line, "width_m": round(w_m, 2), "limit": lay["limit"],
                         "sides": list(lay["sides"]), "even": lay["even"], "cut": lay["cut"]})
-        if not lay["lines"]:
+        if not lay["lines"] or not LN.marking_eligible(w_m, cfg):
             continue                       # too narrow for a line
         main_cycle, _ = RM.main_cycle(cfg, lay)
         cycle_px = main_cycle / px
         piece_px = max(cycle_px, STROKE_PIECE_PX)
-        styles = {k: RM.kind_style(cfg, k, w_m) for k in {k for _, k in lay["lines"]}}
+        styles = {k: dict(RM.kind_style(cfg, k, w_m), **({"yellow": lay["group"] == 2 and cfg.get("standard") != "saudi"} if lay.get("group") and k in LN.CENTRE_KINDS else {})) for k in {k for _, k in lay["lines"]}}
         line_w = styles[lay["lines"][0][1]]["width"] / px
         widths_used.append(line_w)
         # always smooth a little so dashes follow the road axis, not the
@@ -408,7 +410,7 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             d.append(d[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
         total = d[-1]
         usable = total - sb0 - sb1
-        if usable <= cycle_px * 0.6:
+        if usable <= 0 or (usable <= cycle_px * 0.6 and not any(k in LN.SOLID_KINDS for _, k in lay["lines"])):
             continue                       # too short for even one dash
 
         pts = np.array(path, np.float32) - np.array([oy, ox], np.float32)    # (y, x) on the canvas
@@ -440,13 +442,20 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
             half_w, strength = max(0.5, w_px / 2), min(1.0, w_px)
             off = x_at[li_] / px
             tgt, tgt_solid = (yellow, solid_y) if stl.get("yellow") else (cover, solid)
+            def blocks_for(offset):
+                q = pts + nrm * (offset[:, None] if np.ndim(offset) else offset)
+                # Raster strokes have a one-pixel soft cap beyond their end.
+                # Keep that cap outside the reserved pedestrian footprint too.
+                return reservations.blocked(q[:, ::-1] + [ox, oy], dist, half_w + 1.0 + .2 / px)
+            blocked = blocks_for(off)
             if kind in LN.SOLID_KINDS:
                 offs = [off]
                 if kind == "cdouble":                      # two lines, a gap between them
                     sep = (stl["width"] + stl.get("double_gap", 0.1)) / 2 / px
                     offs = [off - sep, off + sep]
                 for o_ in offs:
-                    _strokes(tgt_solid, along(o_, sb0, total - sb1), half_w, strength, piece_px)
+                    for a_, b_ in LN.clear_runs(sb0, total - sb1, blocks_for(o_)):
+                        _strokes(tgt_solid, along(o_, a_, b_), half_w, strength, piece_px)
                 continue
             k_cycle = stl["cycle"] / px
             cycles = max(1, int(round(usable / k_cycle)))
@@ -469,15 +478,16 @@ def lay_lanes(shape, found, chosen, metres_per_pixel, cfg, align=False, origin=(
                 # of it, apart they fill one pixel of it
                 g = max(0.0, gap_px - 2 * (half_w - 0.5))
                 filled = step - g * g / 4.0 if g < 2.0 else step - g + 1.0
-                _strokes(tgt_solid, along(off, sb0, total - sb1), half_w,
-                         strength * filled / step, piece_px)
+                for a_, b_ in LN.clear_runs(sb0, total - sb1, blocked):
+                    _strokes(tgt_solid, along(off, a_, b_), half_w,
+                             strength * filled / step, piece_px)
                 placed += int(keep.sum())
                 continue
             # a stroke's round ends reach half its width past its two ends: the guide's dashes are
             # drawn that much shorter at each end, so the paint is as long as the dash
             cap = min(half_w, dash_len * 0.45) if cfg.get("exact") else 0.0
             for a, k in zip(starts, keep):
-                if k:
+                if k and LN.clear_runs(a, a + dash_len, blocked) == [(a, a + dash_len)]:
                     _stroke(tgt, along(off, a + cap, a + dash_len - cap), half_w, strength)
                     placed += 1
         if lay["island"] and run.any():
@@ -629,7 +639,7 @@ def save_lane_state(path, worn, wear_map, road, cov, found, meta):
     import json
     import zipfile
     labels = np.array(sorted(found), np.int32)
-    paths = [np.asarray(found[int(k)][0], np.int32).reshape(-1, 2) for k in labels]
+    paths = [np.asarray(found[int(k)][0], np.float64).reshape(-1, 2) for k in labels]
     arrays = {
         "worn": np.clip(worn + 0.5, 0, 255).astype(np.uint8),
         "wear": np.clip(wear_map * 255 + 0.5, 0, 255).astype(np.uint8),
@@ -638,7 +648,7 @@ def save_lane_state(path, worn, wear_map, road, cov, found, meta):
         "labels": labels,
         "widths": np.array([found[int(k)][1] for k in labels], np.float64),
         "offsets": np.concatenate([[0], np.cumsum([len(p) for p in paths])]).astype(np.int64),
-        "paths": np.concatenate(paths) if paths else np.zeros((0, 2), np.int32),
+        "paths": np.concatenate(paths) if paths else np.zeros((0, 2), np.float64),
         "meta": np.array(json.dumps(meta)),
     }
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
@@ -656,7 +666,7 @@ def _same_lines(width_m, a, b, cfg=None):
 
 
 def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress_level=1,
-                  old_area=None, new_area=None, old_ends=None, new_ends=None):
+                  old_area=None, new_area=None, old_ends=None, new_ends=None, new_cfg=None, new_align=None):
     """
     Lay again only the lane lines of the streets whose lanes changed (the Lanes
     tool's Done), on the texture as it is, and leave everything else as it was.
@@ -690,12 +700,18 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
 
     def scaled(picks):
         return [dict(p, pt=[p["pt"][0] * scale, p["pt"][1] * scale]) for p in picks or []]
-    cfg = lines_cfg(meta)
+    previous_cfg = lines_cfg(meta)
+    cfg = new_cfg or previous_cfg
     e_old, e_new = ends_scaled(old_ends, scale), ends_scaled(new_ends, scale)
     # the highways' centrelines as streets of their own (as the texture was laid with them)
     found = with_chains(found, e_new, mpp)
     old, new = lane_choices(found, scaled(old_picks), mpp), lane_choices(found, scaled(new_picks), mpp)
     changed = [s for s, (_, w) in found.items() if not _same_lines(w, old.get(s), new.get(s), cfg)]
+    if new_align is not None and bool(new_align) != bool(meta["align"]):
+        meta["align"] = bool(new_align)
+        changed = list(found)
+    if cfg != previous_cfg:
+        changed = list(found)
     if LN.chains_of(old_ends) != LN.chains_of(new_ends):
         changed = list(found)                  # other highways (other settings): every street's lines again
     by_ends = []
@@ -725,6 +741,9 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
             if st_old != st_new or st_old == "edge":
                 by_area.append(s_)
         changed += by_area
+    full_update = cfg != previous_cfg or LN.chains_of(old_ends) != LN.chains_of(new_ends) or [e for e in e_old or [] if e.get("reserve")] != [e for e in e_new or [] if e.get("reserve")]
+    if full_update:
+        changed = list(found)
     out = {"changed": [], "area_streets": len(by_area), "ends_streets": len(by_ends)}
     if not changed:
         return out
@@ -734,8 +753,46 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
     road = np.unpackbits(z["road"], count=H * W).reshape(H, W).astype(bool)
     soft = bool(meta["soft_edges"])
     paint_rgb = np.array(meta["paint_rgb"], np.float32)
+    overlays = {k: z[k].copy() for k in ("paint", "yellow", "island", "island_top") if k in z.files}
     pics = {k: np.array(Image.open(p).convert("RGB")) for k, p in files.items() if p}
     target = "base" if "base" in pics else "result"
+    if full_update:
+        paint, island, top, laid = lay_lanes((H,W),found,new,mpp,cfg,meta["align"],area=a_new,ends=e_new)
+        yellow = laid["yellow"]
+        coverage = cov.astype(np.float32)/65535
+        paint *= coverage; yellow *= coverage; island *= coverage; top = np.minimum(top,island)
+        nearest = ndi.distance_transform_edt(~road, return_indices=True)[1] if soft and road.any() else None
+        fc = coverage if soft else road.astype(np.float32)
+        dirty = (pics["markings"] != 0).any(axis=2) | (paint>0) | (yellow>0) | (island>0)
+        if nearest is not None:
+            dirty |= dirty[nearest[0],nearest[1]] & (coverage>0)
+        result = with_lanes(worn,wear.astype(np.float32)/255,paint,island,top,paint_rgb,
+                            float(meta["wear_strength"]),float(meta["lum_mean"]),yellow)
+        previous = pics["result"].copy() if "full" in pics else None
+        pics[target][dirty] = finish(result,road,fc,soft,nearest)[dirty]
+        pics["markings"] = finish(markings_picture(paint,island,paint_rgb,yellow),road,fc,soft,soft=False)
+        if target == "base":
+            if decals is not None and decals[1]:
+                from app import decals as DC
+                rgba = decals[0].astype(np.float32)/255; rgba[...,:3] *= rgba[...,3:]
+                pics["result"][dirty] = DC.composite(pics["base"],rgba)[dirty]
+            else:
+                pics["result"][dirty] = pics["base"][dirty]
+        if previous is not None:
+            pics["full"][dirty] = np.clip(pics["full"][dirty].astype(np.int16)+pics["result"][dirty].astype(np.int16)-previous[dirty],0,255)
+        for k,p in files.items():
+            if p:
+                Image.fromarray(pics[k]).save(p,compress_level=compress_level)
+        state={k:z[k] for k in z.files};z.close()
+        state.update(paint=paint,yellow=yellow,island=island,island_top=top)
+        np.savez_compressed(state_path,**state)
+        for st in laid["streets"]:
+            st["line"] = (np.asarray(st["line"])/scale).round(2).tolist()
+        out["streets"] = laid["streets"]
+        out["changed"] = [dict(id=int(s),sides=list(LN.layout(w,new.get(s),rules=cfg["rules"],hw=cfg.get("highway"))["sides"]),
+                               even=new.get(s) is None,cut=False,box=[0,0,W/scale,H/scale]) for s,(_,w) in found.items()]
+        return out
+
     before = pics["result"].copy() if "full" in pics else None
     # each street's centreline, run on past its ends as far as its lines run (to a stop line
     # inside the junction's circle, as laid before or now)
@@ -786,6 +843,9 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
         # pixel it takes its colour from)
         lined = rw & ((pics["markings"][win] != 0).any(axis=2) | (cover > 0) | (yellow > 0) | (isl > 0))
         R &= lined[nearest[0], nearest[1]] if nearest is not None else lined
+        for key_, value_ in (("paint", cover), ("yellow", yellow), ("island", isl), ("island_top", isl_top)):
+            if key_ in overlays:
+                overlays[key_][win][R] = value_[R]
         fc = rc if soft else rw.astype(np.float32)
         pics[target][win][R] = finish(res, rw, fc, soft, nearest)[R]
         pics["markings"][win][R] = finish(markings_picture(cover, isl, paint_rgb, yellow), rw, fc, soft, soft=False)[R]
@@ -805,6 +865,11 @@ def repaint_lanes(state_path, old_picks, new_picks, files, decals=None, compress
                                "area": s in by_area, "ends": s in by_ends,
                                "box": [round(x0 / scale, 1), round(y0 / scale, 1), round(x1 / scale, 1),
                                        round(y1 / scale, 1)]})
+    if overlays:
+        state = {k: z[k] for k in z.files}
+        z.close()
+        state.update(overlays)
+        np.savez_compressed(state_path, **state)
     import os
     import uuid
     for k, p in files.items():
@@ -975,7 +1040,10 @@ def ends_scaled(ends, scale):
     if not ends:
         return None
     c = (scale - 1) / 2
-    return [dict(e, pts=[[x * scale + c, y * scale + c] for x, y in e["pts"]]) if e.get("chain")
+    return [dict(e, reserve=dict(e["reserve"], cx=e["reserve"]["cx"] * scale + c,
+                                 cy=e["reserve"]["cy"] * scale + c,
+                                 w=e["reserve"]["w"] * scale, h=e["reserve"]["h"] * scale)) if e.get("reserve")
+            else dict(e, pts=[[x * scale + c, y * scale + c] for x, y in e["pts"]]) if e.get("chain")
             else dict(e, x=e["x"] * scale + c, y=e["y"] * scale + c) for e in ends]
 
 
@@ -1000,10 +1068,21 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
 
     gray = np.array(Image.open(mask_path).convert("L"))
     prog.stage("mask", "cleaning and smoothing the mask")
-    prepared, coverage = prepare_mask(gray, scale)
-    prog.stage("junctions", "finding the junctions and streets")
-    det = J.detect(prepared)
-    det["coverage"] = coverage
+    import pickle
+    from pathlib import Path
+    geometry = params.get("_geometry_cache")
+    if geometry and Path(geometry).exists():
+        with open(geometry, "rb") as fh:
+            det = pickle.load(fh)
+        coverage = det["coverage"]
+    else:
+        prepared, coverage = prepare_mask(gray, scale)
+        prog.stage("junctions", "finding the junctions and streets")
+        det = J.detect(prepared)
+        det["coverage"] = coverage
+        if geometry:
+            with open(geometry, "wb") as fh:
+                pickle.dump(det, fh, protocol=4)
     road = det["road"]
     H, W = road.shape
     prog.stage("areas", "junction, kerb and open-road areas")
@@ -1013,32 +1092,41 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     # each part is painted over the whole canvas, then the parts are blended
     # with soft weights, so junction, kerb and open road fade into each other
     # over a few pixels instead of meeting at a hard line
-    acc = np.zeros((H, W, 3), np.float32)
-    wtot = np.zeros((H, W), np.float32)
-    feather = 1.5 * scale
-    used = {}
-    size_ratio = {}
-    for name, m in groups.items():
-        prog.stage("material_" + name, {"open": "material patches: open road", "edge": "material patches: kerb band",
-                                     "junction": "material patches: junctions"}.get(name, "material patches"))
-        if not m.any():
-            continue
-        npz = libraries["material"].get(name) or libraries["material"].get("open")
-        if not npz:
-            continue
-        patches, pmasks = load_patches(npz, with_masks=True)
-        trained_mpp = (libraries.get("scales") or {}).get(name)
-        ratio = (trained_mpp / mpp_out) if trained_mpp else float(scale)
-        patches, pmasks = scale_patches(patches, ratio, pmasks)
-        size_ratio[name] = round(ratio, 3)
-        # the layer only counts where its blend weight is above zero: within the
-        # weight's reach (the Gaussian's 4 sigma) of this part of the road
-        w = ndi.gaussian_filter(m.astype(np.float32), feather)
-        layer = synth_layer((H, W), patches, rng, overlap, jitter, pmasks, need=w > 0)
-        acc += layer * w[:, :, None]
-        wtot += w
-        used[name] = {"patches": int(len(patches)), "size_px": int(patches.shape[1])}
-    material = acc / np.maximum(wtot, 1e-6)[:, :, None]
+    cached_surface = params.get("_surface_cache")
+    reuse = params.get("_reuse_surface") and cached_surface and Path(cached_surface).exists()
+    cached = np.load(cached_surface) if reuse else None
+    if reuse:
+        material = cached["material"].copy()
+        used, size_ratio = {}, {}
+    else:
+        acc = np.zeros((H, W, 3), np.float32)
+        wtot = np.zeros((H, W), np.float32)
+        feather = 1.5 * scale
+        used = {}
+        size_ratio = {}
+        for name, m in groups.items():
+            prog.stage("material_" + name, {"open": "material patches: open road", "edge": "material patches: kerb band",
+                                         "junction": "material patches: junctions"}.get(name, "material patches"))
+            if not m.any():
+                continue
+            npz = libraries["material"].get(name) or libraries["material"].get("open")
+            if not npz:
+                continue
+            patches, pmasks = load_patches(npz, with_masks=True)
+            trained_mpp = (libraries.get("scales") or {}).get(name)
+            ratio = (trained_mpp / mpp_out) if trained_mpp else float(scale)
+            patches, pmasks = scale_patches(patches, ratio, pmasks)
+            size_ratio[name] = round(ratio, 3)
+            # the layer only counts where its blend weight is above zero: within the
+            # weight's reach (the Gaussian's 4 sigma) of this part of the road
+            w = ndi.gaussian_filter(m.astype(np.float32), feather)
+            layer = synth_layer((H, W), patches, rng, overlap, jitter, pmasks, need=w > 0)
+            acc += layer * w[:, :, None]
+            wtot += w
+            used[name] = {"patches": int(len(patches)), "size_px": int(patches.shape[1])}
+        material = acc / np.maximum(wtot, 1e-6)[:, :, None]
+    
+    raw_material = material.copy()
 
     # ---- surface grain: turn the fine detail inside the material up or down.
     # The material is split into its broad tone (a blur) and its fine grain
@@ -1066,13 +1154,20 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     wear_strength = float(params.get("wear", 0.5))
     wear_map = np.zeros((H, W), np.float32)
     wear_npz = libraries["wear"].get("open") or libraries["wear"].get("junction")
-    if wear_npz and wear_strength > 0:
-        wp, wm = load_patches(wear_npz, with_masks=True)
-        wtrained = (libraries.get("scales") or {}).get("open")
-        wp, wm = scale_patches(wp, (wtrained / mpp_out) if wtrained else float(scale), wm)
-        wl = synth_layer((H, W), wp, rng, overlap, jitter, wm, need=road).mean(axis=2)
-        lo, hi = np.percentile(wl[road], [5, 95]) if road.any() else (0, 1)
-        wear_map = np.clip((wl - lo) / max(hi - lo, 1e-6), 0, 1)
+    if reuse:
+        wear_map = cached["wear"].copy()
+        cached.close()
+    else:
+        if wear_npz:
+            wp, wm = load_patches(wear_npz, with_masks=True)
+            wtrained = (libraries.get("scales") or {}).get("open")
+            wp, wm = scale_patches(wp, (wtrained / mpp_out) if wtrained else float(scale), wm)
+            wl = synth_layer((H, W), wp, rng, overlap, jitter, wm, need=road).mean(axis=2)
+            lo, hi = np.percentile(wl[road], [5, 95]) if road.any() else (0, 1)
+            wear_map = np.clip((wl - lo) / max(hi - lo, 1e-6), 0, 1)
+    
+    if cached_surface:
+        np.savez_compressed(cached_surface, material=raw_material, wear=wear_map)
 
     worn = material * (1.0 - 0.45 * wear_strength * wear_map[:, :, None])
 
@@ -1086,6 +1181,10 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         det, mpp_out, marks, rng=rng, align=align_lines,
         nomark=_at_size(params.get("nomark"), scale, road.shape), lane_picks=picks,
         area=LN.area_scaled(LN.area_check(params.get("mark_area")), scale), ends=ends_scaled(line_ends, scale))
+    if params.get("_keep_markings") and out_paths.get("lanes") and Path(out_paths["lanes"]).exists():
+        with np.load(out_paths["lanes"]) as old_lanes:
+            if "paint" in old_lanes.files:
+                paint, yellow, island, island_top = [old_lanes[k].copy() for k in ("paint", "yellow", "island", "island_top")]
     if out_paths.get("streets"):
         # the streets for the Lanes tool, in mask pixels, their lines simplified to about 0.5 m
         import json
@@ -1112,17 +1211,24 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
 
     save(result, out_paths["result"])
     save(material, out_paths["material"])
-    save(np.dstack([wear_map * 255] * 3), out_paths["wear"], soft=False)
-    save(markings_picture(paint, island, paint_rgb, yellow), out_paths["markings"], soft=False)
+    save(np.dstack([wear_map * (255 if wear_strength > 0 else 0)] * 3), out_paths["wear"], soft=False)
+    if not params.get("_keep_markings"):
+        save(markings_picture(paint, island, paint_rgb, yellow), out_paths["markings"], soft=False)
     if out_paths.get("lanes"):
         # what laying one street's lanes again needs, without generating the rest (repaint_lanes)
-        save_lane_state(out_paths["lanes"], worn, wear_map, road, coverage, found, {
+        save_lane_state(out_paths["lanes"], worn, wear_map, road, coverage,
+                        street_paths(det, mpp_out, _at_size(params.get("nomark"), scale, road.shape)), {
             "mpp_out": mpp_out, "scale": scale, "shape": [int(H), int(W)], "soft_edges": soft_edges,
             "paint_rgb": [float(v) for v in paint_rgb], "wear_strength": wear_strength, "lum_mean": lum_mean,
             "cycle_m": float(params.get("cycle_m", 9.0)), "dash_share": float(params.get("dash_share", 0.6)),
             "width_m": float(params.get("width_m", 0.15)), "setback_m": float(params.get("setback_m", 2.0)),
             "align": align_lines, "width_ratio": params.get("width_ratio"), "marks": marks})
 
+    if out_paths.get("lanes"):
+        with np.load(out_paths["lanes"]) as state:
+            arrays = {k: state[k] for k in state.files}
+        arrays.update(paint=paint, yellow=yellow, island=island, island_top=island_top)
+        np.savez_compressed(out_paths["lanes"], **arrays)
     if map_path is not None:
         np.savez_compressed(
             map_path,

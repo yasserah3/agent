@@ -114,7 +114,71 @@ def centre_kind(a, b):
     return "cdash" if m <= 1 else "csolid" if m == 2 else "cdouble"
 
 
-def layout(width_m, sides=None, rules="simple", edge_inset=None, hw=None, island=None):
+def marking_eligible(width_m, cfg):
+    """The same explicit road-width cutoff in texture, decals and 3D."""
+    width = float(width_m)
+    return math.isfinite(width) and width + 1e-6 >= float(cfg.get('min_marking_m', 6.0))
+
+
+class ReservationIndex:
+    """Crossing/stop aprons, independent of how a road's skeleton was split."""
+    def __init__(self, ends):
+        import numpy as np
+        from scipy.spatial import cKDTree
+        self.areas = [e['reserve'] for e in ends or () if e.get('reserve')]
+        self.tree = cKDTree([[a['cx'], a['cy']] for a in self.areas]) if self.areas else None
+        self.radius = max((math.hypot(a['w'], a['h']) / 2 for a in self.areas), default=0)
+
+    def blocked(self, points, arc, pad=0):
+        """Exact line/rotated-rectangle intersections as intervals along the line."""
+        import numpy as np
+        P, arc = np.asarray(points, float), np.asarray(arc, float)
+        if self.tree is None or len(P) < 2:
+            return []
+        step = float(np.linalg.norm(np.diff(P, axis=0), axis=1).max(initial=0))
+        candidates = set(k for ks in self.tree.query_ball_point(P, self.radius + pad + step) for k in ks)
+        intervals = []
+        for k in candidates:
+            a = self.areas[k]; t = math.radians(a['angle']); c, s = math.cos(t), math.sin(t)
+            dx, dy = P[:, 0] - a['cx'], P[:, 1] - a['cy']
+            Q = np.column_stack([dx*c + dy*s, -dx*s + dy*c])
+            D = np.diff(Q, axis=0); lo = np.zeros(len(D)); hi = np.ones(len(D)); ok = np.ones(len(D), bool)
+            for axis, half in enumerate((a['w']/2 + pad, a['h']/2 + pad)):
+                start, delta = Q[:-1,axis], D[:,axis]
+                parallel = np.abs(delta) < 1e-12
+                ok &= ~parallel | (np.abs(start) <= half)
+                safe = np.where(parallel, 1.0, delta)
+                x, y = (-half-start)/safe, (half-start)/safe
+                lo = np.maximum(lo, np.where(parallel, 0.0, np.minimum(x,y)))
+                hi = np.minimum(hi, np.where(parallel, 1.0, np.maximum(x,y)))
+            ok &= hi >= lo
+            ds = np.diff(arc)
+            intervals.extend(zip((arc[:-1]+lo*ds)[ok].tolist(), (arc[:-1]+hi*ds)[ok].tolist()))
+        merged = []
+        for a, b in sorted(intervals):
+            if merged and a <= merged[-1][1] + 1e-6:
+                merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+            else:
+                merged.append((a,b))
+        return merged
+
+
+def clear_runs(a, b, blocked):
+    runs, cursor = [], a
+    for lo, hi in blocked:
+        if hi <= cursor or lo >= b:
+            continue
+        if lo > cursor:
+            runs.append((cursor, min(lo,b)))
+        cursor = max(cursor,hi)
+        if cursor >= b:
+            break
+    if cursor < b:
+        runs.append((cursor,b))
+    return [(lo,hi) for lo,hi in runs if hi-lo > 1e-6]
+
+
+def layout(width_m, sides=None, rules="simple", edge_inset=None, hw=None, island=None, group=None):
     """
     The lines (and island) of a road width_m wide, with sides = (side 1, side 2)
     lanes or None for even: {"width_m", "limit", "sides", "even", "cut",
@@ -143,11 +207,11 @@ def layout(width_m, sides=None, rules="simple", edge_inset=None, hw=None, island
         lines = [(s * k - half, "dash") for k in range(1, a)]
         lines += [(i0 + ISLAND_M + s * k - half, "dash") for k in range(1, b)]
         lines += [(x - half, "solid") for x in (ei, i0 - ei, i0 + ISLAND_M + ei, W - ei)]
-        return dict(out, lane_m=s, kind="highway", lines=sorted(lines), island=(i0 - half, i0 + ISLAND_M - half))
+        return dict(out, lane_m=s, kind="highway", lines=sorted([(x, ("cdouble" if group == 1 else "csolid") if group and abs(x - (i0 - half - ei)) < 1e-6 or group and abs(x - (i0 + ISLAND_M - half + ei)) < 1e-6 else kind) for x, kind in lines]), island=(i0 - half, i0 + ISLAND_M - half), group=group)
     s = W / lanes
     if rules == "guide" and a >= 1 and b >= 1:
-        lines = [(s * k - half, "dash" if k != a else centre_kind(a, b)) for k in range(1, lanes)]
-        return dict(out, lane_m=s, kind="road", lines=lines, island=None)
+        lines = [(s * k - half, "dash" if k != a else ("cdouble" if group == 1 else "csolid" if group == 2 else centre_kind(a, b))) for k in range(1, lanes)]
+        return dict(out, lane_m=s, kind="road", lines=lines, island=None, group=group)
     return dict(out, lane_m=s, kind="road", lines=[(s * k - half, "dash") for k in range(1, lanes)], island=None)
 
 
@@ -198,7 +262,7 @@ def end_setbacks(path_xy, ends, default_px, px, inside=False):
         t = t / n
         best = None
         for e in ends or ():
-            if e.get("chain") or e["ox"] * t[0] + e["oy"] * t[1] < 0.8:
+            if e.get("chain") or e.get("reserve") or e["ox"] * t[0] + e["oy"] * t[1] < 0.8:
                 continue                                      # a highway's centreline, or not along this street
             # this end must lie on the approach: out from the edge along it, and across it
             # no further than the road's half width (a stub of centreline beside it is not it)
@@ -213,6 +277,21 @@ def end_setbacks(path_xy, ends, default_px, px, inside=False):
             if best is None or side_ < best[0]:
                 best = (side_, d)
         out.append(best[1] if best else default_px)
+    if inside:
+        # A chain only gets a junction setback at a genuine highway meeting.
+        # Its image boundary or an ordinary width change is not a junction.
+        for chain in chains_of(ends):
+            cp = np.asarray(chain['pts'], float)
+            if len(cp) < 2:
+                continue
+            forward = np.linalg.norm(P[0] - cp[0]) + np.linalg.norm(P[-1] - cp[-1])
+            reverse = np.linalg.norm(P[0] - cp[-1]) + np.linalg.norm(P[-1] - cp[0])
+            if min(forward, reverse) <= max(2.0, 1.0 / px):
+                stop = [chain.get('stop_start', True), chain.get('stop_end', True)]
+                if reverse < forward:
+                    stop.reverse()
+                out = [value if stops else 0.0 for value, stops in zip(out, stop)]
+                break
     return out[0], out[1]
 
 
@@ -268,9 +347,20 @@ class ChainIndex:
         P = [np.asarray(c["pts"], float) for c in chains if len(c["pts"])]
         W = [np.asarray(c["w"], float) for c in chains if len(c["pts"])]
         self.ok = bool(P)
+        self.chains = chains
         if self.ok:
             self.P, self.W = np.vstack(P), np.concatenate(W)
             self.tree = cKDTree(self.P)
+            self.chain_ids = np.concatenate([np.full(len(p), k, int) for k, p in enumerate(P)])
+            arcs = [np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(p, axis=0), axis=1))]) for p in P]
+            self.chain_arc = np.concatenate(arcs)
+            self.chain_lengths = np.array([a[-1] for a in arcs])
+            tangents = []
+            for p in P:
+                t = np.gradient(p, axis=0) if len(p) > 1 else np.zeros_like(p)
+                t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-9)
+                tangents.append(t)
+            self.tangents = np.vstack(tangents)
         self.px = px
 
     def along(self, pts_xy):
@@ -287,6 +377,23 @@ class ChainIndex:
         a = self.along(pts_xy)
         return float(a.mean()) if len(a) else 0.0
 
+    def covers_path(self, pts_xy):
+        """Replace a segment only if a chain follows that same centreline.
+
+        Being inside a wide highway's carriageway is insufficient: it could
+        be a crossing road or a neighboring parallel street.
+        """
+        import numpy as np
+        P = np.asarray(pts_xy, float)
+        if not self.ok or len(P) < 2:
+            return False
+        d, i = self.tree.query(P)
+        t = np.gradient(P, axis=0)
+        t /= np.maximum(np.linalg.norm(t, axis=1, keepdims=True), 1e-9)
+        aligned = np.abs((t * self.tangents[i]).sum(axis=1)) >= .8
+        close = d <= np.maximum(1.5, .15 * self.W[i] / self.px)
+        return float((close & aligned).mean()) >= .65
+
 
 def chain_offsets(lay, widths, rules, edge_inset=None):
     """
@@ -299,14 +406,29 @@ def chain_offsets(lay, widths, rules, edge_inset=None):
     w = np.asarray(widths, float)
     W0 = float(lay["width_m"])
     isl = bool(lay["island"])
-    L1 = layout(W0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl)
-    L2 = layout(W0 + 1.0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl)
+    L1 = layout(W0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl, group=lay.get("group"))
+    L2 = layout(W0 + 1.0, lay["sides"], rules=rules, edge_inset=edge_inset, island=isl, group=lay.get("group"))
     if [k for _, k in L1["lines"]] != [k for _, k in L2["lines"]] or bool(L1["island"]) != bool(L2["island"]):
         return ([np.full(len(w), x) for x, _ in lay["lines"]],
                 [np.full(len(w), x) for x in lay["island"]] if lay["island"] else None)
     xs = [x1 + (x2 - x1) * (w - W0) for (x1, _), (x2, _) in zip(L1["lines"], L2["lines"])]
     il = ([a1 + (a2 - a1) * (w - W0) for a1, a2 in zip(L1["island"], L2["island"])] if L1["island"] else None)
     return xs, il
+
+
+def centre_group(points, mpp, cfg, width_m, on_chain=False):
+    """Match a saved highway pick to its continuous centreline, in real metres."""
+    if not on_chain and not is_highway(width_m, cfg.get("highway")):
+        return None
+    import numpy as np
+    from shapely.geometry import LineString, Point
+    line = LineString(np.asarray(points, float) * mpp)
+    best, group = float("inf"), None
+    for p in cfg.get("centre_groups", []):
+        d = line.distance(Point(np.asarray(p["pt"]) * cfg.get("group_mpp", mpp)))
+        if d <= width_m / 2 + mpp and d < best:
+            best, group = d, p["group"]
+    return group
 
 
 def line_width(width_m, ratio, fixed_m):

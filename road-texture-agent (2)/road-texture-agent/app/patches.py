@@ -355,7 +355,7 @@ def _reaches(box, window):
 
 
 def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=None, decals=None, scatter=None,
-              islands=None, streets=None):
+              islands=None, streets=None, centre_groups=None):
     """
     Each patch's key: the settings every patch shares (base, a key) and the
     parts that reach into its window: the decals and objects near it, its
@@ -385,8 +385,13 @@ def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=No
                 return cboxes[int(which[i])]
         return b
     picks = [(p, pick_box(p) if streets else None) for p in (lane_picks or [])]
-    ends_b = [(e, (cboxes[chains.index(e)] if e.get("chain") else streets.box_of(e["x"], e["y"])) if streets else None)
-              for e in (ends or [])]
+    groups = [(p, pick_box(p) if streets else None) for p in (centre_groups or [])]
+    def end_box(e):
+        if e.get("reserve"):
+            a = e["reserve"]; r = math.hypot(a["w"], a["h"]) / 2
+            return (a["cx"]-r, a["cy"]-r, a["cx"]+r, a["cy"]+r)
+        return (cboxes[chains.index(e)] if e.get("chain") else streets.box_of(e["x"], e["y"])) if streets else None
+    ends_b = [(e, end_box(e)) for e in (ends or [])]
     area_box = None
     if mark_area:                                       # the turned rectangle's reach all round its middle
         r = math.hypot(mark_area["w"], mark_area["h"]) / 2
@@ -397,6 +402,7 @@ def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=No
         win = window_of(p["keep"], W, H, mpp)
         parts = {
             "picks": [q for q, b in picks if streets is None or _reaches(b, win)],
+            "centre_groups": [q for q,b in groups if streets is None or _reaches(b,win)],
             "ends": [e for e, b in ends_b if streets is None or _reaches(b, win)],
             "area": None if not mark_area else (mark_area if area_box is None or _reaches(area_box, win) else "outside"),
             "decals": [[q.get("decal"), q["x"], q["y"], q.get("ux"), q.get("uy"), q.get("w_m"), q.get("h_m")]

@@ -899,7 +899,7 @@ def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None, widths=No
     if it had lines when it was built).
     """
     n0, i0 = len(mesh.dashes), len(mesh.lane_islands)
-    if key[0] in ("street", "connector") and mesh.chain_index is not None and mesh.chain_index.share(args[0]) >= 0.5:
+    if key[0] in ("street", "connector") and mesh.chain_index is not None and mesh.chain_index.covers_path(args[0]):
         layout = None                                        # on a highway: its whole centreline lays the lines
     else:
         layout = _dash_strips(mesh, *args, island=island, sides=sides, use_ends=key[0] in ("street", "chain"),
@@ -916,7 +916,7 @@ def _lanes(mesh, owner, key, args, island=True, sides=None, owns=None, widths=No
 _KEEP = object()
 
 
-def relane(mesh, picks, area=_KEEP, ends=_KEEP):
+def relane(mesh, picks, area=_KEEP, ends=_KEEP, marks=None):
     """
     Lay every street's lane lines again with other Lanes tool choices (picks,
     in mask pixels) and markings area (area, app/lanes.py, mask pixels; left
@@ -938,9 +938,16 @@ def relane(mesh, picks, area=_KEEP, ends=_KEEP):
     mesh.dashes, mesh.dash_solid, mesh.dash_owner, mesh.dash_yellow = [], [], [], []
     mesh.lane_islands, mesh.island_owner = [], []
     calls, mesh.lane_calls = mesh.lane_calls, []
+    if marks is not None:
+        for c in calls:
+            c["args"] = (*c["args"][:-1], dict(c["args"][-1], marks=marks))
+    chains_changed = ends is not _KEEP
+
     changed, flipped = set(), False
     for c in calls:
         kind = c["key"][0]
+        if chains_changed and kind == "chain":
+            continue
         sides = (lane_of.get(c["key"][1]) if kind == "street" else inner.get(c["key"][1:]) if kind == "inner"
                  else chain_of.get(c["key"][1]) if kind == "chain" else None)
         old = c["layout"]
@@ -952,6 +959,11 @@ def relane(mesh, picks, area=_KEEP, ends=_KEEP):
             changed.add(c["owner"])
         if c["owns"] and c["owner"] in mesh.streets:
             mesh.streets[c["owner"]]["dash"] = new
+    if chains_changed:
+        cfg = dict(calls[0]["args"][-1]) if calls else {"marks": marks or {}}
+        sample = next((c for c in calls if c["key"][0] == "chain"), None)
+        scale = sample["args"][5] if sample else mesh.sw_scale if hasattr(mesh, "sw_scale") else 1
+        _chain_lanes(mesh, picks, mesh.lane_mpp, scale, cfg, None)
     return changed, flipped
 
 
@@ -1043,8 +1055,9 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     k = len(hw)
     inner = np.asarray(hw)[int(k * 0.15): max(int(k * 0.85), int(k * 0.15) + 1)]
     street_m = 2 * float(np.median(inner)) * mpp            # its width, away from the flared ends
-    lay = LN.layout(street_m, sides, rules=marks["rules"], edge_inset=marks.get("edge_inset"), hw=marks.get("highway"))
-    if not lay["lines"]:
+    lay = LN.layout(street_m, sides, rules=marks["rules"], edge_inset=marks.get("edge_inset"), hw=marks.get("highway"),
+                    group=LN.centre_group(pts, mpp, marks, street_m, on_chain=widths is not None))
+    if not lay["lines"] or not LN.marking_eligible(street_m, marks):
         return None
     cycle, share = RM.main_cycle(marks, lay)
     canon = LN.canonical(pts[0], pts[-1])
@@ -1067,13 +1080,13 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
             wid = np.concatenate([np.full(len(before), wid[0]), wid, np.full(len(after), wid[-1])])
     sb0, sb1 = (sa, sb) if canon else (sb, sa)               # at the canonical start, and end
     usable = L - sb0 - sb1
-    if usable < cycle * 0.6:
+    if usable <= 0 or (usable < cycle * 0.6 and not any(k in LN.SOLID_KINDS for _, k in lay["lines"])):
         return None
     n = max(1, int(round(usable / cycle)))
     if n < cfg.get("min_cycles", 1):
         return None
     step = usable / n
-    styles = {kd: RM.kind_style(marks, kd, street_m) for kd in {kd for _, kd in lay["lines"]}}
+    styles = {kd: dict(RM.kind_style(marks, kd, street_m), **({"yellow": lay["group"] == 2 and marks.get("standard") != "saudi"} if lay.get("group") and kd in LN.CENTRE_KINDS else {})) for kd in {kd for _, kd in lay["lines"]}}
     dk = next((kd for _, kd in lay["lines"] if kd in ("dash", "cdash")), lay["lines"][0][1])
     width_m = styles[dk]["width"]
     sgn = 1.0 if canon else -1.0                             # across, as the street was built
@@ -1092,6 +1105,7 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
         x_at, isl_at = [x for x, _ in lay["lines"]], None
     area = mesh.mark_area
     kept = 0
+    reservations = LN.ReservationIndex(mesh.line_ends)
     for li_, (_, kind) in enumerate(lay["lines"]):
         stl = styles[kind]
         halfw = stl["width"] / 2 / mpp
@@ -1104,8 +1118,24 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
         pieces = ([(sb0, L - sb1)] if solid
                   else [(sb0 + c * step, sb0 + c * step + dash) for c in range(n)])
         for off in offs:
+            q = pts + side * (off[:, None] if np.ndim(off) else off)
+            blocked = reservations.blocked(q, arc, halfw + .2 / mpp)
             for a_m, b_m in pieces:
                 a, b = sorted((to_arc(a_m) / mpp, to_arc(b_m) / mpp))
+                safe_runs = LN.clear_runs(a, b, blocked)
+                if safe_runs != [(a,b)]:
+                    layout["clipped"] = True
+                    # Dashed paint stays whole; continuous edge/centre lines
+                    # stop exactly at each reserved crossing apron.
+                    if solid:
+                        for ra, rb in safe_runs:
+                            runs = _inside_runs(pts, side, arc, ra, rb, off, area, mpp) if area else [(ra,rb)]
+                            for r0, r1 in runs:
+                                mesh.dashes.append(_line_strip(pts, side, arc, r0, r1, off, halfw, scale))
+                                mesh.dash_solid.append(True)
+                                mesh.dash_yellow.append(bool(stl.get("yellow")))
+                                kept += 1
+                    continue
                 # past the street's ends there is no street surface to paint it into: a strip
                 beyond = a < -1e-6 or b > L_px + 1e-6
                 if area:
