@@ -393,7 +393,7 @@ def part_sigs(patches, W, H, mpp, base, lane_picks=None, ends=None, mark_area=No
         return (cboxes[chains.index(e)] if e.get("chain") else streets.box_of(e["x"], e["y"])) if streets else None
     ends_b = [(e, end_box(e)) for e in (ends or [])]
     area_box = None
-    if mark_area:                                       # the turned rectangle's reach all round its middle
+    if mark_area and "cx" in mark_area and not mark_area.get("holes"):   # the turned rectangle's reach all round its middle
         r = math.hypot(mark_area["w"], mark_area["h"]) / 2
         area_box = (mark_area["cx"] - r, mark_area["cy"] - r, mark_area["cx"] + r, mark_area["cy"] + r)
     dpl = (decals or {}).get("placements") or []

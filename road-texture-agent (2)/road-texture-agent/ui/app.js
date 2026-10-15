@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords6';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -150,6 +150,8 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
   const LANES = { picks: [], streets: null, mpp: 1, on: false, sel: -1, mask: null };
   // the markings area (see markings area below)
   const MAREA = { area: null, on: false, mask: null, painted: 'null', busy: false, again: false, timer: null, drag: null };
+  // project areas: rectangles where the project goes (flat road in the street material, no sidewalks, no markings)
+  const PAREA = { areas: [], on: false, sel: -1, mask: null, drag: null, built: '[]' };
   const AUTO = { pick: -1 };          // automatic placement: the placement picking its islands (-1: none)
   try{
     const kept = JSON.parse(localStorage.getItem('rta.materials') || 'null');
@@ -837,6 +839,7 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
         await loadSlots(rec.id);
         await loadLanes(rec.id);
         await loadMarea(rec.id);
+        await loadParea(rec.id);
         if(S.gen.placements.length) log(`${S.gen.placements.length} saved object placement(s) restored for this mask.`);
         renderObjList();
         drawBridges();
@@ -1161,6 +1164,7 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
     $('#btnGenerate').disabled = !ok;
     $('#btnGenJunctions').disabled = !ok;
     $('#genNote').textContent = ok ? 'Ready.' : 'Load a street mask.';
+    renderParea();
   }
   $('#btnGenJunctions').addEventListener('click', async () => {
     if(!S.gen.mask) return;
@@ -1232,6 +1236,9 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
       S.gen.marksPainted = marksKey();                                     // the lines' settings the texture has
       S.gen.lanesPainted = JSON.stringify(res.lane_picks || []);         // the lane choices the texture has
       MAREA.painted = JSON.stringify(res.mark_area || null);               // and its markings area
+      PAREA.built = JSON.stringify(PAREA.areas);                           // and its project areas
+      renderParea();
+      if(res.project_areas) log(`  Project areas: ${res.project_areas} built in, flat as the streets in the street material, no sidewalks or markings inside.`);
       renderMarea();
       S.gen.top = null; S.gen.decals = null;
       renderMarks();
@@ -1447,8 +1454,8 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
 
   // Download 3D model: a window in the middle of the screen for the format (GLB, FBX,
   // OBJ) and what is combined; the choices are kept in this browser
-  const EXPORT = (() => { try{ return { format: 'glb', ground: false, objects: false, front: '+y', ...JSON.parse(localStorage.getItem('rta.export') || '{}') }; }
-                          catch(_){ return { format: 'glb', ground: false, objects: false, front: '+y' }; } })();
+  const EXPORT = (() => { try{ return { format: 'glb', ground: false, objects: false, front: '+y', patches: false, ...JSON.parse(localStorage.getItem('rta.export') || '{}') }; }
+                          catch(_){ return { format: 'glb', ground: false, objects: false, front: '+y', patches: false }; } })();
   const FRONT_NAME = { '+y': '+Y', '+x': '+X', '-y': '-Y', '-x': '-X' };
   // the objects' front in the file: their own axes turned, every copy where it stood
   const exportFrontNote = () => { $('#exFrontNote').textContent = (EXPORT.front === '+y'
@@ -1462,13 +1469,13 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
   function openExport(){
     if(!S.gen.result) return;
     $('#exFormat').value = EXPORT.format; $('#exGround').checked = EXPORT.ground; $('#exObjects').checked = EXPORT.objects;
-    $('#exFront').value = EXPORT.front;
+    $('#exFront').value = EXPORT.front; $('#exPatches').checked = !!EXPORT.patches;
     exportNote(); exportFrontNote(); $('#exportPop').hidden = false; $('#exFormat').focus();
   }
   const closeExport = () => { $('#exportPop').hidden = true; };
-  ['#exFormat', '#exGround', '#exObjects', '#exFront'].forEach(id => $(id).addEventListener('change', () => {
+  ['#exFormat', '#exGround', '#exObjects', '#exFront', '#exPatches'].forEach(id => $(id).addEventListener('change', () => {
     EXPORT.format = $('#exFormat').value; EXPORT.ground = $('#exGround').checked; EXPORT.objects = $('#exObjects').checked;
-    EXPORT.front = $('#exFront').value;
+    EXPORT.front = $('#exFront').value; EXPORT.patches = $('#exPatches').checked;
     try{ localStorage.setItem('rta.export', JSON.stringify(EXPORT)); }catch(_){}
     exportNote(); exportFrontNote();
   }));
@@ -1483,7 +1490,7 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
     if(!S.gen.result) return;
     // one file as before, unless the road's area alone says the map is too big for one model
     const big = modelCost();
-    if(big && !big.oneFile) return downloadPatches(big);
+    if(big && !big.oneFile) return downloadPatches(big, choice);
     $('#btn3d').disabled = true; status('Building 3D model…');
     if(big && big.big) log(`Building the whole map as one 3D model to download: ${big.text}.`);
     log('Building the 3D model: tracing the road outline, triangulating, applying the texture…');
@@ -1566,13 +1573,14 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
 
   // a big map's 3D model: its 1 km patches (the 3D tab's), each a GLB in the whole map's
   // coordinates, in one zip; those not built yet are built now (watch them in the 3D tab)
-  async function downloadPatches(c){
+  async function downloadPatches(c, choice){
+    choice = choice || { ...EXPORT };
     $('#btn3d').disabled = true;
     try{
       const st = await api('/api/patches/start', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ generation: S.gen.result.id, ...exportSettings() }) });
-      if(EXPORT.format !== 'glb' || EXPORT.ground || EXPORT.objects)
-        log('A big map downloads as its patches, GLB files as they are built (the format and combine choices are for whole models).');
+      if(choice.patches && (choice.format !== 'glb' || choice.ground || choice.objects))
+        log('As patch files: the GLBs as they are built (the format and combine choices are for the one model).');
       if(st.ready < st.total){
         log(`This map is ${kmText(c)}: its 3D model comes in ${st.total} patches of 1 km, too big as one model. `
           + `${st.ready} of them are built; the rest are being built now`
@@ -1580,10 +1588,26 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
           + '(the 3D tab shows them as they come).');
         return;
       }
-      log(`3D model in ${st.total} patches of 1 km: each a GLB in the whole map's coordinates (metres, the map's middle at 0), `
-        + 'so imported together they fit as they are.', 'ok');
+      let href;
+      if(choice.patches){
+        log(`3D model in ${st.total} patches of 1 km: each a GLB in the whole map's coordinates (metres, the map's middle at 0), `
+          + 'so imported together they fit as they are.', 'ok');
+        href = `/api/patches/zip/${st.plan}`;
+      } else {
+        // one model by kind: the patches joined, each part one object
+        status('Joining the patches into one model…');
+        const m = await api(`/api/patches/model/${st.plan}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          job: 'Joining the patches into one 3D model',
+          body: JSON.stringify({ format: choice.format, combine_ground: choice.ground, combine_objects: choice.objects, front: choice.front || '+y' }) });
+        log(`3D model ready as one ${choice.format.toUpperCase()}: its ${m.patches} patches of 1 km joined, by kind`
+          + (m.parts ? ` (${m.parts.join(', ')}${m.copies ? `, and ${m.copies.toLocaleString()} object copies` : ''})` : '')
+          + (choice.ground ? '; the streets, sidewalks and kerbs as one ("Streets")' : '')
+          + `, ${(m.file_bytes / 1048576).toFixed(0)} MB.`, 'ok');
+        if(choice.format !== 'glb') log('  A zip with the model and its textures folder: unzip it, then import the model.');
+        href = m.url;
+      }
       const link = document.createElement('a');
-      link.href = API + `/api/patches/zip/${st.plan}`; link.download = '';
+      link.href = API + href; link.download = '';
       document.body.appendChild(link); link.click(); link.remove();
     }catch(e){ log('3D export failed: ' + e.message, 'bad'); }
     finally{ $('#btn3d').disabled = false; }
@@ -1872,6 +1896,7 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
     if(!S.gen.mask) return;
     drawLanes(f);
     drawMarea(f, Math.max(4, genVp.canvas.width / 260));
+    drawParea(f, Math.max(4, genVp.canvas.width / 260));
     const road = Math.max(3, 9 / mppMask() * f);                  // roughly a road's width, for the lines
     // ramps and deck along the road, from the last preview
     S.gen.bridgePreview.forEach(p => {
@@ -2794,6 +2819,135 @@ const UI_VERSION = '2026.10.15-coords5';   // must match VERSION in server.py
     mareaChanged();
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && MAREA.on && !MAT.open) mareaMode(false); });
+
+  /* ---- project areas: rectangles on the map where the project goes. Generate texture builds them in:
+     flat as the streets, in the street material, no sidewalks, kerbs or blocks, no lane lines or decals
+     (server.py _inner_streets). { cx, cy, w, h (mask pixels), angle (degrees) } each, kept with the mask */
+  function renderParea(){
+    const has = !!S.gen.mask, n = PAREA.areas.length, m = mppMask();
+    $('#btnParea').disabled = !has;
+    $('#btnPareaEdit').disabled = !n;
+    $('#btnPareaEdit').setAttribute('aria-pressed', PAREA.on);
+    $('#btnPareaEdit').textContent = PAREA.on ? 'Done' : 'Edit';
+    $('#btnPareaDel').disabled = !(PAREA.on && PAREA.sel >= 0);
+    const changed = S.gen.result && JSON.stringify(PAREA.areas) !== PAREA.built;
+    $('#pareaNote').textContent = !n
+      ? 'None. Add project area puts a rectangle on the map where your project goes: flat as the streets, in the street material, no sidewalks, kerbs or blocks, and no lane lines or decals inside (move it, size it from its corners, turn it from its handle).'
+      : `${n} project area${n === 1 ? '' : 's'}: ` + PAREA.areas.map((a, i) => `${i + 1}: ${Math.round(a.w * m)} × ${Math.round(a.h * m)} m`
+          + (Math.round(a.angle) % 360 ? `, turned ${Math.round(((a.angle % 360) + 360) % 360)}°` : '')).join('; ') + '. '
+        + 'Flat as the streets, the street material, no sidewalks or markings inside.'
+        + (PAREA.on ? ' Click one to choose it; drag to move, a corner to size, the round handle to turn; Done or Esc to finish.' : '')
+        + (changed ? ' Changed since the texture: press Generate texture to build them in.' : !S.gen.result ? ' Generate texture builds them in.' : '');
+  }
+  function drawParea(f, hr){
+    if(!PAREA.areas.length) return;
+    const shownW = genVp.canvas.getBoundingClientRect().width;
+    if(shownW > 0) hr = Math.max(hr, 7 * genVp.canvas.width / shownW);
+    PAREA.areas.forEach((a, i) => {
+      const pts = mareaCorners(a).map(q => [q[0] * f, q[1] * f]);
+      const sel = PAREA.on && i === PAREA.sel, g = el('g', {}, layer);
+      const body = el('polygon', { points: pts.map(q => q.join(',')).join(' '), fill: sel ? 'rgba(232,162,58,.26)' : 'rgba(232,162,58,.14)',
+        stroke: '#E8A23A', 'stroke-width': hr * (sel ? 0.55 : 0.35), class: PAREA.on ? 'grab' : '',
+        'pointer-events': PAREA.on ? 'all' : 'none' }, g);
+      const tl = pts[0];
+      const lab = el('text', { x: tl[0] + hr, y: tl[1] - hr * 0.8, 'font-size': hr * 1.8, fill: '#E8A23A', class: 'lane-lbl',
+                               'stroke-width': hr * 0.35, 'pointer-events': 'none' }, g);
+      lab.textContent = `Project area ${i + 1}`;
+      if(!PAREA.on) return;
+      body.addEventListener('pointerdown', e => { PAREA.sel = i; pareaStart(e, 'move'); renderParea(); });
+      if(!sel) return;
+      pts.forEach(q => {
+        const c = el('circle', { cx: q[0], cy: q[1], r: hr, class: 'corner', fill: '#fff', stroke: '#E8A23A', 'stroke-width': hr * 0.35 }, g);
+        c.addEventListener('pointerdown', e => pareaStart(e, 'size'));
+      });
+      const r = a.angle * Math.PI / 180, ex = (a.cx + Math.cos(r) * a.w / 2) * f, ey = (a.cy + Math.sin(r) * a.w / 2) * f;
+      const rx = ex + Math.cos(r) * hr * 5, ry = ey + Math.sin(r) * hr * 5;
+      el('line', { x1: ex, y1: ey, x2: rx, y2: ry, stroke: '#E8A23A', 'stroke-width': hr * 0.35 }, g);
+      const spin = el('circle', { cx: rx, cy: ry, r: hr * 1.15, class: 'spin', fill: '#E8A23A' }, g);
+      spin.addEventListener('pointerdown', e => pareaStart(e, 'rotate'));
+    });
+  }
+  function pareaStart(e, mode){
+    e.stopPropagation(); e.preventDefault();
+    const a = PAREA.areas[PAREA.sel];
+    if(a) PAREA.drag = { mode, start: toMask(e), orig: { ...a } };
+  }
+  addEventListener('pointermove', e => {
+    const d = PAREA.drag, a = PAREA.areas[PAREA.sel];
+    if(!d || !a) return;
+    const o = d.orig, p = toMask(e);
+    if(d.mode === 'move'){ a.cx = o.cx + p[0] - d.start[0]; a.cy = o.cy + p[1] - d.start[1]; }
+    else if(d.mode === 'size'){
+      const r = o.angle * Math.PI / 180, dx = p[0] - o.cx, dy = p[1] - o.cy;
+      a.w = Math.max(4, 2 * Math.abs(dx * Math.cos(r) + dy * Math.sin(r)));
+      a.h = Math.max(4, 2 * Math.abs(-dx * Math.sin(r) + dy * Math.cos(r)));
+    }else a.angle = Math.atan2(p[1] - o.cy, p[0] - o.cx) * 180 / Math.PI;
+    renderParea(); drawBridges();
+  });
+  addEventListener('pointerup', () => {
+    if(!PAREA.drag) return;
+    PAREA.drag = null;
+    pareaChanged();
+  });
+  function pareaMode(on){
+    PAREA.on = on && !!S.gen.mask && PAREA.areas.length > 0;
+    if(PAREA.on){
+      if(MAREA.on) mareaMode(false);
+      if(LANES.on) lanesMode(false);
+      if(ISLS.pick >= 0) setPick(-1);
+      AUTO.pick = -1;
+      if(PAREA.sel < 0) PAREA.sel = PAREA.areas.length - 1;
+    }
+    renderParea(); drawBridges();
+  }
+  // kept with the mask (Generate texture reads them there), the 3D tab told
+  function pareaChanged(){
+    renderParea(); drawBridges();
+    window.dispatchEvent(new Event('materials'));
+    if(!S.gen.mask) return;
+    const mask = S.gen.mask.id, areas = PAREA.areas.map(a => ({ ...a }));
+    api('/api/projectareas', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mask, areas }) })
+      .catch(e => log('Project areas not saved: ' + e.message, 'bad'));
+  }
+  async function loadParea(maskId){
+    PAREA.mask = maskId; PAREA.areas = []; PAREA.on = false; PAREA.sel = -1;
+    try{
+      const r = await api('/api/projectareas?mask=' + maskId);
+      if(PAREA.mask !== maskId) return;
+      PAREA.areas = r.areas || [];
+      if(PAREA.areas.length) log(`${PAREA.areas.length} project area(s) restored for this mask.`);
+    }catch(_){}
+    PAREA.built = S.gen.result ? JSON.stringify(PAREA.areas) : '[]';
+    renderParea();
+  }
+  $('#btnParea').addEventListener('click', () => {
+    if(!S.gen.mask) return;
+    // in the middle of what is on screen, 60 x 40 m
+    const vr = $('#genVp').getBoundingClientRect(), m = mppMask();
+    let [cx, cy] = toMask({ clientX: vr.left + vr.width / 2, clientY: vr.top + vr.height / 2 });
+    const W = S.gen.mask.width, H = S.gen.mask.height;
+    if(!(cx >= 0 && cx <= W && cy >= 0 && cy <= H)){ cx = W / 2; cy = H / 2; }
+    PAREA.areas.push({ cx, cy, w: Math.min(W / 2, 60 / m), h: Math.min(H / 2, 40 / m), angle: 0 });
+    PAREA.sel = PAREA.areas.length - 1;
+    log(`Project area ${PAREA.areas.length} added: move it, size it from its corners, turn it from its round handle. `
+      + 'Inside it the map is flat as the streets, in the street material, with no sidewalks or markings (Generate texture builds it in).');
+    pareaMode(true); pareaChanged();
+  });
+  $('#btnPareaEdit').addEventListener('click', () => pareaMode(!PAREA.on));
+  $('#btnPareaDel').addEventListener('click', () => {
+    if(!PAREA.on || PAREA.sel < 0) return;
+    PAREA.areas.splice(PAREA.sel, 1);
+    log(`Project area ${PAREA.sel + 1} taken away.`);
+    PAREA.sel = PAREA.areas.length - 1;
+    if(!PAREA.areas.length) PAREA.on = false;
+    pareaChanged();
+  });
+  addEventListener('keydown', e => { if(e.key === 'Escape' && PAREA.on && !MAT.open) pareaMode(false); });
+  let pareaFrame = 0;
+  $('#genVp').addEventListener('vpzoom', () => {
+    if(!PAREA.on || pareaFrame) return;
+    pareaFrame = requestAnimationFrame(() => { pareaFrame = 0; drawBridges(); });
+  });
   $('#btnAddSlot').addEventListener('click', () => {
     const first = MAT.lib && MAT.lib.materials.find(m => m.kind === 'ground');
     ISLS.slots.push({ material: first ? first.id : 'same', picks: [] });

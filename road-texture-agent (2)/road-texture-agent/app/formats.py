@@ -687,3 +687,158 @@ def convert(glb_path, out_path, fmt, stem, combine_ground=False, combine_objects
         write_glb(model, out_path)
     return {"objects": [o["name"] for o in model["objects"]][:50], "count": len(model["objects"]),
             "copies": sum(len(o["places"]) for o in model["objects"] if o["places"])}
+
+
+# ------------------------------------------------------------------ patches into one model
+GLB_MAX = 4_000_000_000             # a GLB's length is 32 bits: no file past this
+
+
+def merge_glbs(paths, out_path, progress=None):
+    """
+    A big map's 1 km patches (each a GLB in the whole map's coordinates) as one GLB,
+    by kind, not by patch: every part each patch has as an object of its own (Road,
+    Sidewalk, Kerb, Blocks, Markings, Decals, Median islands, ...) becomes one object
+    holding that part's pieces from every patch; a placed object's copies stay objects
+    of their own (renumbered, each where it stood), their mesh kept once. What the
+    patches share is kept once: the same pictures, materials and meshes. Streamed, so
+    the patches are never all in memory. progress(done, total). Returns {"parts",
+    "copies", "patches", "bytes"}; ValueError when the model is past what a GLB holds.
+    """
+    import hashlib
+    import os
+    import tempfile
+    paths = [str(p) for p in paths]
+    out = {k: [] for k in ("bufferViews", "accessors", "images", "samplers", "textures", "materials", "meshes")}
+    seen = {k: {} for k in out}
+    parts, part_order, copies = {}, [], []
+    copy_seen, copy_count = set(), {}
+    tmp = tempfile.NamedTemporaryFile(dir=os.path.dirname(str(out_path)) or ".", suffix=".bin", delete=False)
+    size = 0
+
+    def keep(kind, obj):
+        key = json.dumps(obj, sort_keys=True)
+        if key not in seen[kind]:
+            seen[kind][key] = len(out[kind])
+            out[kind].append(obj)
+        return seen[kind][key]
+
+    def textures_in(m, tmap, parent=""):
+        """A material with its textures' indices moved to the merged model's (every "...Texture": {"index"})."""
+        if isinstance(m, dict):
+            return {k: (tmap[v] if k == "index" and isinstance(v, int) and parent.lower().endswith("texture")
+                        else textures_in(v, tmap, k)) for k, v in m.items()}
+        if isinstance(m, list):
+            return [textures_in(v, tmap, parent) for v in m]
+        return m
+
+    try:
+        for n, path in enumerate(paths):
+            with open(path, "rb") as f:
+                data = f.read()
+            jlen = struct.unpack("<I", data[12:16])[0]
+            g = json.loads(data[20:20 + jlen])
+            blob = memoryview(data)[20 + jlen + 8:]
+            # its data, each piece once over all the patches
+            vmap = []
+            for v in g.get("bufferViews", []):
+                off, ln = v.get("byteOffset", 0), v["byteLength"]
+                piece = blob[off:off + ln]
+                h = hashlib.sha1(piece).hexdigest()
+                key = json.dumps([h, ln, v.get("byteStride"), v.get("target")])
+                if key not in seen["bufferViews"]:
+                    pad = (-size) % 4
+                    if pad:
+                        tmp.write(b"\0" * pad)
+                        size += pad
+                    nv = {"buffer": 0, "byteOffset": size, "byteLength": ln}
+                    for k in ("byteStride", "target"):
+                        if v.get(k) is not None:
+                            nv[k] = v[k]
+                    tmp.write(piece)
+                    size += ln
+                    seen["bufferViews"][key] = len(out["bufferViews"])
+                    out["bufferViews"].append(nv)
+                vmap.append(seen["bufferViews"][key])
+                if size > GLB_MAX:
+                    raise ValueError(f"the model is past {GLB_MAX / 1e9:.0f} GB, more than one GLB file can hold: "
+                                     "download it as its 1 km patches (Big maps: 1 km patch files, in the Download 3D model window)")
+            amap = [keep("accessors", dict(a, **({"bufferView": vmap[a["bufferView"]]} if "bufferView" in a else {})))
+                    for a in g.get("accessors", [])]
+            imap = [keep("images", dict(im, **({"bufferView": vmap[im["bufferView"]]} if "bufferView" in im else {})))
+                    for im in g.get("images", [])]
+            smap = [keep("samplers", s) for s in g.get("samplers", [])]
+            tmap = [keep("textures", dict(t, **({"source": imap[t["source"]]} if "source" in t else {}),
+                                          **({"sampler": smap[t["sampler"]]} if "sampler" in t else {})))
+                    for t in g.get("textures", [])]
+            mmap = [keep("materials", textures_in(m, tmap)) for m in g.get("materials", [])]
+
+            def prim(p):
+                q = dict(p, attributes={k: amap[v] for k, v in p["attributes"].items()})
+                if "indices" in p:
+                    q["indices"] = amap[p["indices"]]
+                if "material" in p:
+                    q["material"] = mmap[p["material"]]
+                if p.get("targets"):
+                    q["targets"] = [{k: amap[v] for k, v in t.items()} for t in p["targets"]]
+                return q
+            meshes = [dict(m, primitives=[prim(p) for p in m["primitives"]]) for m in g.get("meshes", [])]
+            for node in g.get("nodes", []):
+                if "mesh" not in node:
+                    continue
+                name = node.get("name") or meshes[node["mesh"]].get("name") or "Part"
+                placed = any(k in node for k in ("translation", "rotation", "scale", "matrix"))
+                if not placed:
+                    # a part of the map: its pieces gathered from every patch into one object
+                    if name not in parts:
+                        parts[name] = []
+                        part_order.append(name)
+                    parts[name].extend(meshes[node["mesh"]]["primitives"])
+                    continue
+                # a placed object's copy: its mesh once, the copy where it stood (one patch's copy only once)
+                mi = keep("meshes", meshes[node["mesh"]])
+                key = json.dumps([mi, node.get("translation"), node.get("rotation"), node.get("scale"), node.get("matrix")])
+                if key in copy_seen:
+                    continue
+                copy_seen.add(key)
+                base = name.rsplit("_", 1)[0] if name.rsplit("_", 1)[-1].isdigit() else name
+                copy_count[base] = copy_count.get(base, 0) + 1
+                copies.append(dict({k: v for k, v in node.items() if k not in ("mesh", "name", "children")},
+                                   mesh=mi, name=f"{base}_{copy_count[base]}"))
+            del data, blob
+            if progress:
+                progress(n + 1, len(paths))
+        nodes = []
+        for name in part_order:
+            out["meshes"].append({"name": name, "primitives": parts[name]})
+            nodes.append({"mesh": len(out["meshes"]) - 1, "name": name})
+        nodes += copies
+        gltf = {"asset": {"version": "2.0", "generator": "road-texture-agent (patches merged)"},
+                "scene": 0, "scenes": [{"nodes": list(range(len(nodes)))}], "nodes": nodes,
+                **{k: v for k, v in out.items() if v}, "buffers": [{"byteLength": size}]}
+        js = json.dumps(gltf, separators=(",", ":")).encode()
+        js += b" " * ((-len(js)) % 4)
+        pad = (-size) % 4
+        total = 12 + 8 + len(js) + 8 + size + pad
+        if total > GLB_MAX:
+            raise ValueError(f"the model is {total / 1e9:.1f} GB, more than one GLB file can hold: download it as its 1 km patches "
+                             "(Big maps: 1 km patch files, in the Download 3D model window)")
+        tmp.write(b"\0" * pad)
+        tmp.close()
+        with open(out_path, "wb") as f:
+            f.write(struct.pack("<III", 0x46546C67, 2, total))
+            f.write(struct.pack("<II", len(js), 0x4E4F534A))
+            f.write(js)
+            f.write(struct.pack("<II", size + pad, 0x004E4942))
+            with open(tmp.name, "rb") as b:
+                while True:
+                    chunk = b.read(1 << 24)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    finally:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        os.unlink(tmp.name)
+    return {"parts": part_order, "copies": len(copies), "patches": len(paths), "bytes": total}

@@ -1000,6 +1000,13 @@ def _inside_at(pts, side, arc, t, off, area):
     return bool(LN.in_area(area, x, y)[0])
 
 
+def _clear_of_holes(pts, side, arc, ts, off, area):
+    """Whether the line's points at these arcs lie outside the area's holes (the project areas)."""
+    if not area.get("holes"):
+        return True
+    return bool(np.all(LN.clear_of_holes(area, *_at_arc(pts, side, arc, np.asarray(ts, float), off))))
+
+
 def _inside_runs(pts, side, arc, a, b, off, area, mpp):
     """The stretches of a line from arc a to b that lie inside the area, each end found to a centimetre or so."""
     k = max(2, int(math.ceil((b - a) * mpp / 0.25)) + 1)
@@ -1161,8 +1168,8 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
                             mesh.dash_yellow.append(bool(stl.get("yellow")))
                             kept += 1
                         continue
-                    if not _inside_at(pts, side, arc, (a + b) / 2, off, area):
-                        layout["clipped"] = True                                 # a dash whole, by its middle
+                    if not _inside_at(pts, side, arc, (a + b) / 2, off, area) or not _clear_of_holes(pts, side, arc, (a, b), off, area):
+                        layout["clipped"] = True                                 # a dash whole, by its middle (clear of the holes)
                         continue
                 mesh.dashes.append(_line_strip(pts, side, arc, a, b, off, halfw, scale))
                 mesh.dash_solid.append(solid or beyond)
@@ -1172,9 +1179,15 @@ def _dash_strips(mesh, pts, side, arc, hw, mpp, scale, cfg, island=True, sides=N
     if island and lay["island"]:
         a, b = sorted((to_arc(sb0) / mpp, to_arc(L - sb1) / mpp))
         xi = isl_at if isl_at is not None else list(lay["island"])
-        edges = [_line_strip(pts, side, arc, a, b, sgn * x / mpp, 0.0, scale) for x in xi]
-        mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
-                                  "height_m": LN.ISLAND_H_M})
+        runs = [(a, b)]
+        if area and area.get("holes"):
+            # laid everywhere, but in the project areas (flat road)
+            mid = sgn * (np.asarray(xi[0], float) + np.asarray(xi[1], float)) / 2 / mpp
+            runs = _inside_runs(pts, side, arc, a, b, mid, {"holes": area["holes"]}, mpp)
+        for ra, rb in runs:
+            edges = [_line_strip(pts, side, arc, ra, rb, sgn * x / mpp, 0.0, scale) for x in xi]
+            mesh.lane_islands.append({"edges": [[(r[0], r[1]) for r in e] for e in edges],
+                                      "height_m": LN.ISLAND_H_M})
     return layout
 
 

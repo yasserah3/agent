@@ -932,6 +932,44 @@ markings go everywhere as before.
   laid as strips (a road texture is shared along its street). Only the lanes
   part of the model is built again: 0.2 s with strips, 3 s painted.
 
+### Project areas: flat road where your project goes
+
+Under the Markings area, **Add project area** puts a rectangle on the map, in
+the middle of what you see (60 × 40 m): the place your project goes. Inside it
+the map is **flat as the streets, in the street material**: no sidewalks, no
+kerbs, no blocks, no raised islands, and no lane lines or decals. Add as many
+as you need (up to 64).
+
+- **Move** one by dragging it, **size** it from a corner, **turn** it from the
+  round handle, as the markings area. **Edit** turns the handles on (click an
+  area to choose it), **Done** or Esc turns them off, **Remove** takes the
+  chosen one away. Each change is kept on the server with the mask at once, and
+  comes back with the mask.
+- **Generate texture builds them in**: the note says when they changed since
+  the texture. The texture's road takes in each rectangle (its pixels whose
+  middle lies inside), so the street material, its wear and the blocks' and
+  islands' outlines follow it; the blocks it crosses are cut back along its
+  edges and keep their sidewalks there.
+- **The streets go on under it.** The lane lines, the junction markings and
+  the decals are laid from the streets as the mask has them without the
+  project areas, then stopped at each area's edge: a street that runs into or
+  through one keeps its lines up to the edge (a dash that would cross it is
+  left out whole, a solid line stops at it, a highway's island stops at it). A
+  decal whose middle lies inside is not laid. (Traced as part of the road, a
+  rectangle across a street reads as one big junction, and the lines stopped
+  about 20 m before it.)
+- **In 3D** each area is laid as an exact rectangle of road (as the inner
+  streets are): its straight edges and sharp corners stay where they are, the
+  kerb line and the sidewalks go round it, and the blocks stop at it. Measured
+  on the test map with an area across a 25 m highway and one across an 18 m
+  street: inside them only road (flat, at the road's height); no sidewalk,
+  kerb, block, island, marking or decal triangles.
+- Later changes keep to them: the Lanes tool, the markings area (set,
+  changed or taken away), Update decals and the texture's quick updates lay
+  nothing inside them. With no project areas everything is laid as before,
+  byte for byte (decals, the Lanes tool's Done, the 3D model, and a fresh
+  Generate texture checked against the version before).
+
 ## Line width
 
 By default, lines are drawn as a **share of each street's width**, learned from
@@ -1163,11 +1201,24 @@ maps whose road's area alone says over a minute download as patches.
   islands painted in the paving's own colour (as the patches pave them, so a
   patch coming in does not show as a light square on a dark map). The view
   shows it at once and does not wait for anything to be built.
-- **Download 3D model** gives the patches as a zip of GLB files, each in the
-  whole map's coordinates: imported together they fit as they are. While some
-  are still being built it says how many are left and builds them; press it
-  again when they are done. (FBX, OBJ and the combine choices are for whole
-  models; patches are GLB.)
+- **Download 3D model** gives **one model**, by kind, like a small map's: the
+  patches are joined into one file whose parts are Road, Sidewalk, Kerb,
+  Blocks, Decals, Median islands and Markings (each part one mesh with every
+  patch's pieces in it), not one piece for each patch. While some patches are
+  still being built it says how many are left and builds them; press it again
+  when they are done. Joining reads the patches one at a time and writes the
+  file as it goes: what the patches share (materials, textures, the same
+  picture) is kept once, an object laid in two patches' margins once. The 4 ×
+  3 km test map's 12 patches: 2.3 s, 338 MB of patch files to one 310 MB GLB
+  with 7 parts and 59 materials; checked primitive by primitive (material,
+  textures by their pictures, vertices, bounds) against the patches. FBX, OBJ
+  and the combine choices (streets and kerbs together, objects together) work
+  as for a small map (the joined GLB is converted). A GLB holds 4 GB at most: a
+  model past that says so and asks for the patch files instead.
+- **Big maps: 1 km patch files** (in the Download 3D model window, off by
+  default) gives the patches themselves instead, as before: a zip of GLB
+  files, each in the whole map's coordinates (imported together they fit as
+  they are).
 - **Markings painted into the road texture** (3D model setting) in patches:
   each street's painted picture is chosen by its own line width (5 cm steps)
   and width (1 m steps; its lines then lie within about 25 cm of where they

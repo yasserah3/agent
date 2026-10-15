@@ -655,10 +655,20 @@ def summary(layouts):
 # width along its turn and its height across it), "angle" (degrees, from the
 # picture's x axis towards its y axis, as the map turns it)}, in mask pixels. None:
 # markings everywhere. A dash is kept whole when its middle lies inside, a solid
-# line stops at the edge, a decal is kept when its middle lies inside.
+# line stops at the edge, a decal is kept when its middle lies inside. It can
+# carry "holes": rectangles of the same kind (the project areas) where nothing is
+# laid either, with or without a rectangle of its own (without: everywhere else).
 
 def area_check(raw):
     """A markings area as the page sends it, checked; None when there is none."""
+    if not isinstance(raw, dict):
+        return None
+    holes = [h for h in map(_rect_check, raw["holes"]) if h] if isinstance(raw.get("holes"), list) else []
+    a = _rect_check(raw)
+    return dict(a or {}, holes=holes) if holes else a
+
+
+def _rect_check(raw):
     if not isinstance(raw, dict):
         return None
     try:
@@ -679,7 +689,11 @@ def area_scaled(area, scale):
     """
     if not area:
         return None
-    return dict(area, cx=area["cx"] * scale - 0.5, cy=area["cy"] * scale - 0.5, w=area["w"] * scale, h=area["h"] * scale)
+    out = (dict(area, cx=area["cx"] * scale - 0.5, cy=area["cy"] * scale - 0.5, w=area["w"] * scale, h=area["h"] * scale)
+           if "cx" in area else dict(area))
+    if area.get("holes"):
+        out["holes"] = [area_scaled(h, scale) for h in area["holes"]]
+    return out
 
 
 def area_outside(area, x, y):
@@ -690,18 +704,27 @@ def area_outside(area, x, y):
     """
     import numpy as np
     x, y = np.asarray(x, float), np.asarray(y, float)
-    if not area:
-        return np.full(np.broadcast(x, y).shape, -np.inf)
-    a = math.radians(area["angle"])
-    c, s = math.cos(a), math.sin(a)
-    dx, dy = x - area["cx"], y - area["cy"]
-    u, v = dx * c + dy * s, -dx * s + dy * c
-    return np.maximum(np.abs(u) - area["w"] / 2, np.abs(v) - area["h"] / 2)
+    if not area or "cx" not in area:
+        d = np.full(np.broadcast(x, y).shape, -np.inf)
+    else:
+        a = math.radians(area["angle"])
+        c, s = math.cos(a), math.sin(a)
+        dx, dy = x - area["cx"], y - area["cy"]
+        u, v = dx * c + dy * s, -dx * s + dy * c
+        d = np.maximum(np.abs(u) - area["w"] / 2, np.abs(v) - area["h"] / 2)
+    for h in (area or {}).get("holes") or ():
+        d = np.maximum(d, -area_outside(h, x, y))      # inside a hole: outside by how deep in it
+    return d
 
 
 def in_area(area, x, y):
     """Whether each point (x, y) lies inside the area (always, with none)."""
     return area_outside(area, x, y) <= 0
+
+
+def clear_of_holes(area, x, y):
+    """Whether each point (x, y) lies outside the area's holes (always, with none): a dash clears them end to end."""
+    return in_area({"holes": area["holes"]} if area and area.get("holes") else None, x, y)
 
 
 def area_status(area, x, y, reach):

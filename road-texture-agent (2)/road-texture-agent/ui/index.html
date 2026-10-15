@@ -810,6 +810,11 @@
           <div class="note" id="mareaNote" style="margin:2px 0 6px">Markings everywhere. Markings area puts a rectangle on the map: lane lines and decals only inside it (move it, size it from its corners, turn it from its handle).</div>
           <div class="lanes-bar"><button type="button" id="btnMarea" aria-pressed="false" disabled title="A rectangle on the map: lane lines and decals only inside it">Markings area</button>
             <button type="button" id="btnMareaAll" disabled title="Take the area away: markings everywhere again">Everywhere</button></div>
+          <div style="margin-top:12px;font-weight:600;font-size:13px">Project areas</div>
+          <div class="note" id="pareaNote" style="margin:2px 0 6px">None. Add project area puts a rectangle on the map where your project goes: flat as the streets, in the street material, no sidewalks, kerbs or blocks, and no lane lines or decals inside (move it, size it from its corners, turn it from its handle).</div>
+          <div class="lanes-bar"><button type="button" id="btnParea" disabled title="A new rectangle in the middle of the view">Add project area</button>
+            <button type="button" id="btnPareaEdit" aria-pressed="false" disabled title="Move, size and turn the project areas; click one to choose it">Edit</button>
+            <button type="button" id="btnPareaDel" disabled title="Take the chosen project area away">Remove</button></div>
           <div class="field"><label for="quality">Quality (1 to 3)</label><input type="number" id="quality" value="1" step="1" min="1" max="3"></div>
           <div class="field"><label for="outScale">Output size</label>
             <select id="outScale" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
@@ -1307,6 +1312,8 @@
     <div class="note">On: the streets, sidewalks and kerbs are one object (each keeps its materials). The blocks and islands and the markings stay objects of their own. Off: each is separate.</div>
     <div class="field"><label for="exObjects">Combine objects</label><input type="checkbox" id="exObjects" style="justify-self:start;accent-color:var(--blue)"></div>
     <div class="note">On: every placed object is one object. Off: each copy is its own object (in GLB and FBX the copies share one mesh; OBJ writes each out).</div>
+    <div class="field"><label for="exPatches">Big maps: 1 km patch files</label><input type="checkbox" id="exPatches" style="justify-self:start;accent-color:var(--blue)"></div>
+    <div class="note">A map too big to build at once is built in 1 km patches. Off (the default): they are joined into one model, by kind (Road, Sidewalk, Kerb, Blocks, Markings…), in the format above. On: a zip of the patch GLBs as they are.</div>
     <div class="field"><label for="exFront">Objects' front</label>
       <select id="exFront" style="background:var(--field);border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%">
         <option value="+y">+Y (Blender's green arrow, as here)</option>
