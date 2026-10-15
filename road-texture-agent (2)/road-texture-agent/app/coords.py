@@ -530,7 +530,7 @@ def _previews(folder, sat, street, road, osm_lines, gaps):
     al = Image.fromarray((road * 255).astype(np.uint8), "L")
     al.resize(ps, Image.Resampling.BOX).save(folder / "alpha_preview.png")
     # the check: the satellite, the alpha's edge in amber, the OSM roads in cyan, missing tiles in red
-    edge = road ^ ndi.binary_erosion(road, iterations=max(1, int(round(1 / k))))
+    edge = road ^ ndi.binary_erosion(road, iterations=max(2, int(round(2.5 / k))))     # about 2.5 px in the preview
     view = np.asarray(sat).copy()
     view[edge] = (255, 176, 32)
     if osm_lines is not None:
