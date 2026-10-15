@@ -19,7 +19,9 @@ its edge; what it finds belongs to the tile its centre is in):
   | stop line | a bar across the road, at least 1.5 m long, 4 times as long as wide |
   | cyclist crossing | two such lines across, 1.5 to 2.5 m apart |
   | give way line | 3 or more short blocks (0.15 to 0.9 m²) in a row across the road |
-  | arrow | 2 to 7 m long along the road, 0.35 to 2.2 m wide, filling under 72% of its box |
+  | arrow | 2 to 7 m long along the road, 0.35 to 2.2 m wide, filling under 72% of its box; the way it points
+    from its head (more paint there), its kind (straight, left, right, two or three of them) from the arrow
+    picture that covers it best |
   | parking bay lines | thin lines 2.5 to 7 m long, across or slanted, within 7 m of the road's edge, 2 or more side by side 2 to 3.6 m apart |
   | car | 1.3 m or more wide, 2.8 to 7.5 m long, filling most of its box (bright or dark): set aside |
   | unknown paint | anything else |
@@ -65,7 +67,8 @@ from scipy import ndimage as ndi
 
 Image.MAX_IMAGE_PIXELS = None
 
-VERSION = 1
+VERSION = 3                  # 2: an arrow's way (toward) and its box's middle; a zebra's span from its outer stripes
+                             # 3: an arrow's kind (straight, left, right, ...) from its shape
 TILE = 512
 CONTEXT_M = 20.0           # each tile sees this much of its neighbours (a lane line's dashes repeat every 9 to 12 m)
 OPEN_M = 2.6                 # the opening's square: marks narrower than this stand out
@@ -258,9 +261,14 @@ def analyse_tile(task):
             if cls == "car":
                 cars |= lab == i + 1
             dashed = _dashed(m, i, bright, X0, Y0, ang[i]) if cls == "bar_across" else 0.0
+            toward, mid = _pointing(m, i, ang[i]) if cls in ("bar_along", "arrow") else (None, 0.0)
             parts.append({"i": i, "cls": cls, "x": x, "y": y, "L": L, "W": W, "A": A, "F": F, "el": el,
                           "ang": float(ang[i]), "phi": math.degrees(phi), "th": th, "coh": ch, "edge_m": em,
-                          "contrast": float(contrast[i]), "yellow": float(yel[i]) > 0.5, "dashed": dashed})
+                          "contrast": float(contrast[i]), "yellow": float(yel[i]) > 0.5, "dashed": dashed,
+                          "toward": toward, "mid": mid})
+            if toward is not None:
+                sel = m["k"] == i
+                parts[-1]["_px"] = (m["xs"][sel], m["ys"][sel])      # its pixels: an arrow's kind from its shape
     # dark bodies and coloured bodies the size of a car
     for mask in (darks, coloured):
         lab2, n2, m2 = _components(mask)
@@ -274,11 +282,12 @@ def analyse_tile(task):
                 x, y = m2["mx"][i] + X0, m2["my"][i] + Y0
                 parts.append({"i": -1, "cls": "car", "x": x, "y": y, "L": L, "W": W, "A": float(area[i]), "F": F,
                               "el": L / max(W, 1e-3), "ang": float(ang[i]), "phi": 0.0, "th": 0.0, "coh": 0.0,
-                              "edge_m": 99.0, "contrast": 0.0, "yellow": False, "dashed": 0.0})
+                              "edge_m": 99.0, "contrast": 0.0, "yellow": False, "dashed": 0.0, "toward": None, "mid": 0.0})
     finds = _group(parts, mpp)
     res["findings"] = [fd for fd in finds if owned(fd["x"], fd["y"])]
     if task.get("debug"):
-        res["parts"] = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in p.items()} for p in parts if owned(p["x"], p["y"])]
+        res["parts"] = [{k: (round(v, 3) if isinstance(v, float) else v) for k, v in p.items() if not k.startswith("_")}
+                        for p in parts if owned(p["x"], p["y"])]
 
     # ---- how well the road is seen
     rc = road_core
@@ -344,6 +353,90 @@ def _dashed(m, i, bright, X0, Y0, ang):
     return float(np.std(prof) / max(np.mean(prof), 1e-6))
 
 
+def _pointing(m, i, ang):
+    """
+    Which way a mark along the road points, and how far its box's middle lies from its
+    centre of mass (pixels, along it): an arrow's head carries more paint than its stem,
+    so its centre of mass lies toward the head. ((x, y) unit, offset).
+    """
+    sel = m["k"] == i
+    xs, ys = m["xs"][sel], m["ys"][sel]
+    if len(xs) < 8:
+        return None, 0.0
+    c, s_ = math.cos(ang), math.sin(ang)
+    t = (xs - m["mx"][i]) * c + (ys - m["my"][i]) * s_
+    mid = float((t.min() + t.max()) / 2)
+    sign = -1.0 if mid > 0 else 1.0                  # the middle lies on the tail's side of the centre of mass
+    return [round(c * sign, 4), round(s_ * sign, 4)], mid
+
+
+ARROW_KINDS = ("S", "L", "R", "SL", "SR", "LR", "SLR")
+S_FIRST = 0.05              # a straight arrow unless another kind's picture covers the mark this much better
+_TEMPLATES = {}
+
+
+def _templates():
+    """The arrow pictures the road markings lay (app/roadmarks.py): each kind's polygons and box (metres)."""
+    if not _TEMPLATES:
+        from app import roadmarks as RM
+        for k in ARROW_KINDS:
+            g = RM._arrow_shape(k)
+            polys = [list(q.exterior.coords) for q in getattr(g, "geoms", [g]) if q.geom_type == "Polygon"]
+            _TEMPLATES[k] = (polys, g.bounds)
+    return _TEMPLATES
+
+
+def _arrow_kind(xs, ys, toward):
+    """
+    Which arrow a mark is (straight on, left, right, or two or three of them): each
+    arrow picture the road markings lay (app/roadmarks.py) laid over the mark's box,
+    its head the way the mark points (turned up to 20 degrees either way, a lone turn
+    arrow leans), as thick as the mark's stem, and the one sharing most of its pixels
+    with the mark (their overlap over their union); straight on unless another is
+    better by S_FIRST. (kind, that share, the next best's).
+    """
+    if toward is None or len(xs) < 12:
+        return None, 0.0, 0.0
+    SS = 4
+    xs, ys = np.asarray(xs, np.float64), np.asarray(ys, np.float64)
+    cx, cy = xs.mean(), ys.mean()
+    ox, oy = int(xs.min()) - 3, int(ys.min()) - 3
+    w, h = int(xs.max()) - ox + 4, int(ys.max()) - oy + 4
+    obs = np.zeros((h, w), bool)
+    obs[(ys - oy).astype(int), (xs - ox).astype(int)] = True
+    best = {}
+    for dth in (-20, -10, 0, 10, 20):
+        a = math.atan2(toward[1], toward[0]) + math.radians(dth)
+        tx, ty = math.cos(a), math.sin(a)
+        rx, ry = -ty, tx                                     # the driver's right, in the picture
+        A = (xs - cx) * tx + (ys - cy) * ty
+        R = (xs - cx) * rx + (ys - cy) * ry
+        a0, a1, r0, r1 = A.min() - 0.5, A.max() + 0.5, R.min() - 0.5, R.max() + 0.5
+        tail = int((A < a0 + 0.3 * (a1 - a0)).sum())
+        stem_px = tail / max(1.0, 0.3 * (a1 - a0))            # the mark's stem, pixels wide
+        for k, (polys, (bx0, by0, bx1, by1)) in _templates().items():
+            sx, sy = (r1 - r0) / max(1e-6, bx1 - bx0), (a1 - a0) / max(1e-6, by1 - by0)
+            im = Image.new("L", (w * SS, h * SS), 0)
+            d = ImageDraw.Draw(im)
+            for poly in polys:
+                pts = []
+                for x, y in poly:
+                    s_, t_ = r0 + (x - bx0) * sx, a0 + (y - by0) * sy
+                    X, Y = cx + t_ * tx + s_ * rx, cy + t_ * ty + s_ * ry
+                    pts.append(((X - ox + 0.5) * SS, (Y - oy + 0.5) * SS))
+                d.polygon(pts, fill=255)
+            tpl = np.asarray(im.reduce(SS)) >= 90
+            grow = int(round(max(0.0, stem_px - 0.15 * sx) / 2))
+            if grow:
+                tpl = ndi.binary_dilation(tpl, iterations=grow)
+            iou = float((tpl & obs).sum()) / max(1.0, float((tpl | obs).sum()))
+            best[k] = max(best.get(k, 0.0), iou)
+    order = sorted(best.items(), key=lambda kv: -kv[1])
+    if order[0][0] != "S" and best["S"] >= order[0][1] - S_FIRST:
+        return "S", round(best["S"], 3), round(order[0][1], 3)    # the commonest, unless another is clearly better
+    return order[0][0], round(order[0][1], 3), round(order[1][1], 3)
+
+
 def _classify(L, W, A, F, el, phi, edge_m):
     """
     A mark's first name from its size (metres), fill, length to width, angle to the road
@@ -387,8 +480,16 @@ def _group(parts, mpp):
         return min(1.0, max(0.3, p["contrast"] / 50)) * (0.6 + 0.4 * p["coh"])
 
     def emit(p, cls, s=None, **extra):
-        out.append(dict(base(p), cls=cls, x=float(p["x"]), y=float(p["y"]), n=1,
-                        score=round(float(score(p) if s is None else s), 3), **extra))
+        x, y = float(p["x"]), float(p["y"])
+        if cls == "arrow" and p.get("toward"):
+            # an arrow at its box's middle (its centre of mass lies toward the head), pointing as its head does
+            x, y = x + p["mid"] * math.cos(p["ang"]), y + p["mid"] * math.sin(p["ang"])
+            extra = dict(extra, toward=p["toward"])
+            if p.get("_px") is not None:
+                kind, match, _ = _arrow_kind(p["_px"][0], p["_px"][1], p["toward"])
+                if kind:
+                    extra.update(kind=kind, kind_match=match)
+        out.append(dict(base(p), cls=cls, x=x, y=y, n=1, score=round(float(score(p) if s is None else s), 3), **extra))
 
     def emit_group(g, cls, **extra):
         out.append(dict(base(g[0]), cls=cls, x=float(np.mean([p["x"] for p in g])), y=float(np.mean([p["y"] for p in g])),
@@ -432,7 +533,11 @@ def _group(parts, mpp):
     rest = []
     for g in clusters(bars, lambda a, b: parallel(a, b, 15) and (lambda o: 0.55 <= o[0] <= 1.8 and o[1] <= 1.0)(offsets(a, b))):
         if len(g) >= 3:
-            emit_group(g, "zebra", across_m=round(max(offsets(g[0], p)[0] for p in g) + g[0]["W"], 2))
+            # its span across the road: from the outer stripe to the outer stripe
+            c, s_ = math.cos(g[0]["ang"]), math.sin(g[0]["ang"])
+            t = [(-(p["x"] - g[0]["x"]) * s_ + (p["y"] - g[0]["y"]) * c) * mpp for p in g]
+            span = max(t) - min(t) + float(np.median([p["W"] for p in g]))
+            emit_group(g, "zebra", across_m=round(span, 2), stripe_m=round(float(np.median([p["L"] for p in g])), 2))
         else:
             rest += g
     chains = clusters(rest, lambda a, b: parallel(a, b, 12) and abs(a["W"] - b["W"]) <= 0.1
@@ -468,7 +573,7 @@ def _group(parts, mpp):
             if 1.5 <= ac <= 2.6 and al <= max(a["L"], b["L"]) / 2 and abs(a["W"] - b["W"]) <= 0.15 \
                     and abs(a["contrast"] - b["contrast"]) <= 15:
                 used.update((i, j))
-                emit_group([a, b], "cycle_crossing", track_m=round(ac, 2))
+                emit_group([dict(a, L=max(a["L"], b["L"])), b], "cycle_crossing", track_m=round(ac, 2))
     for i, p in enumerate(lines_):
         if i in used:
             continue

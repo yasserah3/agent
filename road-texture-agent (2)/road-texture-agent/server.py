@@ -32,7 +32,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import numpy as np
 
@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords2"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords3"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -2519,6 +2519,10 @@ def texture_update(payload: dict):
         if fields & {"texture.scale", "texture.output_scale", "texture.mask"}:
             replacement = generate(dict(texture, snapshot=now))
             new_gid = replacement["id"]
+            from app import observed as OBS
+            if OBS.settings_path(ARTIFACTS, gid).exists():
+                import shutil
+                shutil.copyfile(OBS.settings_path(ARTIFACTS, gid), OBS.settings_path(ARTIFACTS, new_gid))
             layers = _layers_checked(now.get("layers") or [])
             decals = (_lay_decals(new_gid, layers, model.get("decals", "separate"), int(texture.get("seed",7)),
                                   LN.area_check(texture.get("mark_area")), whole=True,
@@ -2766,6 +2770,10 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
     for p in placements:
         p["layer"] = pic[p["layer"]]
     presets = _preset_layers(layers)
+    observed = _observed_for(gid, art)
+    if observed and observed[0]["satellite_only"]:
+        # the presets Place decals added for what the satellite saw: the rules lay none of them
+        presets = [(i, L) for i, L in presets if L["preset"] not in observed[0]["satellite_only"]]
     dashes = art["meta"].get("dashes") or {}
     lanes_art = mem.artifact(f"{gid}_lanes")
     colours = (overrides or {}).get("colours") or (dashes.get("marks") or {}).get("colours", "white")
@@ -2775,6 +2783,17 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
         pl2, ends, jplan = _junction_marks(rec["path"], mpp, (lanes_art["meta"] or {}).get("picks") if lanes_art else [],
                                            art["meta"].get("nomark"), dashes.get("marks"), presets, bridges, overrides)
         placements += pl2
+    obs_report = None
+    if observed and observed[1] is not None:
+        # made from coordinates, and Place decals asked for what the satellite saw (app/observed.py)
+        from app import observed as OBS
+        cfg = dict(dashes.get("marks") or RM.legacy_config(9.0, 0.6, 0.15, None, 2.0))
+        for k in ("drive", "colours"):
+            if (overrides or {}).get(k):
+                cfg[k] = overrides[k]
+        st, an = observed
+        placements, ends, obs_report = OBS.merge(placements, ends, layers, an, mpp, gray.shape, cfg, colours,
+                                                 st["threshold"], st["fill"], st["satellite_only"])
     lanes_moved = _relay_line_ends(gid, ends)
     if area:
         # the markings area: a decal is laid when its middle lies inside
@@ -2829,17 +2848,47 @@ def _lay_decals(gid, raw_layers, mode, seed, area, whole=False, overrides=None):
         os.replace(tmp, result["path"])
     DC.save(placements, ARTIFACTS / f"gen_{gid}_decals.json")
     mem.add_artifact(f"{gid}_decalimg", "generated_decals", layer_png, {"generation": gid})
-    mem.add_artifact(f"{gid}_decals", "decal_places", ARTIFACTS / f"gen_{gid}_decals.json",
-                     {"generation": gid, "count": len(placements), "mode": mode, "seed": seed, "area": area,
-                      "layers": layers, "colours": colours})
+    dmeta = {"generation": gid, "count": len(placements), "mode": mode, "seed": seed, "area": area,
+             "layers": layers, "colours": colours}
+    if obs_report is not None:
+        dmeta["observed"] = observed[0]
+    mem.add_artifact(f"{gid}_decals", "decal_places", ARTIFACTS / f"gen_{gid}_decals.json", dmeta)
     names = {d["id"]: d["name"] for d in idx}
     names.update(RM.names())
     v = uuid.uuid4().hex[:6]
-    return {"ok": True, "count": len(placements), "mode": mode, "layers": DC.summary(placements, layers, names),
-            "partial": partial, "seconds": round(time.time() - t0, 2), "junction_marks": jplan,
-            "lanes_moved": lanes_moved,
-            "urls": {"decals": f"/api/artifact/{gid}_decalimg?v={v}", "result": f"/api/artifact/{gid}_result?v={v}",
-                     "full": f"/api/artifact/{gid}_full?v={v}"}}
+    out = {"ok": True, "count": len(placements), "mode": mode, "layers": DC.summary(placements, layers, names),
+           "partial": partial, "seconds": round(time.time() - t0, 2), "junction_marks": jplan,
+           "lanes_moved": lanes_moved,
+           "urls": {"decals": f"/api/artifact/{gid}_decalimg?v={v}", "result": f"/api/artifact/{gid}_result?v={v}",
+                    "full": f"/api/artifact/{gid}_full?v={v}"}}
+    if obs_report is not None:
+        out["observed"] = obs_report
+    return out
+
+
+def _mask_coords(art):
+    """The area a generation's mask was made from by its coordinates (its alpha's record), or None."""
+    for mid in (art["meta"].get("base_mask"), art["meta"].get("mask")):
+        rec = mem.image(mid) if mid else None
+        c = ((rec or {}).get("meta") or {}).get("coords")
+        if c and c.get("key"):
+            return c
+    return None
+
+
+def _observed_for(gid, art):
+    """
+    A generation made from coordinates, once Place decals (the satellite card) was
+    pressed: (its settings, what the satellite saw, or None when "Rules only" was
+    pressed or the analysis is gone), else None: the rules alone, as always.
+    """
+    from app import observed as OBS
+    st = OBS.load_settings(ARTIFACTS, gid)
+    if not st:
+        return None
+    key = st.get("key") or (_mask_coords(art) or {}).get("key")
+    an = OBS.load_analysis(COORDS / key) if st["on"] and key and re.fullmatch(r"[0-9a-f]{12}", key) else None
+    return st, an
 
 
 def _decals_for(gid, payload):
@@ -3781,6 +3830,109 @@ def coords_analyse(key: str):
     if not (folder / "alpha.png").exists():
         raise HTTPException(409, "make the area's alpha first")
     return {"job": SA.start(folder, area)}
+
+
+@app.post("/api/coords/place-decals")
+def coords_place_decals(payload: dict):
+    """
+    Place decals from the satellite analysis (app/observed.py): in the tiles it rated
+    at or above payload "threshold" (%), the crossings, stop lines, give way lines,
+    cyclist crossings and arrows it saw, where it saw them; below, the rules (that tile
+    only). "fill": the rules also lay what the satellite did not see in its tiles. "on"
+    false: the rules alone again. Kept with the generation, so laying its decals again
+    (Update decals, Update 2D texture) keeps to it. A road marking preset the layers
+    lack is added for what the satellite saw (and laid only from it).
+    """
+    from app import observed as OBS
+    gid = payload.get("generation")
+    art = mem.artifact(f"{gid}_map")
+    if not art or not mem.artifact(f"{gid}_result"):
+        raise HTTPException(400, "unknown generation: run Generate texture first")
+    coords = _mask_coords(art)
+    if not coords:
+        raise HTTPException(409, "this texture was not made from coordinates: Place decals reads the satellite of its area")
+    key = coords["key"]
+    if OBS.load_analysis(COORDS / key) is None:
+        raise HTTPException(409, "the satellite analysis of this area has not finished")
+    old = OBS.load_settings(ARTIFACTS, gid) or {}
+    layers = _layers_checked(payload["layers"] if isinstance(payload.get("layers"), list) else _decal_layers())
+    have = {L["preset"] for L in layers if L.get("preset")}
+    # presets added for the satellite before, still there: still the satellite's alone
+    only = [p for p in old.get("satellite_only") or [] if p in have]
+    added = []
+    if payload.get("on", True):
+        for p in OBS.SEEN:
+            if p not in have:
+                layers.append(RM.new_layer(p))
+                added.append(p)
+        if added:
+            DECALS.mkdir(parents=True, exist_ok=True)
+            _write_json(DECALS / "layers.json", layers)
+    st = OBS.check_settings(dict(payload, key=key, satellite_only=only + added))
+    _write_json(OBS.settings_path(ARTIFACTS, gid), st)
+    area = LN.area_check(payload["mark_area"] if "mark_area" in payload
+                         else _load_area(mem.image(art["meta"].get("base_mask") or art["meta"]["mask"])))
+    res = _lay_decals(gid, layers, "painted" if payload.get("mode") == "painted" else "separate",
+                      int(payload.get("seed", 7)), area, True, _marks_overrides(payload.get("marks")))
+    mem.record("place_decals_satellite",
+               f"decals from the satellite: {(res.get('observed') or {}).get('laid', 0)} seen, threshold {st['threshold']}%"
+               if st["on"] else "decals by the rules alone", {"generation": gid, "settings": st, "added": added})
+    return dict(res, settings=st, added=added, decal_layers=layers)
+
+
+@app.get("/api/coords/placed/{gid}")
+def coords_placed_picture(gid: str):
+    """
+    The decals laid on a generation made from coordinates, over its satellite: those
+    the satellite saw in green, those the rules laid in amber, the tiles under the
+    threshold shaded (app/observed.py).
+    """
+    from app import observed as OBS
+    art, dec = mem.artifact(f"{gid}_map"), mem.artifact(f"{gid}_decals")
+    coords = _mask_coords(art) if art else None
+    if not coords or not dec or not Path(dec["path"]).exists():
+        raise HTTPException(404, "no decals laid on a texture made from coordinates")
+    folder = COORDS / coords["key"]
+    out = ARTIFACTS / f"gen_{gid}_placed.jpg"
+    if out.exists() and out.stat().st_mtime >= Path(dec["path"]).stat().st_mtime:
+        return FileResponse(out)
+    sat = Image.open(folder / "satellite.png").convert("RGB")
+    k = min(1.0, 1600 / max(sat.size))
+    im = sat.resize((max(1, round(sat.width * k)), max(1, round(sat.height * k))), Image.LANCZOS)
+    st = (dec["meta"] or {}).get("observed") or {}
+    an = OBS.load_analysis(folder)
+    over = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(over)
+    if an and st:
+        for t in an["tiles"].values():
+            c = t.get("confidence_marks", t.get("confidence"))
+            if c is not None and c < st.get("threshold", OBS.THRESHOLD):
+                x0, y0, x1, y1 = (v * k for v in t["core"])
+                d.rectangle([x0, y0, x1, y1], fill=(220, 60, 40, 60), outline=(220, 60, 40, 160))
+    im = Image.alpha_composite(im.convert("RGBA"), over).convert("RGB")
+    d = ImageDraw.Draw(im)
+    mpp = float(art["meta"]["scale"])
+    W = mem.image(art["meta"]["mask"])["width"]
+    km = k * sat.width / max(1, W)                       # picture pixels per mask pixel
+    for q in json.loads(Path(dec["path"]).read_text()).get("placements") or []:
+        if not q.get("rm"):
+            continue
+        c = DC._corners(q, mpp) * km
+        col = (60, 230, 90) if q.get("source") == "satellite" else (255, 170, 30)
+        d.polygon([tuple(v) for v in c], outline=col, width=2)
+        if q.get("rm") in ("S", "L", "R", "SL", "SR", "LR", "SLR") and km * q["h_m"] / mpp >= 10:
+            # an arrow: a tick at its head
+            hx, hy = q["x"] + q["ux"] * q["h_m"] / mpp / 2, q["y"] + q["uy"] * q["h_m"] / mpp / 2
+            d.ellipse([hx * km - 2, hy * km - 2, hx * km + 2, hy * km + 2], fill=col)
+    im.save(out, quality=88)
+    return FileResponse(out)
+
+
+@app.get("/api/coords/place-decals/{gid}")
+def coords_place_decals_settings(gid: str):
+    """A generation's Place decals settings (none: the rules alone)."""
+    from app import observed as OBS
+    return {"settings": OBS.load_settings(ARTIFACTS, gid)}
 
 
 @app.get("/api/coords/area/{key}/{name}")

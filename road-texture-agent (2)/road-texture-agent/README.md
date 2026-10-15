@@ -148,7 +148,7 @@ beside it:
 | --- | --- |
 | zebra crossing | 3 or more bars along the road, side by side across it 0.55 to 1.8 m apart |
 | lane line | bars along the road in a row (a lane line's dashes), as wide as the area's lane lines; solid from 9 m |
-| arrow | a bar along the road wider than the lane lines, or a wide mark (up to 2.3 m) far from filling its box |
+| arrow | a bar along the road wider than the lane lines, or a wide mark (up to 2.3 m) far from filling its box; the way it points from its head (more paint there), its kind (straight, left, right, two or three of them) from the arrow picture that covers it best (straight unless another is clearly better) |
 | stop line | a line across the road |
 | cyclist crossing | two thin lines across, alike, 1.5 to 2.6 m apart |
 | give way line | a line across that is broken (its brightness varies along it) or about 1 m thick (two rows of short dashes), or 3 short blocks in a row |
@@ -174,6 +174,52 @@ your areas.
 Its files: `workspace/coords/<key>/analysis/` (`tiles.json`: every tile's box,
 confidence and reasons; `findings.json`: every mark with its name, place in pixels
 and in degrees, angle, size, contrast and score; the two pictures).
+
+### Place decals from what the satellite saw
+
+When the analysis is done and the texture is generated from the area, the card's
+**Decals from what it saw** part lays the road markings the satellite found, where
+it found them (app/observed.py):
+
+- **Place decals**: in every tile whose markings confidence is at or above **Rules
+  in tiles under** (60% to start), each zebra crossing, stop line, give way line,
+  cyclist crossing and lane arrow the satellite saw is laid where it is painted,
+  turned as it lies and as long and wide as it measured: a crossing with as many
+  stripes as span the road it measured and as deep as its stripes; a stop or give
+  way line as long as the painted one; a cyclist crossing as wide apart as its two
+  lines; an arrow pointing the way its head does, of the kind its shape reads
+  (straight, left, right, or two or three of them), as long as the painted one. The
+  paint itself (stripe and gap widths, line widths) is the layer's, by the Saudi
+  rules when those are on. The rules lay none of those kinds in those tiles.
+- In a tile **under** the threshold (shadows, trees, a missing picture, faint paint)
+  the rules lay that tile's markings as before: that tile only. A rule marking lying
+  on one the satellite saw is never laid twice (a crossing on the line between two
+  tiles).
+- **Rules also where it saw none**: in the tiles it saw well, the rules also lay the
+  markings the satellite did not see there (not on top of one it did).
+- **The lane lines** stop at the markings laid now: at a junction whose tile the
+  satellite saw, where its crossings and lines end (none seen: the lines run on to
+  the junction); a crossing it saw anywhere cuts the lines it lies across.
+- A STOP word is laid in a seen tile only before a stop line the satellite saw;
+  pictures (imported decals) and the yellow box are laid by their layers as before.
+  Lane dashes, solid lines and parking bays it saw are counted, not laid as decals
+  (the lane lines are the Lanes rules').
+- A road marking layer missing from the Decals panel (say cyclist crossings) is added
+  for what the satellite saw, and laid from it alone: the rules lay none of it.
+- **Rules only** lays the decals by the rules alone again, as before. **Show placed
+  decals**: the decals over the satellite, green as the satellite saw them, amber by
+  the rules, the tiles under the threshold in red.
+- The choice is kept with the texture: Update decals and Update 2D texture keep to
+  it. A texture not made from coordinates, or one where Place decals was never
+  pressed, is laid exactly as before.
+
+Measured on the stand-in area (the same as above): the rules alone laid 10 of the 15
+zebra crossings there, 7 of 11 stop lines, 3 of 4 give way lines, 10 of 15 cyclist
+crossings and 28 of 44 arrows; Place decals laid 14, 11, 4, 14 and 33, each within
+0.2 to 0.6 m of the painted one and turned within half a degree (arrows 4 degrees),
+and 33 of 34 arrows of the right kind. With the threshold at 75% the tile at 71%
+(the missing picture) went to the rules: its 4 arrows by the rules, the rest from
+the satellite.
 
 ## Memory tab and the ordered libraries
 

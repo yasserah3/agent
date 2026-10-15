@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords2';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords3';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -1022,6 +1022,7 @@ const UI_VERSION = '2026.10.15-coords2';   // must match VERSION in server.py
         + (s.low_tiles ? `; ${s.low_tiles} tile(s) under 60%` : '') + '.';
       $('#satBtns').hidden = false;
     } else { $('#satSum').textContent = ''; $('#satBtns').hidden = true; }
+    satPlaceState();
   }
   async function satPoll(){
     if(!SAT.key) return;
@@ -1053,6 +1054,84 @@ const UI_VERSION = '2026.10.15-coords2';   // must match VERSION in server.py
     genVp.show(img, { findings: 'Findings: every mark found, in its colour', confidence: 'Confidence of every tile',
                       satellite: 'Satellite' }[k]);
   }));
+  /* ---- Place decals from what the satellite saw (app/observed.py): in the tiles rated at or above the
+     threshold the markings it found, where it found them; under it the rules, that tile only */
+  const SAT_PRESET = { zebra: ['zebra crossing', 'zebra crossings'], stop: ['stop line', 'stop lines'],
+    giveway: ['give way line', 'give way lines'], cycle: ['cyclist crossing', 'cyclist crossings'], arrows: ['arrow', 'arrows'],
+    stopword: ['STOP word', 'STOP words'] };
+  const satCount = o => Object.entries(o || {}).filter(([, n]) => n).map(([k, n]) => `${fmt(n)} ${(SAT_PRESET[k] || SAT_NAMES[k] || [k, k])[n === 1 ? 0 : 1]}`).join(', ');
+  function satAreaKey(){ return (S.gen.mask && S.gen.mask.coords && S.gen.mask.coords.key) || (S.gen.coords && S.gen.coords.key) || null; }
+  async function satPlaceState(){
+    const done = SAT.data && SAT.data.state === 'done';
+    $('#satPlace').hidden = !done;
+    if(!done) return;
+    const gid = S.gen.result && S.gen.result.id;
+    const ok = !!gid && satAreaKey() === SAT.key && !SAT.placing;
+    $('#btnSatPlace').disabled = $('#btnSatRules').disabled = !ok;
+    if(gid && SAT.settingsFor !== gid){
+      // what this texture was last laid with: the satellite (and at what threshold), or the rules alone
+      SAT.settingsFor = gid;
+      try{ SAT.placed = (await api('/api/coords/place-decals/' + gid)).settings; }catch(_){ SAT.placed = null; }
+      if(SAT.placed){ $('#satThr').value = SAT.placed.threshold; $('#satFill').checked = !!SAT.placed.fill; }
+    }
+    const on = ok && SAT.placed && SAT.placed.on;
+    $('#btnSatPlaced').hidden = !(ok && S.gen.decals);
+    $('#btnSatPlace').textContent = on ? 'Place again' : 'Place decals';
+    $('#satPlaceNote').textContent = !gid ? 'Generate texture first: then Place decals lays the markings the satellite saw on it.'
+      : satAreaKey() !== SAT.key ? 'The texture is not made from this area.'
+      : on ? `Laid from the satellite; the rules in tiles under ${SAT.placed.threshold}%${SAT.placed.fill ? ', and where it saw none' : ''}. Update decals keeps to it.`
+      : 'The decals are laid by the rules now. Place decals lays what the satellite saw where it saw it.';
+  }
+  async function satPlace(on){
+    if(!S.gen.result || SAT.placing) return;
+    const gid = S.gen.result.id, mode = $('#decalMode').value;
+    const thr = Math.max(0, Math.min(100, Number($('#satThr').value) || 0));
+    $('#satThr').value = thr;
+    SAT.placing = true; satPlaceState();
+    status(on ? 'Placing the decals the satellite saw…' : 'Placing the decals by the rules…');
+    try{
+      const res = await api('/api/coords/place-decals', { method:'POST', headers:{'Content-Type':'application/json'},
+        job: on ? 'Placing decals from the satellite' : 'Placing decals by the rules',
+        body: JSON.stringify({ generation: gid, layers: DEC.layers, mode, seed: +$('#seed').value, mark_area: MAREA.area,
+                               marks: marksPayload(), threshold: thr, fill: $('#satFill').checked, on }) });
+      if(!S.gen.result || S.gen.result.id !== gid) return;
+      if(res.added && res.added.length){
+        DEC.layers = res.decal_layers;
+        log(`Decals: added the ${res.added.map(k => (SAT_PRESET[k] || [k, k])[1]).join(', ')} layer${res.added.length === 1 ? '' : 's'} for what the satellite saw (laid from it alone: the rules lay none of ${res.added.length === 1 ? 'it' : 'them'}).`);
+      }
+      S.gen.decals = res; S.gen.decalVersion = Date.now();
+      S.gen.result.urls.result = res.urls.result;
+      if(S.gen.islandTex && S.gen.islandTex.gid === gid) S.gen.islandTex.urls.full = res.urls.full;
+      SAT.placed = res.settings; SAT.settingsFor = gid;
+      $('#btnPlaceDecals').classList.remove('attention');
+      const o = res.observed;
+      if(o){
+        log(`Decals from the satellite: ${satCount(o.observed) || 'none'} laid where it saw them, in ${o.tiles.seen} tile(s) at or over ${o.threshold}%`
+          + (Object.keys(o.rules).length ? `; the rules laid ${satCount(o.rules)}${o.tiles.rules ? ` (${o.tiles.rules} tile(s) under ${o.threshold}% or without road)` : ''}` : '')
+          + ` (${res.seconds.toFixed(1)} s).`, 'ok');
+        if(o.ends.moved || o.ends.dropped) log(`  Lane lines: they stop at ${o.ends.moved} junction edge(s) where the satellite saw the crossing or line`
+          + (o.ends.dropped ? `; at ${o.ends.dropped} it saw none, so they run on to the junction` : '') + '.');
+        const sk = o.skipped;
+        if(sk.faint || sk.overlap) log(`  Not laid: ${[sk.faint ? `${sk.faint} too faint to be sure` : '', sk.overlap ? `${sk.overlap} lying on another found mark` : ''].filter(Boolean).join(', ')}.`);
+        if(Object.keys(o.not_read).length) log(`  Seen but laid by the lane rules, not as decals: ${satCount(o.not_read)}.`);
+      } else log(`Decals by the rules alone again: ${res.count.toLocaleString()} laid (${res.seconds.toFixed(1)} s).`, 'ok');
+      if(res.lanes_moved) log(`  Lane lines laid again on ${res.lanes_moved.streets} street(s) so they end at the markings (${res.lanes_moved.seconds.toFixed(1)} s).`);
+      $('#decalNote').textContent = `${res.count.toLocaleString()} decals laid.`;
+      try{ drawInto($('#lp-decals'), await loadImage(API + res.urls.decals)); }catch(_){}
+      await showLayer(['result', 'decals', 'full'].includes(S.gen.layer) ? S.gen.layer : 'result', true);
+      window.dispatchEvent(new Event('materials'));            // the 3D tab's scene is out of date
+      if((S.gen.top && S.gen.top.gid === gid) || S.gen.topBusy) refreshTopView(gid, false);
+    }catch(e){ log('Decals not placed: ' + e.message, 'bad'); }
+    finally{ SAT.placing = false; status('Ready.'); renderDecals(); satPlaceState(); }
+  }
+  $('#btnSatPlace').addEventListener('click', () => satPlace(true));
+  $('#btnSatRules').addEventListener('click', () => satPlace(false));
+  $('#btnSatPlaced').addEventListener('click', async () => {
+    if(!S.gen.result) return;
+    try{ genVp.show(await loadImage(`${API}/api/coords/placed/${S.gen.result.id}?v=${Date.now().toString(36)}`),
+                    'Decals: green as the satellite saw them, amber by the rules (red tiles: under the threshold)'); }
+    catch(e){ log('Placed decals: ' + e.message, 'bad'); }
+  });
   $('#btnCoords').addEventListener('click', coStart);
   $('#btnCoordsStop').addEventListener('click', () => { if(CO.job) api('/api/coords/cancel/' + CO.job, { method:'POST' }).catch(() => {}); });
   try{
@@ -3208,6 +3287,7 @@ const UI_VERSION = '2026.10.15-coords2';   // must match VERSION in server.py
       box.appendChild(card);
     });
     $('#decalCount').textContent = DEC.layers.length ? String(DEC.layers.length) : '';
+    satPlaceState();
     $('#btnPlaceDecals').disabled = !S.gen.result || !(DEC.layers.length || S.gen.decals);
     // laid once: the button updates them, painting again only where decals change
     $('#btnPlaceDecals').textContent = S.gen.decals ? 'Update decals' : 'Place decals';

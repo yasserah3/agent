@@ -336,6 +336,11 @@
   .sat-card canvas{ display:block; margin-top:8px; width:228px; image-rendering:pixelated; cursor:crosshair; }
   .sat-tip{ color:var(--muted); margin-top:5px; min-height:30px; } .sat-sum{ margin-top:4px; }
   .sat-sum b{ font-weight:600; } .sat-card .btn{ padding:6px 4px; font-size:12px; }
+  .sat-place{ margin-top:9px; padding-top:8px; border-top:1px solid var(--line); } .sat-ph{ font-weight:600; margin-bottom:5px; }
+  .sat-row{ display:flex; align-items:center; gap:6px; } .sat-row input{ width:58px; padding:3px 5px; background:var(--field); border:1px solid var(--line); border-radius:4px; color:var(--ink); }
+  .sat-chk{ display:flex; align-items:center; gap:6px; margin:6px 0 7px; color:var(--muted); cursor:pointer; }
+  .sat-card.folded .sat-place{ display:none !important; }
+  .sat-card{ max-height:calc(100% - 60px); overflow-y:auto; }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
   .note.bad{ color:var(--red); }
 
@@ -934,6 +939,18 @@
           <button type="button" class="btn secondary" data-pic="findings" style="margin-top:6px">Findings</button>
           <button type="button" class="btn secondary" data-pic="confidence" style="margin-top:6px">Confidence</button>
           <button type="button" class="btn secondary" data-pic="satellite" style="margin-top:6px">Satellite</button>
+        </div>
+        <div class="sat-place" id="satPlace" hidden>
+          <div class="sat-ph">Decals from what it saw</div>
+          <label class="sat-row" title="A tile whose markings confidence is under this: its decals are laid by the rules (the Saudi rules when they are on), that tile only">
+            <span>Rules in tiles under</span><input type="number" id="satThr" min="0" max="100" step="5" value="60"><span>%</span></label>
+          <label class="sat-chk" title="In the tiles the satellite saw well, the rules also lay the markings it did not see there"><input type="checkbox" id="satFill"> Rules also where it saw none</label>
+          <div class="sat-tip" id="satPlaceNote" style="min-height:0;margin:0 0 6px"></div>
+          <div class="btn-row">
+            <button type="button" class="btn" id="btnSatPlace" disabled title="Lay the crossings, stop and give way lines, cyclist crossings and arrows the satellite saw, where it saw them">Place decals</button>
+            <button type="button" class="btn secondary" id="btnSatRules" disabled title="Lay the decals by the rules alone again, as before">Rules only</button>
+          </div>
+          <button type="button" class="btn secondary" id="btnSatPlaced" hidden style="margin-top:6px;width:100%">Show placed decals</button>
         </div>
       </div>
     </div>
