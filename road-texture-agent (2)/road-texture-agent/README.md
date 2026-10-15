@@ -123,6 +123,58 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   exactly the asphalt. The alpha keeps them; the satellite is for the details
   (the analysis, next).
 
+### The satellite analysis (after the alpha, in the background)
+
+Once an area's alpha is made, its satellite map is analysed by itself, in square
+**tiles** of 512 px (70 m at zoom 20), each tile looking 20 m into its neighbours
+so that what crosses its edge is seen whole (what it finds belongs to the tile its
+centre is in). The tiles are worked by worker processes in parallel, the middle
+of the area first, while you go on (Generate texture works meanwhile).
+
+Its **card** sits on the right of the Generate viewport: a bar with the tiles done
+and the time left, and a square for every tile: grey **100** until it is looked at,
+then coloured by its confidence (green to red) with its figure; point at a square
+for the reasons; click the card's title to fold it. When it is done: what was found,
+the area's confidence (road and markings), and three buttons: **Findings** (every
+mark found, drawn in its colour over the satellite), **Confidence** (every tile's
+figure over the satellite) and **Satellite**.
+
+**What it finds** (app/sat_analysis.py): the paint on the road, anything brighter
+than the asphalt around it and narrower than 2.6 m, white or yellow, near the
+alpha's roads, each mark measured in metres and named by its shape and what is
+beside it:
+
+| Name | How it is recognised |
+| --- | --- |
+| zebra crossing | 3 or more bars along the road, side by side across it 0.55 to 1.8 m apart |
+| lane line | bars along the road in a row (a lane line's dashes), as wide as the area's lane lines; solid from 9 m |
+| arrow | a bar along the road wider than the lane lines, or a wide mark (up to 2.3 m) far from filling its box |
+| stop line | a line across the road |
+| cyclist crossing | two thin lines across, alike, 1.5 to 2.6 m apart |
+| give way line | a line across that is broken (its brightness varies along it) or about 1 m thick (two rows of short dashes), or 3 short blocks in a row |
+| parking bay lines | thin slanted or square lines at the road's edge, 2 or more side by side 2 to 3.6 m apart |
+| car | 1.3 m or more wide, 2.8 to 7.5 m long, filling most of its box (bright, dark or coloured): set aside, counted against the confidence |
+
+**Confidence**, every tile: 100, less for what hides or blurs its road, each drop
+with its reason: missing tiles (100 x the road's share in them), shadow (60 x share),
+trees (60 x share), cars (20 x share), the street map's road showing no asphalt on
+the satellite (70 x the share over 10%), a blurred picture (up to 25); the markings'
+figure also drops for faint paint (up to 20). A tile with no road has none. The
+figures are a heuristic (their version is stored with them), not a probability:
+they are to be calibrated on checked examples saved to the dataset.
+
+**Measured** on a stand-in for the downloader (the test city generated at 0.125 m a
+pixel as the satellite, JPEG like Google's, with cars, shadows and trees), 330 x 220
+m at zoom 20: 14 of 15 zebra crossings found (2 extra), 11 of 11 stop lines (2
+extra), 14 of 15 cyclist crossings, 4 of 4 give way lines (1 extra), 33 of 44 arrows
+(6 extra), 45 of 53 cars; the missing tile found and its tile at 71%. Real satellite
+pictures differ (worn paint, shadows, other cars): the rules are to be tuned on
+your areas.
+
+Its files: `workspace/coords/<key>/analysis/` (`tiles.json`: every tile's box,
+confidence and reasons; `findings.json`: every mark with its name, place in pixels
+and in degrees, angle, size, contrast and score; the two pictures).
+
 ## Memory tab and the ordered libraries
 
 Every pair keeps its own library for each part of the road: junction, kerb and

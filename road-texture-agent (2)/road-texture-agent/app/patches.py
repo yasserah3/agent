@@ -476,8 +476,9 @@ class Pool:
     its job reported failed.
     """
 
-    def __init__(self, n=None):
+    def __init__(self, n=None, module="app.patches"):
         self.n = n or workers()
+        self.module = module                  # the workers' module (python -m <module> --worker)
         self.lock = threading.Condition()
         self.queue = []                       # [job]: {"key", "fn": callable(result) , "task": dict}
         self.busy = {}                        # worker index -> job
@@ -491,7 +492,7 @@ class Pool:
     def _start(self):
         root = str(Path(__file__).resolve().parent.parent)
         env = dict(os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", ""))
-        return subprocess.Popen([sys.executable, "-m", "app.patches", "--worker"], cwd=root, env=env,
+        return subprocess.Popen([sys.executable, "-m", self.module, "--worker"], cwd=root, env=env,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1)
 
     def submit(self, job):

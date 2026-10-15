@@ -300,8 +300,9 @@ def onto_grid(path, geo, extent, size, resample=Image.Resampling.NEAREST):
 def missing_tiles(rgb, extent, zoom):
     """
     The satellite's tiles that did not come: whole tile squares (of the downloader's
-    256 px tiles, on the Web Mercator tile grid) of one flat colour, white or black.
-    A white roof is not a whole tile of one exact colour. Returns [[x0, y0, x1, y1]] in
+    256 px tiles, on the Web Mercator tile grid) of one flat colour, white or black
+    (96% of the tile within 8 levels, JPEG's ringing allowed). A white roof is not a
+    whole 35 m tile of one flat colour. Returns [[x0, y0, x1, y1]] in
     the crop's pixels.
     """
     h, w = rgb.shape[:2]
@@ -320,8 +321,10 @@ def missing_tiles(rgb, extent, zoom):
             a1, b1 = min(w, tx0 + TILE_PX), min(h, ty0 + TILE_PX)
             if a1 - a0 < 32 or b1 - b0 < 32:
                 continue
-            block = grey[b0:b1, a0:a1]
-            if int(block.max()) - int(block.min()) <= 3 and (block.min() >= 235 or block.max() <= 20):
+            block = grey[b0:b1, a0:a1].mean(axis=2)
+            lo, med, hi = np.percentile(block, [2, 50, 98])
+            # one flat colour over the whole tile (JPEG's faint ringing allowed): white or black
+            if hi - lo <= 8 and (med >= 240 or med <= 15):
                 out.append([a0, b0, a1, b1])
     return out
 
@@ -385,6 +388,14 @@ def _run(job, est, settings, root, register):
         try:
             job["result"] = build_area(est, settings, root, register, job)
             job["state"] = "done"
+            # then the satellite analysis, in the background (app/sat_analysis.py)
+            try:
+                from app import sat_analysis as SA
+                key = job["result"]["area"]["key"]
+                area = json.loads((root / key / "area.json").read_text())
+                job["result"]["analysis"] = {"job": SA.start(root / key, area)}
+            except Exception as e:                   # the alpha stands without it
+                job["log"].append(f"the satellite analysis could not start: {e}")
         except Cancelled as e:
             job["state"], job["error"] = "cancelled", str(e) or "stopped"
         except Exception as e:                       # the page shows it as it is

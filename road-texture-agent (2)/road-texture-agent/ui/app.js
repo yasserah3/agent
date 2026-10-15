@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords1';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.15-coords2';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -950,10 +950,109 @@ const UI_VERSION = '2026.10.15-coords1';   // must match VERSION in server.py
         S.gen.coords = area;
         log(`Coordinates: the alpha is the street mask (${fmt(area.width)} × ${fmt(area.height)} px, scale ${area.mpp.toFixed(4)} m a pixel): press Generate texture.`, 'ok');
         end(true, `${fmt(area.width)} × ${fmt(area.height)} px`);
+        if(st.result.analysis) satFollow(area.key);
         return;
       }
     }catch(e){ coBar(0, e.message); log('Coordinates: ' + e.message, 'bad'); end(false, e.message); }
   }
+  /* ---- the satellite analysis (app/sat_analysis.py): in the background once the alpha is made; its
+     card on the right of the viewport, a square a tile (100 until it is looked at, then its confidence) */
+  const SAT = { key: null, timer: null, data: null, job: null, cell: null };
+  const SAT_NAMES = { zebra: ['zebra crossing', 'zebra crossings'], stop_line: ['stop line', 'stop lines'],
+    cycle_crossing: ['cyclist crossing', 'cyclist crossings'], giveway: ['give way line', 'give way lines'],
+    arrow: ['arrow', 'arrows'], parking_bay: ['row of parking bays', 'rows of parking bays'],
+    lane_dash: ['lane dash', 'lane dashes'], lane_solid: ['solid lane line', 'solid lane lines'],
+    car: ['car', 'cars'], unknown: ['unknown mark', 'unknown marks'] };
+  const satRamp = v => { v = Math.max(0, Math.min(1, v)); const a = [220,50,50], b = [240,170,30], c = [60,200,90];
+    const [p, q, t] = v < 0.6 ? [a, b, v / 0.6] : [b, c, (v - 0.6) / 0.4];
+    return `rgb(${p.map((x, i) => Math.round(x + (q[i] - x) * t)).join(',')})`; };
+  function satDraw(){
+    const d = SAT.data, cv = $('#satTiles');
+    if(!d || !d.grid || !d.grid.length){ cv.height = 1; SAT.cell = null; return; }
+    const rows = Math.max(...d.grid.map(t => t.row)) + 1, cols = Math.max(...d.grid.map(t => t.col)) + 1;
+    const cs = Math.max(6, Math.floor(Math.min(228 / cols, 150 / rows)));
+    cv.width = cols * cs; cv.height = rows * cs; cv.style.width = `${cols * cs}px`;
+    const g = cv.getContext('2d');
+    g.font = `${Math.max(8, Math.floor(cs * 0.38))}px sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    SAT.cell = { cs, cols, rows };
+    for(const t of d.grid){
+      const r = d.tiles[t.id], x = t.col * cs, y = t.row * cs;
+      let fill = '#2c3138', label = '100', ink = '#7c8592';                 // not looked at yet: 100 for now
+      if(r && r.state === 'no_road'){ fill = '#1d2126'; label = ''; }
+      else if(r && r.state === 'failed'){ fill = '#5a2a2a'; label = '!'; ink = '#fff'; }
+      else if(r && r.confidence != null){ fill = satRamp(r.confidence / 100); label = Math.round(r.confidence); ink = '#fff'; }
+      g.fillStyle = fill; g.fillRect(x + 1, y + 1, cs - 2, cs - 2);
+      if(cs >= 16 && label !== ''){ g.fillStyle = ink; g.fillText(String(label), x + cs / 2, y + cs / 2 + 0.5); }
+    }
+  }
+  function satTip(){ $('#satTip').textContent = 'Each square a tile: 100 until it is looked at, then how well its road is seen. Point at one for why.'; }
+  $('#satTiles').addEventListener('mousemove', e => {
+    const d = SAT.data, c = SAT.cell;
+    if(!d || !c) return;
+    const rc = e.target.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rc.left) / c.cs), row = Math.floor((e.clientY - rc.top) / c.cs);
+    const t = d.grid.find(t => t.row === row && t.col === col);
+    const r = t && d.tiles[t.id];
+    $('#satTip').textContent = !t ? '' : !r ? `Tile ${t.id}: not looked at yet (100 for now).`
+      : r.state === 'no_road' ? `Tile ${t.id}: no road.`
+      : r.state === 'failed' ? `Tile ${t.id}: could not be analysed.`
+      : `Tile ${t.id}: road ${Math.round(r.confidence)}%, markings ${Math.round(r.confidence_marks ?? r.confidence)}%`
+        + ((r.reasons || []).length ? ` · ${r.reasons.map(x => `${x.why} −${x.minus}`).join('; ')}` : ' · nothing hides the road');
+  });
+  $('#satTiles').addEventListener('mouseleave', satTip);
+  function satRender(){
+    const d = SAT.data; if(!d) return;
+    $('#satCard').hidden = false;
+    const bar = $('#satBar');
+    const frac = d.state === 'done' ? 1 : (d.total ? d.done / d.total : 0);
+    $('i', bar).style.width = `${Math.round(frac * 100)}%`;
+    $('span', bar).textContent = d.state === 'done' ? 'done'
+      : d.state === 'failed' ? `stopped: ${d.error}`
+      : d.state === 'preparing' ? 'preparing the satellite and the alpha…'
+      : `${d.done} of ${d.total} tiles · ${Math.floor(frac * 100)}%` + (d.left != null ? ` · about ${fmtTime(d.left)} left` : '');
+    $('#satState').textContent = d.state === 'done' ? '· done' : d.state === 'failed' ? '· stopped' : '· working';
+    satDraw();
+    const s = d.summary;
+    if(d.state === 'done' && s){
+      const order = ['zebra', 'stop_line', 'cycle_crossing', 'giveway', 'arrow', 'parking_bay', 'lane_dash', 'lane_solid'];
+      const found = order.filter(k => s.counts[k]).map(k => `${fmt(s.counts[k])} ${SAT_NAMES[k][s.counts[k] === 1 ? 0 : 1]}`);
+      $('#satSum').innerHTML = `Found: ${found.length ? found.join(', ') : 'no markings'}`
+        + (s.counts.car ? ` (and ${fmt(s.counts.car)} cars set aside)` : '')
+        + `.<br>Confidence: road <b>${s.confidence ?? '–'}%</b>, markings <b>${s.confidence_marks ?? '–'}%</b>`
+        + (s.low_tiles ? `; ${s.low_tiles} tile(s) under 60%` : '') + '.';
+      $('#satBtns').hidden = false;
+    } else { $('#satSum').textContent = ''; $('#satBtns').hidden = true; }
+  }
+  async function satPoll(){
+    if(!SAT.key) return;
+    try{ SAT.data = await api('/api/coords/analysis/' + SAT.key); }catch(_){ SAT.data = null; }
+    if(SAT.data && SAT.data.state !== 'none') satRender();
+    const live = SAT.data && (SAT.data.state === 'preparing' || SAT.data.state === 'running');
+    if(live){
+      if(SAT.job) SAT.job.set(SAT.data.state === 'preparing' ? 'preparing' : `${SAT.data.done} of ${SAT.data.total} tiles`,
+                              SAT.data.total ? SAT.data.done / SAT.data.total : null, SAT.data.left);
+      SAT.timer = setTimeout(satPoll, 1000);
+    } else if(SAT.data && SAT.data.state === 'done' && SAT.job){
+      const s = SAT.data.summary;
+      SAT.job.done(true, `confidence ${s.confidence ?? '–'}%`); SAT.job = null;
+      log(`Satellite analysis: done; road confidence ${s.confidence ?? '–'}%, markings ${s.confidence_marks ?? '–'}%. Its card is on the right of the viewport.`, 'ok');
+    } else if(SAT.data && SAT.data.state === 'failed' && SAT.job){ SAT.job.done(false, SAT.data.error); SAT.job = null; }
+  }
+  function satFollow(key){
+    clearTimeout(SAT.timer);
+    SAT.key = key; SAT.data = null; satTip();
+    if(SAT.job) SAT.job.done(false, 'replaced');
+    SAT.job = trackJob('Satellite analysis (in the background)');
+    satPoll();
+  }
+  $('#satHead').addEventListener('click', () => $('#satCard').classList.toggle('folded'));
+  $$('#satBtns [data-pic]').forEach(b => b.addEventListener('click', async () => {
+    if(!SAT.key) return;
+    const k = b.dataset.pic;
+    const img = await loadImage(`${API}/api/coords/area/${SAT.key}/${k}?v=${Date.now().toString(36)}`);
+    genVp.show(img, { findings: 'Findings: every mark found, in its colour', confidence: 'Confidence of every tile',
+                      satellite: 'Satellite' }[k]);
+  }));
   $('#btnCoords').addEventListener('click', coStart);
   $('#btnCoordsStop').addEventListener('click', () => { if(CO.job) api('/api/coords/cancel/' + CO.job, { method:'POST' }).catch(() => {}); });
   try{

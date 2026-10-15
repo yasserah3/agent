@@ -329,6 +329,13 @@
   .co-thumbs figure{ margin:0; cursor:pointer; } .co-thumbs .thumb{ width:100%; height:52px; }
   .co-thumbs .thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
   .co-thumbs figcaption{ font-size:11px; color:var(--muted); text-align:center; margin-top:2px; }
+  .sat-card{ position:absolute; top:48px; right:10px; width:250px; background:rgba(26,30,34,.92); border:1px solid var(--line); border-radius:6px; padding:9px 11px 10px; font-size:12px; box-shadow:0 4px 16px rgba(0,0,0,.35); }
+  .sat-h{ font-weight:600; font-size:12.5px; cursor:pointer; user-select:none; } .sat-h span{ color:var(--muted); font-weight:400; }
+  .sat-fold{ float:right; font-style:normal; color:var(--muted); } .sat-card.folded .sat-fold{ transform:rotate(-90deg); }
+  .sat-card.folded canvas, .sat-card.folded .sat-tip, .sat-card.folded .sat-sum, .sat-card.folded .btn-row{ display:none !important; }
+  .sat-card canvas{ display:block; margin-top:8px; width:228px; image-rendering:pixelated; cursor:crosshair; }
+  .sat-tip{ color:var(--muted); margin-top:5px; min-height:30px; } .sat-sum{ margin-top:4px; }
+  .sat-sum b{ font-weight:600; } .sat-card .btn{ padding:6px 4px; font-size:12px; }
   .note{ color:var(--muted); font-size:12px; margin-top:6px; }
   .note.bad{ color:var(--red); }
 
@@ -917,6 +924,18 @@
         <button type="button" data-one title="Show at real size, one image pixel per screen pixel">100%</button>
       </div>
       <div class="vp-enlarged" hidden>Past 100%: enlarging existing pixels. Generate at 2× or 4× for more detail.</div>
+      <div class="sat-card" id="satCard" hidden>
+        <div class="sat-h" id="satHead" title="Fold or unfold">Satellite analysis <span id="satState"></span><i class="sat-fold">▾</i></div>
+        <div class="co-bar" id="satBar"><i></i><span></span></div>
+        <canvas id="satTiles" width="228" height="120"></canvas>
+        <div class="sat-tip" id="satTip">Each square a tile: 100 until it is looked at, then how well its road is seen.</div>
+        <div class="sat-sum" id="satSum"></div>
+        <div class="btn-row three" id="satBtns" hidden>
+          <button type="button" class="btn secondary" data-pic="findings" style="margin-top:6px">Findings</button>
+          <button type="button" class="btn secondary" data-pic="confidence" style="margin-top:6px">Confidence</button>
+          <button type="button" class="btn secondary" data-pic="satellite" style="margin-top:6px">Satellite</button>
+        </div>
+      </div>
     </div>
 
     <aside class="right">

@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-coords2"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -3745,12 +3745,51 @@ def coords_cancel(jid: str):
     return {"ok": CO.cancel(jid)}
 
 
+@app.get("/api/coords/analysis/{key}")
+def coords_analysis(key: str):
+    """
+    An area's satellite analysis (app/sat_analysis.py): running (tiles done of all, each
+    done tile's confidence, the time left) or done (its summary and tiles), or none yet.
+    """
+    from app import sat_analysis as SA
+    if not re.fullmatch(r"[0-9a-f]{12}", key):
+        raise HTTPException(404, "unknown area")
+    r = SA.state(key)
+    disk = COORDS / key / "analysis" / "tiles.json"
+    if r is None or (r["state"] == "done" and disk.exists()):
+        if disk.exists():
+            d = json.loads(disk.read_text())
+            return {"state": "done", "summary": d["summary"], "done": len(d["tiles"]), "total": len(d["tiles"]),
+                    "grid": [{k: t[k] for k in ("id", "core", "row", "col")} for t in d["tiles"]],
+                    "tiles": {t["id"]: {k: t.get(k) for k in ("state", "confidence", "confidence_marks", "reasons",
+                                                              "reasons_marks", "counts")} for t in d["tiles"]}}
+        return {"state": "none"}
+    snap = prog.of(r["job"]) or {}
+    return {"state": r["state"], "done": r["done"], "total": r["total"], "grid": r.get("grid", []),
+            "tiles": r["tiles"], "error": r["error"], "summary": r["summary"],
+            "stage": snap.get("stage"), "progress": snap.get("done"), "left": snap.get("left"), "elapsed": snap.get("elapsed")}
+
+
+@app.post("/api/coords/analyse/{key}")
+def coords_analyse(key: str):
+    """The satellite analysis of an area again (or for the first time)."""
+    from app import sat_analysis as SA
+    folder = COORDS / key
+    if not re.fullmatch(r"[0-9a-f]{12}", key) or not (folder / "area.json").exists():
+        raise HTTPException(404, "unknown area")
+    area = json.loads((folder / "area.json").read_text())
+    if not (folder / "alpha.png").exists():
+        raise HTTPException(409, "make the area's alpha first")
+    return {"job": SA.start(folder, area)}
+
+
 @app.get("/api/coords/area/{key}/{name}")
 def coords_file(key: str, name: str):
     """An area's picture: satellite, street, alpha, check (the alpha's edge over the satellite), overlay."""
     files = {"satellite": "satellite_preview.jpg", "street": "street_preview.png", "alpha": "alpha_preview.png",
              "check": "check_preview.jpg", "overlay": "overlay.png", "satellite_full": "satellite.png",
-             "street_full": "street.png", "alpha_full": "alpha.png"}
+             "street_full": "street.png", "alpha_full": "alpha.png",
+             "findings": "analysis/findings_preview.jpg", "confidence": "analysis/confidence_preview.jpg"}
     if not re.fullmatch(r"[0-9a-f]{12}", key) or name not in files:
         raise HTTPException(404, "unknown file")
     path = COORDS / key / files[name]
