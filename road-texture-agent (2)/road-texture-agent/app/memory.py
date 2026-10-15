@@ -31,6 +31,7 @@ on start the database's full paths are rewritten that way once.
 import json
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -134,13 +135,63 @@ CREATE TABLE IF NOT EXISTS artifacts (
 """
 
 
+class _Rows:
+    """A statement's rows, read whole (what the code uses of a cursor: fetchone, fetchall, a loop, lastrowid)."""
+    def __init__(self, rows, lastrowid, rowcount):
+        self._rows, self._at, self.lastrowid, self.rowcount = rows, 0, lastrowid, rowcount
+
+    def fetchone(self):
+        if self._at >= len(self._rows):
+            return None
+        self._at += 1
+        return self._rows[self._at - 1]
+
+    def fetchall(self):
+        rest, self._at = self._rows[self._at:], len(self._rows)
+        return rest
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _OneAtATime:
+    """
+    The workspace's database, used by every thread of the server (each request,
+    the 3D builds, the progress polls): each statement is run and its rows read
+    whole under one lock, and so is each commit. One sqlite3 connection used by
+    two threads at once is not safe: a row read while another thread writes can
+    come back with its columns empty (TypeError: the JSON object must be str ...
+    not NoneType), or the call fails ("no more rows available", "cannot commit -
+    no transaction is active").
+    """
+    def __init__(self, conn):
+        self.conn, self.lock = conn, threading.RLock()
+
+    def execute(self, sql, params=()):
+        with self.lock:
+            cur = self.conn.execute(sql, params)
+            return _Rows(cur.fetchall() if cur.description else [], cur.lastrowid, cur.rowcount)
+
+    def executescript(self, script):
+        with self.lock:
+            self.conn.executescript(script)
+
+    def commit(self):
+        with self.lock:
+            self.conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+
 class Memory:
     def __init__(self, db_path: Path):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.root = self.path.parent.resolve()           # the workspace
-        self.db = sqlite3.connect(self.path, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        conn = sqlite3.connect(self.path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        self.db = _OneAtATime(conn)
         self.db.executescript(SCHEMA)
         self._migrate()
         self.db.commit()

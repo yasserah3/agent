@@ -1354,6 +1354,18 @@ already known to fail there, which is what stops it repeating a mistake.
 
 The step log is the source of truth. Situations and trees can be rebuilt from it.
 
+**One request at a time in the file.** The server answers several requests at
+once (a 3D build, the Top view, the progress polls, the page's own reads), and
+they all use the one connection to this file. Each statement now runs and has
+its rows read whole while the others wait (app/memory.py `_OneAtATime`).
+Before, two at the same moment could break each other: a read could come back
+with its columns empty ("Top view not available: TypeError: the JSON object
+must be str, bytes or bytearray, not NoneType"), or a save could fail with
+"cannot commit - no transaction is active". On the test server with a 3D build
+running and 9 threads reading and saving for 45 s: 48 such failures before,
+none after (about 10,800 requests); every output is the same as before, byte for
+byte.
+
 Read it yourself at any time:
 
 ```
