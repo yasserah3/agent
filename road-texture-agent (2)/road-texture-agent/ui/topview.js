@@ -73,80 +73,6 @@ uniform float driftAmt;
   mat.customProgramCacheKey = () => 'top-ground' + (look.mix ? '-mix' : '') + (look.drift ? '-drift' : '');
 }
 
-// a model's surfaces in flat colour, as a map: each surface's own colour picture, tone
-// and weathering, no lighting. Returns the textures the looks added (to dispose of)
-async function flatColours(gltf, renderer){
-  const aniso = renderer.capabilities.getMaxAnisotropy();
-  const looks = new Map(), meshes = [], extra = new Set();
-  gltf.scene.traverse(o => { if(o.isMesh) meshes.push(o); });
-  for(const o of meshes) for(const m of [].concat(o.material))
-    if(!looks.has(m)) looks.set(m, await groundLook(gltf.parser, m).catch(() => null));
-  for(const o of meshes){
-    o.material = [].concat(o.material).map(m => {
-      if(m.map) m.map.anisotropy = aniso;
-      const b = new THREE.MeshBasicMaterial({ map: m.map || null, color: m.color ? m.color.clone() : 0xffffff,
-        vertexColors: !!o.geometry.attributes.color, transparent: m.transparent, opacity: m.opacity,
-        alphaTest: m.alphaTest, side: THREE.DoubleSide });
-      const look = looks.get(m);
-      if(look){
-        groundPatch(b, look);
-        for(const t of [look.pattern, ...(look.mix ? [look.mix.map, look.mix.orh, look.mix.orhA] : [])]) extra.add(t);
-        if(look.mix) look.mix.map.anisotropy = aniso;
-      }
-      return b;
-    });
-    if(o.material.length === 1) o.material = o.material[0];
-  }
-  return extra;
-}
-
-function dropModel(gltf, extra){
-  gltf.scene.traverse(o => { if(o.geometry) o.geometry.dispose(); [].concat(o.material || []).forEach(m => { if(m.map) m.map.dispose(); m.dispose(); }); });
-  for(const t of extra) t.dispose();
-}
-
-// A big map's top view from its 1 km patches (app/patches.py): a picture of the whole
-// ground (its longest side px), each patch drawn into its own square of it as it comes.
-// Returns { canvas, draw(url, m) (m: the patch's square, [x0, z0, x1, z1] metres), dispose() }
-function topViewPainter(size_m, px = 4096){
-  const [wm, hm] = size_m;
-  const out = document.createElement('canvas');
-  const most = Math.min(px, 8192);
-  out.width = wm >= hm ? most : Math.max(1, Math.round(most * wm / hm));
-  out.height = wm >= hm ? Math.max(1, Math.round(most * hm / wm)) : most;
-  const k = out.width / wm;                                       // pixels a metre
-  const canvas = document.createElement('canvas');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
-  renderer.setPixelRatio(1);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NoToneMapping;
-  renderer.setClearColor(0x121214, 0);
-  return {
-    canvas: out,
-    async draw(url, m){
-      const x0 = Math.round((m[0] + wm / 2) * k), z0 = Math.round((m[1] + hm / 2) * k);
-      const x1 = Math.round((m[2] + wm / 2) * k), z1 = Math.round((m[3] + hm / 2) * k);
-      const w = Math.max(1, x1 - x0), h = Math.max(1, z1 - z0);
-      renderer.setSize(w, h, false);
-      const gltf = await new GLTFLoader().loadAsync(url);
-      const extra = await flatColours(gltf, renderer);
-      const scene = new THREE.Scene();
-      scene.add(gltf.scene);
-      // the patch's square exactly in frame, the pixels lined up with the whole picture's
-      const cx = x0 / k - wm / 2 + w / k / 2, cz = z0 / k - hm / 2 + h / k / 2;
-      const cam = new THREE.OrthographicCamera(-w / k / 2, w / k / 2, h / k / 2, -h / k / 2, 0.1, 5000);
-      cam.position.set(cx, 2000, cz);
-      cam.up.set(0, 0, -1);
-      cam.lookAt(cx, 0, cz);
-      renderer.render(scene, cam);
-      out.getContext('2d').drawImage(canvas, 0, 0, w, h, x0, z0, w, h);
-      dropModel(gltf, extra);
-    },
-    dispose(){ renderer.dispose(); renderer.forceContextLoss(); }
-  };
-}
-window.topViewPainter = topViewPainter;
-
 // url: the model (GLB); size_m: [width, depth] of the ground it covers; px: the
 // longest side of the picture. Returns a canvas of that picture.
 async function renderTopView(url, size_m, px = 4096){
@@ -164,7 +90,28 @@ async function renderTopView(url, size_m, px = 4096){
     renderer.setClearColor(0x121214, 1);
     const gltf = await new GLTFLoader().loadAsync(url);
     const scene = new THREE.Scene();
-    const extra = await flatColours(gltf, renderer);
+    const aniso = renderer.capabilities.getMaxAnisotropy();
+    // flat colour, as a map: each surface's own colour picture, tone and weathering, no lighting
+    const looks = new Map(), meshes = [], extra = new Set();
+    gltf.scene.traverse(o => { if(o.isMesh) meshes.push(o); });
+    for(const o of meshes) for(const m of [].concat(o.material))
+      if(!looks.has(m)) looks.set(m, await groundLook(gltf.parser, m).catch(() => null));
+    for(const o of meshes){
+      o.material = [].concat(o.material).map(m => {
+        if(m.map) m.map.anisotropy = aniso;
+        const b = new THREE.MeshBasicMaterial({ map: m.map || null, color: m.color ? m.color.clone() : 0xffffff,
+          vertexColors: !!o.geometry.attributes.color, transparent: m.transparent, opacity: m.opacity,
+          alphaTest: m.alphaTest, side: THREE.DoubleSide });
+        const look = looks.get(m);
+        if(look){
+          groundPatch(b, look);
+          for(const t of [look.pattern, ...(look.mix ? [look.mix.map, look.mix.orh, look.mix.orhA] : [])]) extra.add(t);
+          if(look.mix) look.mix.map.anisotropy = aniso;
+        }
+        return b;
+      });
+      if(o.material.length === 1) o.material = o.material[0];
+    }
     scene.add(gltf.scene);
     // looking straight down, the top of the picture north (-z), the ground exactly in frame
     const cam = new THREE.OrthographicCamera(-wm / 2, wm / 2, hm / 2, -hm / 2, 0.1, 5000);
@@ -175,7 +122,8 @@ async function renderTopView(url, size_m, px = 4096){
     const out = document.createElement('canvas');
     out.width = w; out.height = h;
     out.getContext('2d').drawImage(canvas, 0, 0);
-    dropModel(gltf, extra);
+    gltf.scene.traverse(o => { if(o.geometry) o.geometry.dispose(); [].concat(o.material || []).forEach(m => { if(m.map) m.map.dispose(); m.dispose(); }); });
+    for(const t of extra) t.dispose();
     return out;
   }finally{
     renderer.dispose();

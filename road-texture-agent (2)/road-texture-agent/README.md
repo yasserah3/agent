@@ -24,6 +24,14 @@ your `workspace` folder into it. A folder that mixes two versions is caught
 when the server starts: it names the files that are missing and says this,
 instead of stopping with an ImportError.
 
+**Changes made with ChatGPT (2026.10.12).** Highway centre-line groups, Update
+2D texture (saved values and an update history, then only the changed layers
+laid again; Update view does it first), the Saudi SHC 602 marking profile, Fit
+all decals to roads, and a minimum road width for markings with the crossings'
+aprons kept free of lane paint. Each is described in its own note next to this
+file: `UPDATE_NOTES.md`, `MARKING_LOGIC_FIX.txt`, `SAUDI_FIT_UPDATE.txt` and
+`PLACEMENT_FIX.txt`.
+
 ## What works today
 
 - **Uploads.** Every image is stored in `workspace/uploads` and recorded in memory.

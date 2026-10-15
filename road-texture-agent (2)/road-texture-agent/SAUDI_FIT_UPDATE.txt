@@ -1,0 +1,83 @@
+Road Texture Agent 2026.10.12-saudi-fit3
+Focused patch for 2026.10.12-marking-logic2
+
+INSTALL
+1. Stop the running Python server.
+2. Back up the matching code files before replacing them.
+3. Extract this ZIP into the road-texture-agent folder containing server.py.
+   Keep the app/ and ui/ folders in the ZIP; merge them with those folders.
+4. Restart the server and refresh the browser with Ctrl+F5.
+5. Check the console version: 2026.10.12-saudi-fit3.
+6. For an existing texture still loaded in the page, press Update 2D texture,
+   then Update view in 3D. After a full page refresh, reload the alpha and
+   generate once if that page no longer holds the previous generation.
+
+USE
+- Road markings: select Saudi Arabia - SHC 602, choose design speed and
+  posted/approach speed, then Saudi speed-based dimensions.
+- Old saved settings are retained. If an old setting still says As set below
+  or Learned, change it to Saudi speed-based dimensions to use the new tables.
+- Both highway groups use white centre paint in Saudi mode. Custom / previous
+  guide retains the original group 2 yellow centre style and previous settings.
+- Decals: Fit all decals to roads enables road-relative fitting on every layer.
+  Turn relative fit off disables it. Each layer also has its own fit checkbox.
+- Imported artwork scales uniformly from its configured width on a 6 m road,
+  capped to fit inside the kerbs. Relative fit aligns it with the road and
+  overrides random turning while enabled.
+- Arrows and STOP words fit the incoming lane. Stop/give-way/cycle lines fit
+  the approach. Yellow box shape follows the junction; relative fit adjusts
+  its internal hatch spacing. Each uses a separate local placement.
+- Saudi zebra stripe width and gap stay at 0.5 m; the number of stripes fills
+  the road. Its along-road depth adapts within our 2-6 m visual-fit range.
+  The 6 m upper cap is an application choice, not an SHC requirement.
+- Press Update 2D texture after changing controls, then Update view in 3D.
+  Settings/history retain fit choices and speed/profile changes.
+
+FIXED ERROR
+The supplied traceback was a ZeroDivisionError: a zero-width detected approach
+made relative stripe width + gap equal zero. Degenerate approaches are skipped,
+periods and raster dimensions are guarded, and effective per-placement values
+are saved with each placement so its image and physical footprint agree.
+
+IMPLEMENTED SAUDI REFERENCES (printed pages in the supplied English manual)
+4.1.3 / 4.2.1, Table 4-1, pp. 205-206: white centre paint; speed-based dashes.
+4.2.2, Table 4-2, pp. 206-207: white lane paint; speed-based dashes/widths.
+4.2.3, Table 4-3, pp. 207-208: white double no-passing line widths.
+4.2.5, Table 4-6, pp. 213-214: yellow ordinary road edges; posted-speed widths.
+4.4.1, p. 227: 0.5 m zebra stripe/gap; minimum 2 m crossing depth.
+4.4.3, p. 235: nominal 0.3 m stop line; 1 m before a marked crosswalk.
+4.4.4, pp. 235-236: give-way dash 0.5 m; gap 0.2 m.
+4.4.2, p. 228: STOP letters at least 2.5 m above 50 km/h.
+4.5.3, p. 257: roundabout crossings at least 6 m behind circulatory edge.
+4.4.7, p. 251: yellow Keep Clear box as an available marking type.
+Source references are stored in generated preset placements as rule_ref.
+
+SCOPE AND ASSUMPTIONS
+This applies the verified dimensions and colour rules above, not every rule in
+the 575-page manual. Existing lane counts, inferred junction priorities,
+highway continuity, edge-line junction clipping, roundabout lane trajectories,
+and automatic decal location choices retain the previous topology logic.
+No alpha map can supply signs, traffic priority, passing sight distance,
+pedestrian demand or permitted turning movements. The existing placement
+options remain visual assumptions that the user controls. A double centre
+line group is a manual choice, not an inferred engineering no-passing zone.
+Cyclist crossing and arrow-shape dimensions retained from the previous guide
+are not asserted to be Saudi-standard drawings. Custom guide dimensions and
+learned sizes remain available. Design speed tables overlap at 100 km/h and
+the no-passing width table omits exactly 80 km/h; the implementation chooses
+the higher-speed category at these boundaries. Lower-speed width ranges
+use 0.15 m where 0.10-0.15 m is allowed.
+
+VALIDATION
+- Exact zero-width crossing failure path, with relative fitting enabled.
+- Every preset fit on different road/lane widths and matching raster variants.
+- All imported decal placement modes; aspect ratio, rotation and fit off.
+- Saudi speed categories and colours.
+- User's real 2048 x 1536 alpha: 2,976 placements, 231 image variants, no crash.
+- Existing settings/history, marking-only/material-only partial updates,
+  resolution migration and 3D lane/decal/surface part replacement checks passed.
+- JavaScript syntax, Python compilation and marking/preset panel render checks.
+No complete live-browser verification was available.
+
+The ZIP contains code only. It does not replace workspace, training, materials,
+uploads, generated assets or the source PDF.

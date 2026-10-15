@@ -101,7 +101,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-dots1"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.15-merge1"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1787,7 +1787,7 @@ def generate(payload: dict):
         prog.stage("junction_marks", "where the junction markings go")
         _, line_ends, jplan = _junction_marks(rec["path"], float(payload.get("scale", 0.25)), lane_picks,
                                               streets["nomark"], marks, presets, _bridges_of(base, rec))
-    res = G.generate(rec["path"], libraries, {
+    gen_params = {
         "marks": marks,
         "line_ends": line_ends,
         "lane_picks": lane_picks,
@@ -1809,7 +1809,14 @@ def generate(payload: dict):
         "match_tone": _priming_tone() if payload.get("match_material") else None,
         "soft_edges": bool(payload.get("soft_edges", True)),
         "street_material": _street_material(payload),
-    }, dict(outs, streets=streets_path, lanes=lanes_path), map_path)
+    }
+    gen_params["_geometry_cache"] = str(ARTIFACTS / f"gen_{gid}_geometry.cache")
+    gen_params["_surface_cache"] = str(ARTIFACTS / f"gen_{gid}_surface.npz")
+    res = G.generate(rec["path"], libraries, gen_params, dict(outs, streets=streets_path, lanes=lanes_path), map_path)
+    _write_json(ARTIFACTS / f"gen_{gid}_inputs.json", {"libraries": libraries,
+                "params": {k: v for k, v in gen_params.items() if k not in ("street_material", "nomark")}})
+    from app import updates as UP
+    UP.initialise(ARTIFACTS, gid, payload.get("snapshot") or {"texture": payload, "model": {}})
     mem.add_artifact(f"{gid}_streets", "generated_streets", streets_path, {"mask": rec["id"]})
     # what a street's lanes need to be laid again on their own (the Lanes tool's Done), and the
     # choices the texture has now
@@ -2209,7 +2216,20 @@ def _lanes_repaint(payload, new_ends=_SAME):
         old_ends = (art["meta"] or {}).get("ends")
         ends = old_ends if new_ends is _SAME else new_ends
         out = G.repaint_lanes(art["path"], (art["meta"] or {}).get("picks") or [], picks, files, decals,
-                              old_area=old_area, new_area=area, old_ends=old_ends, new_ends=ends)
+                              old_area=old_area, new_area=area, old_ends=old_ends, new_ends=ends, new_cfg=payload.get("_marks_cfg"), new_align=payload.get("_align"))
+        if payload.get("_marks_cfg"):
+            with np.load(art["path"]) as z:
+                state = {k: z[k] for k in z.files}
+            state_meta = json.loads(str(state["meta"]))
+            state_meta["marks"] = payload["_marks_cfg"]
+            if "_align" in payload:
+                state_meta["align"] = payload["_align"]
+            state["meta"] = np.array(json.dumps(state_meta))
+            np.savez_compressed(art["path"], **state)
+            gm = mem.artifact(f"{gid}_map")
+            gmeta = dict(gm["meta"])
+            gmeta["dashes"] = dict(gmeta.get("dashes") or {}, marks=payload["_marks_cfg"], ends=ends)
+            mem.add_artifact(f"{gid}_map", gm["kind"], Path(gm["path"]), gmeta)
         meta = dict(art["meta"] or {}, picks=picks, area=area, ends=ends)
         mem.add_artifact(f"{gid}_lanes", "generation_lanes", Path(art["path"]), meta)
         if _ends_json(ends) != _ends_json(old_ends):
@@ -2223,6 +2243,8 @@ def _lanes_repaint(payload, new_ends=_SAME):
         if out["changed"] and st and Path(st["path"]).exists():
             # the Lanes tool's streets: each with the lanes it has now
             data = json.loads(Path(st["path"]).read_text())
+            if out.get("streets") is not None:
+                data["streets"] = out["streets"]
             now = {c["id"]: c for c in out["changed"]}
             for s_ in data.get("streets", []):
                 c = now.get(s_["id"])
@@ -2281,7 +2303,8 @@ def islands_texture(payload: dict):
     prog.stage("materials", "the island materials")
     tileset = _tileset_with_paths() or {"settings": {"tile_m": 4.0, "px": 1024, "variants": 3}, "tiles": {}}
     try:
-        used = _apply_materials(tileset, {"square": (payload.get("materials") or {}).get("square")},
+        used = _apply_materials(tileset, {"square": (payload.get("materials") or {}).get("square"),
+                                          "sidewalk": (payload.get("materials") or {}).get("sidewalk")},
                                 bool(payload.get("match_tone", True)))
         islands = _islands_for(gid, tileset, payload)
     except ValueError as e:
@@ -2417,6 +2440,171 @@ def _junction_marks(mask_path, mpp, picks, nomark, marks, presets, bridges=None,
             cfg[k] = overrides[k]
     pl, ends, P = RM.place(det, mpp, presets, found, chosen, cfg, bridges)
     return pl, ends, RM.summary(P)
+
+
+
+
+@app.get("/api/highway-groups")
+def highway_groups(mask: str):
+    if not mem.image(mask):
+        raise HTTPException(404, "unknown mask")
+    art = mem.artifact(f"highway_groups_{mask}")
+    return json.loads(Path(art["path"]).read_text()) if art else {"picks": [], "enabled": True}
+
+
+@app.post("/api/highway-groups")
+def save_highway_groups(payload: dict):
+    mask = payload.get("mask")
+    if not mem.image(mask):
+        raise HTTPException(404, "unknown mask")
+    checked = RM.lines_config({"centre_groups": payload.get("picks")})["centre_groups"]
+    data = {"picks": checked, "enabled": bool(payload.get("enabled", True))}
+    path = ARTIFACTS / f"highway_groups_{mask}.json"
+    _write_json(path, data)
+    mem.add_artifact(f"highway_groups_{mask}", "highway_groups", path, {})
+    return {"ok": True, **data}
+
+
+@app.get("/api/texture/log/{generation}/{kind}")
+def texture_log_file(generation: str, kind: str):
+    from app import updates as UP
+    if not mem.artifact(f"{generation}_map") or kind not in ("settings", "updates"):
+        raise HTTPException(404, "unknown texture log")
+    path = UP.paths(ARTIFACTS, generation)[kind == "updates"]
+    if not path.exists():
+        raise HTTPException(404, "Generate texture once to create its logs")
+    return FileResponse(path, filename=path.name)
+
+
+_texture_update_lock = threading.RLock()
+
+
+@app.get("/api/texture/updates")
+def texture_updates(generation: str, since: int = -1):
+    from app import updates as UP
+    if not mem.artifact(f"{generation}_map"):
+        raise HTTPException(404, "unknown generation")
+    return {"snapshot": UP.load(ARTIFACTS, generation), "updates": UP.since(ARTIFACTS, generation, since)}
+
+
+@app.post("/api/texture/update")
+def texture_update(payload: dict):
+    """Compare committed settings and update the affected texture layers only."""
+    from app import updates as UP
+    with _texture_update_lock:
+        gid = str(payload.get("generation", ""))
+        old = UP.load(ARTIFACTS, gid)
+        if old is None:
+            raise HTTPException(409, "Generate texture once to create its saved settings and update state")
+        now = payload.get("snapshot")
+        if not isinstance(now, dict) or not isinstance(now.get("texture"), dict) or not isinstance(now.get("model"), dict):
+            raise HTTPException(400, "missing texture and model settings")
+        changes = UP.differences(old["settings"], now)
+        if old.get("marking_engine") != UP.MARKING_ENGINE:
+            changes.append({"field": "marking_engine", "before": old.get("marking_engine"), "after": UP.MARKING_ENGINE})
+        if not changes:
+            return {"ok": True, "changed": [], "parts": [], "revision": old["revision"], "urls": {}}
+        fields = {c["field"] for c in changes}
+        texture, model = now["texture"], now["model"]
+        for part, material in model.get("materials", {}).items():
+            if material and material not in ("tiles", "same"):
+                entry = LIB.entry(material)
+                if part not in LIB.KINDS_FOR_PART or not entry or entry["kind"] not in LIB.KINDS_FOR_PART[part]:
+                    raise HTTPException(400, f"{material} is not a {part} material in the library")
+        gm = mem.artifact(f"{gid}_map")
+        if not gm:
+            raise HTTPException(404, "unknown generation")
+        rec = mem.image(gm["meta"]["mask"])
+        # A changed mask scale/resolution affects geometry itself, rather than appearance.
+        if fields & {"texture.scale", "texture.output_scale", "texture.mask"}:
+            replacement = generate(dict(texture, snapshot=now))
+            new_gid = replacement["id"]
+            layers = _layers_checked(now.get("layers") or [])
+            decals = (_lay_decals(new_gid, layers, model.get("decals", "separate"), int(texture.get("seed",7)),
+                                  LN.area_check(texture.get("mark_area")), whole=True,
+                                  overrides=_marks_overrides(texture.get("marks"))) if layers else None)
+            islands = islands_texture(dict(model,generation=new_gid)) if mem.artifact(f"{gid}_full") else None
+            event = UP.commit(ARTIFACTS, new_gid, now, changes, ["geometry"])
+            return {"ok": True, "changed": changes, "parts": ["geometry"], "revision": event["revision"],
+                    "generation_result": replacement, "urls": replacement["urls"], "decals": decals, "islands": islands}
+        surface_fields = {"texture.wear", "texture.grain", "texture.quality", "texture.seed", "texture.match_material",
+                          "texture.materials.street", "texture.match_tone", "texture.soft_edges"}
+        surface_changed = bool(fields & surface_fields)
+        lines_changed = bool(fields & {"texture.align_lines", "marking_engine"}) or any(f.startswith(("texture.marks.", "texture.lane_picks", "texture.mark_area")) for f in fields)
+        decal_changed = "marking_engine" in fields or any(f.startswith(("layers", "texture.mark_area", "texture.marks.")) for f in fields) or "model.decals" in fields
+        islands_changed = any(f.startswith(("model.island_slots", "model.materials.square", "model.materials.sidewalk")) for f in fields)
+        parts, urls = [], {}
+        tree = mem.tree("lines") or {}
+        dash = ((tree.get("children") or {}).get("yes", {}).get("children") or {}).get("no", {}).get("params", {})
+        dp, gp = dash.get("dash_px"), dash.get("gap_px")
+        cfg = RM.lines_config(texture.get("marks") or {}, dp/(dp+gp) if dp and gp else None, dash.get("width_ratio"))
+        lanes_art = mem.artifact(f"{gid}_lanes")
+        area = LN.area_check(texture.get("mark_area"))
+        picks = LN.picks_list(texture.get("lane_picks"))
+        layers = _layers_checked(now.get("layers") or [])
+        _, ends, _ = _junction_marks(rec["path"], float(gm["meta"]["scale"]), picks,
+                                    gm["meta"].get("nomark"), cfg, _preset_layers(layers), _bridges_of(None, rec))
+        if surface_changed:
+            inputs = ARTIFACTS / f"gen_{gid}_inputs.json"
+            if not inputs.exists():
+                raise HTTPException(409, "Generate texture once to save the source layers for surface updates")
+            saved = json.loads(inputs.read_text())
+            params = saved["params"]
+            params.update(marks=cfg, line_ends=ends, lane_picks=picks, mark_area=area,
+                          wear=float(texture.get("wear", 50))/100, grain=float(texture.get("grain", 50))/50,
+                          quality=int(texture.get("quality", 1)), seed=int(texture.get("seed", 7)),
+                          match_tone=_priming_tone() if texture.get("match_material") else None,
+                          soft_edges=bool(texture.get("soft_edges", True)),
+                          street_material=_street_material(texture), align_lines=bool(texture.get("align_lines")))
+            # Patch placement is unchanged for grain, wear strength and material selection changes.
+            params["_reuse_surface"] = not bool(fields & {"texture.quality", "texture.seed"})
+            params["_keep_markings"] = not lines_changed
+            nm = gm["meta"].get("nomark")
+            params["nomark"] = np.array(Image.open(nm).convert("L")) > 127 if nm and Path(nm).exists() else None
+            outs = {k: ARTIFACTS / f"gen_{gid}_{k}.png" for k in ("result", "material", "wear", "markings")}
+            G.generate(rec["path"], saved["libraries"], params,
+                       dict(outs, streets=ARTIFACTS/f"gen_{gid}_streets.json", lanes=Path(lanes_art["path"])))
+            base = ARTIFACTS / f"gen_{gid}_result_base.png"
+            if base.exists():
+                import shutil
+                shutil.copyfile(outs["result"], base)
+            gmeta = dict(gm["meta"], soft_edges=params["soft_edges"])
+            gmeta["dashes"] = dict(gmeta.get("dashes") or {}, marks=cfg, ends=ends)
+            mem.add_artifact(f"{gid}_map", gm["kind"], Path(gm["path"]), gmeta)
+            mem.add_artifact(f"{gid}_lanes", lanes_art["kind"], Path(lanes_art["path"]),
+                             dict(lanes_art["meta"], picks=picks, area=area, ends=ends))
+            saved["params"] = {k:v for k,v in params.items() if k not in ("street_material", "nomark", "_reuse_surface", "_keep_markings")}
+            _write_json(inputs, saved)
+            parts.append("surfaces")
+            urls.update({k: f"/api/artifact/{gid}_{k}?v={uuid.uuid4().hex[:6]}" for k in outs})
+            decal_changed = bool(layers or mem.artifact(f"{gid}_decals"))
+        elif lines_changed:
+            result = _lanes_repaint({"generation": gid, "lane_picks": picks, "mark_area": area, "_marks_cfg": cfg, "_align": bool(texture.get("align_lines"))}, ends)
+            urls.update(result["urls"])
+        if lines_changed:
+            parts.append("lanes")
+        if decal_changed:
+            result = _lay_decals(gid, layers, model.get("decals", "separate"), int(texture.get("seed", 7)), area,
+                                 whole=surface_changed, overrides=_marks_overrides(texture.get("marks")))
+            urls.update(result.get("urls") or {})
+            parts.append("decals")
+        else:
+            result = None
+        if islands_changed or (surface_changed and mem.artifact(f"{gid}_full")):
+            islands = islands_texture(dict(model, generation=gid))
+            urls.update(islands.get("urls") or {})
+        else:
+            islands = None
+        if islands_changed or any(f.startswith(("model.materials.kerb", "model.materials.sidewalk", "model.materials.square")) for f in fields):
+            parts.append("paving")
+        if "model.materials.street" in fields or "model.match_tone" in fields or "model.variation" in fields:
+            parts.append("surfaces")
+        # Other model settings are tracked as well; the existing geometry/placement cache decides their dependency.
+        if not parts:
+            parts.append("model_settings")
+        event = UP.commit(ARTIFACTS, gid, now, changes, parts)
+        return {"ok": True, "changed": changes, "parts": event["parts"], "revision": event["revision"],
+                "urls": urls, "decals": result, "islands": islands}
 
 
 @app.get("/api/marks/spec")
@@ -2719,7 +2907,7 @@ def export3d(payload: dict):
 # build again on its own (app/model3d.py: the paving with the island material slots,
 # the objects, the decals, the streets' lanes): a model whose only changes are in
 # those parts builds just them again and the view swaps just them, not the whole model
-PART_FIELDS = {"paving": ("island_slots",), "objects": ("scatter",), "decals": ("decals", "decal_version"),
+PART_FIELDS = {"surfaces": ("materials", "match_tone", "variation", "texture_revision"), "paving": ("island_slots",), "objects": ("scatter",), "decals": ("decals", "decal_version"),
                "lanes": ("lane_picks", "mark_area")}
 _models = {}                       # base key -> {"rebuild", "parts", "info", "tileset", "lock", "at"}
 _models_lock = threading.Lock()
@@ -2733,11 +2921,20 @@ def _model_keys(gid, payload, streets_sig, picks, area=None, ends=None):
     tiles = mem.latest_artifact("tileset")
     base = json.dumps([gid, {k: v for k, v in payload.items() if k not in skip}, streets_sig,
                        tiles["id"] if tiles else None], sort_keys=True, default=str)
+    from app import updates as UP
+    history = UP.since(ARTIFACTS, gid)
+    revision_of = lambda part: max((e["revision"] for e in history if part in e["parts"]), default=0)
+    gm = mem.artifact(f"{gid}_map")
+    marks_now = (gm["meta"].get("dashes") or {}).get("marks") if gm else None
     dc = ARTIFACTS / f"gen_{gid}_decals.json"
-    parts = {"paving": json.dumps(payload.get("island_slots"), sort_keys=True, default=str),
+    parts = {"surfaces": json.dumps([payload.get("materials", {}).get("street"), payload.get("match_tone"),
+                         payload.get("variation"), revision_of("surfaces")], sort_keys=True),
+             "paving": json.dumps([payload.get("island_slots"), {k:v for k,v in payload.get("materials", {}).items() if k != "street"},
+                                   payload.get("match_tone"), revision_of("paving")], sort_keys=True, default=str),
              "objects": json.dumps(payload.get("scatter"), sort_keys=True, default=str),
              "decals": json.dumps([payload.get("decals"), hashlib.sha1(dc.read_bytes()).hexdigest() if dc.exists() else None]),
-             "lanes": json.dumps([picks, area, ends], sort_keys=True)}
+             "lanes": json.dumps([picks, area, ends, marks_now, revision_of("lanes"),
+                                 revision_of("surfaces") if payload.get("markings") == "painted" else 0], sort_keys=True)}
     return base, parts
 
 
@@ -2760,8 +2957,13 @@ def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None
         return None
     changed = [n for n, k in part_keys.items() if e["parts"].get(n) != k]
     inputs = {}
+    gm = mem.artifact(f"{gid}_map")
+    marks_now = (gm["meta"].get("dashes") or {}).get("marks")
+    current_tiles = _tileset_with_paths()
+    used_materials = _apply_materials(current_tiles, payload.get("materials") or {}, bool(payload.get("match_tone", True)))
     for n in changed:
-        inputs[n] = ({"picks": picks, "area": area, "ends": ends} if n == "lanes" else _islands_for(gid, e["tileset"], payload) if n == "paving"
+        inputs[n] = ({"tileset": current_tiles, "variation": float(payload.get("variation", 100))/100} if n == "surfaces" else
+                     {"picks": picks, "area": area, "ends": ends, "marks": marks_now} if n == "lanes" else {"tileset": current_tiles, "islands": _islands_for(gid, current_tiles, payload)} if n == "paving"
                      else _scatter_for_export(payload.get("scatter")) if n == "objects" else _decals_for(gid, payload))
     view = payload.get("view") if isinstance(payload.get("view"), dict) else {}
     send = None
@@ -2781,6 +2983,7 @@ def _rebuild_parts(gid, key, part_keys, payload, picks, out, part_out, area=None
         e["parts"].update({n: part_keys[n] for n in changed})
         e["at"] = time.time()
     now, names = r
+    now["materials_used"] = used_materials
     return dict(e["info"], **{k: v for k, v in now.items() if not k.startswith("_") and k != "layouts"}, partial=names)
 
 
@@ -3074,7 +3277,8 @@ def _patch_keys(pl):
     sigs = PT.part_sigs(pl["grid"], pl["W"], pl["H"], kw["metres_per_pixel"], pl["base_sig"],
                         lane_picks=kw["dash_cfg"].get("lane_picks"), ends=kw["dash_cfg"].get("ends"),
                         mark_area=kw["dash_cfg"].get("mark_area"), decals=kw.get("decals"), scatter=kw.get("scatter"),
-                        islands=kw.get("islands"), streets=_patch_streets[key])
+                        islands=kw.get("islands"), streets=_patch_streets[key],
+                        centre_groups=(kw["dash_cfg"].get("marks") or {}).get("centre_groups"))
     folder = pl["folder"]
     with _patch_lock:
         for p in pl["patches"]:
@@ -3133,8 +3337,10 @@ def patches_start(payload: dict):
 
     def stamp(path):
         return [str(path), Path(path).stat().st_mtime if path and Path(path).exists() else None]
+    from app import updates as UP
+    surface_revision = max((e["revision"] for e in UP.since(ARTIFACTS,gid) if "surfaces" in e["parts"]), default=0)
     store_key = hashlib.sha1(json.dumps([gid, stamp(rec["path"]), stamp(inner["base_mask_path"]) if inner else None,
-                                         scale, mpp, stamp(kw["result_path"]), stamp(kw["markings_path"]),
+                                         scale, mpp, surface_revision,
                                          kw["variation"]], default=str).encode()).hexdigest()[:16]
     folder = PATCH_DIR / store_key
     folder.mkdir(parents=True, exist_ok=True)
@@ -3143,6 +3349,8 @@ def patches_start(payload: dict):
     # what every patch shares: the settings but the parts that reach only some patches
     shared_kw = dict(kw, decals=None, scatter=None, islands=None,
                      dash_cfg={k: v for k, v in kw["dash_cfg"].items() if k not in ("lane_picks", "ends", "mark_area")})
+    if shared_kw["dash_cfg"].get("marks"):
+        shared_kw["dash_cfg"]["marks"] = {k:v for k,v in shared_kw["dash_cfg"]["marks"].items() if k != "centre_groups"}
     base_sig = hashlib.sha1(pickle.dumps(shared_kw, protocol=pickle.HIGHEST_PROTOCOL)).hexdigest()[:16]
     road = np.array(Image.open(rec["path"]).convert("L")) > 127
     grid = [g for g in PT.grid(W, H, mpp, road=road) if g["road"] > 0]

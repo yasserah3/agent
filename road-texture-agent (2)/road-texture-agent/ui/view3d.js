@@ -896,11 +896,12 @@ let builtFrom = null;
 // paving, the objects, the decals, the lanes): a model of the same base takes a change
 // in those as the changed parts alone
 let worldBase = null, worldParts = null;
-const buildKey = () => JSON.stringify([window.lastGeneration && window.lastGeneration(), window.exportSettings ? window.exportSettings() : null]);
+const buildKey = () => JSON.stringify([window.lastGeneration && window.lastGeneration(), window.exportSettings ? window.exportSettings() : null, window.textureRevision ? window.textureRevision() : 0]);
 
 // keep: Update view, the same camera (and time of day and look); else the whole place framed
 async function generate(keep = false){
   if(busy) return;
+  if(keep && window.updateTexture2D && !await window.updateTexture2D(true)) return;
   const gid = window.lastGeneration && window.lastGeneration();
   if(!gid){ note('Generate the texture first (Generate tab), then come back and press Generate 3D scene.', true); return; }
   if(!renderer && !init()) return;
@@ -1428,7 +1429,7 @@ function dotsTick(){
 }
 
 // the parts of the model the server builds again on their own (app/model3d.py)
-const PART_NAMES = { paving: 'the paving (sidewalks, kerbs, blocks and islands)', objects: 'the objects and street lamps',
+const PART_NAMES = { surfaces: 'the road surfaces', paving: 'the paving (sidewalks, kerbs, blocks and islands)', objects: 'the objects and street lamps',
                      decals: 'the decals', lanes: 'the lanes' };
 
 // the changed parts (the server's partial model) in place of the view's own: every mesh

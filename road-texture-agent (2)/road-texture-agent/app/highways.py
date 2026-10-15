@@ -11,9 +11,9 @@ found here on its own, from the mask's whole skeleton:
    give, so a road measuring a few centimetres under it in places stays one);
 2. as a graph: the short stubs a side street leaves on it taken off, two
    branches meeting at a point joined into one;
-3. where three highways meet, the two most in line run on through (a T: the
-   third stops there); where four or more meet (a crossroads of highways),
-   every one stops there, short of the crossing;
+3. a highway keeps its identity through bends and ordinary width variation;
+   when genuine highways meet, every approach stops short of that junction;
+   narrower side-road stubs do not stop the main road's continuous lines;
 4. each line put midway between its kerbs, measured across it every pixel; where
    a side street opens one kerb (or a driveway, a bus bay), the middle and the
    width carry on straight from either side.
@@ -45,6 +45,12 @@ def _graph(mask):
     for dy, dx in N8:
         ys, xs = coords[:, 0] + dy, coords[:, 1] + dx
         ok = (ys >= 0) & (ys < H) & (xs >= 0) & (xs < W)
+        if dy and dx:
+            # A diagonal beside an orthogonal step is a shortcut, not another arm.
+            # Keeping both creates tiny triangles and false junctions on bends.
+            diagonal = np.nonzero(ok)[0]
+            shortcut = mask[coords[diagonal, 0], xs[diagonal]] | mask[ys[diagonal], coords[diagonal, 1]]
+            ok[diagonal[shortcut]] = False
         j = np.full(len(coords), -1, np.int64)
         j[ok] = idx[ys[ok], xs[ok]]
         for i in np.nonzero(j >= 0)[0]:
@@ -230,7 +236,9 @@ def chains(det, mpp, hw, road=None):
     # strong where it is, kept a pixel under it where it joins such a stretch
     T = (float(hw["min_m"]) - LN.TOL_M) / (2 * px) + 0.5
     strong = sk & (dt >= T)
-    weak = sk & (dt >= T - 1.0)
+    # A highway remains one road through ordinary width variation. Classify
+    # whole branches below; a widened junction alone is not a highway seed.
+    weak = sk & (dt >= max(1.5, T * 0.72))
     lab, n = ndi.label(weak, structure=np.ones((3, 3)))
     if not n:
         return []
@@ -241,6 +249,61 @@ def chains(det, mpp, hw, road=None):
     coords, nbr, deg = _graph(core)
     if not len(coords):
         return []
+    nodes, branches = _branches(coords, nbr, deg)
+    active, eligible = set(), set()
+    incident = {}
+    for bi, br in enumerate(branches):
+        values = dt[coords[br['px'], 0], coords[br['px'], 1]]
+        if not len(values):
+            continue
+        trim = max(1, int(len(values) * 0.15))
+        middle = values[trim:-trim] if len(values) > 2 * trim + 2 else values
+        typical = float(np.median(middle))
+        if typical >= T * 0.72:
+            eligible.add(bi)
+        # A real stretch of road, not a junction's enlarged middle.
+        if typical >= T - 1.0 and len(values) * px >= max(MIN_M, 4 * typical * px):
+            active.add(bi)
+        for side in ('a', 'b'):
+            if br[side] is not None:
+                incident.setdefault(br[side], []).append((bi, side))
+    # Carry a classification through a narrower part of the same corridor,
+    # choosing its continuation rather than promoting intersecting side roads.
+    while True:
+        added = set()
+        for node, inc in incident.items():
+            candidates = [(bi, side) for bi, side in inc if bi in eligible]
+            for bi, side in candidates:
+                if bi not in active:
+                    continue
+                direction = _direction(coords, branches[bi]['px'], side == 'b', max(6, T * 2))
+                options = []
+                for other, end in candidates:
+                    if other == bi or other in active:
+                        continue
+                    vector = _direction(coords, branches[other]['px'], end == 'b', max(6, T * 2))
+                    angle = float(direction @ vector)
+                    if angle <= -math.cos(math.radians(IN_LINE)) or len(candidates) == 2:
+                        options.append((angle, other))
+                if options:
+                    added.add(min(options)[1])
+        added -= active
+        if not added:
+            break
+        active |= added
+    if not active:
+        return []
+    retained = set()
+    for bi in active:
+        retained.update(branches[bi]['px'])
+        for side in ('a', 'b'):
+            if branches[bi][side] is not None:
+                retained.update(nodes[branches[bi][side]])
+    clean = np.zeros_like(core)
+    pixels = coords[list(retained)]
+    clean[pixels[:, 0], pixels[:, 1]] = True
+    core = clean
+    coords, nbr, deg = _graph(core)
     # stubs: a loose branch shorter than the road is wide (a side street's start, a bump)
     for _ in range(4):
         nodes, branches = _branches(coords, nbr, deg)
@@ -288,9 +351,17 @@ def chains(det, mpp, hw, road=None):
                         best = (c, i, j)
             if best:
                 _, i, j = best
-                links[inc[i]], links[inc[j]] = inc[j], inc[i]
-                stops.add(inc[3 - i - j])
-                continue
+                other, _ = inc[3 - i - j]
+                branch = branches[other]['px']
+                widths = dt[coords[branch, 0], coords[branch, 1]]
+                trim = max(1, int(len(widths) * .15))
+                middle = widths[trim:-trim] if len(widths) > 2 * trim + 2 else widths
+                # A genuine third highway makes a highway-to-highway junction.
+                # Only a narrower side-road stub may leave the main lines unbroken.
+                if float(np.median(middle)) < T - 1.0 or len(branch) * px < MIN_M:
+                    links[inc[i]], links[inc[j]] = inc[j], inc[i]
+                    stops.add(inc[3 - i - j])
+                    continue
         stops.update(inc)
     # chains: branches strung together through their links
     used = set()
@@ -341,5 +412,7 @@ def chains(det, mpp, hw, road=None):
         arc_s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(Qs, axis=0).T))])
         ws = np.interp(arc_s, arc_q, wid)
         out.append({"pts": [[round(float(x), 2), round(float(y), 2)] for x, y in Qs],
-                    "w": [round(float(v), 2) for v in ws], "length_m": round(float(arc_s[-1]) * px, 1)})
+                    "w": [round(float(v), 2) for v in ws], "length_m": round(float(arc_s[-1]) * px, 1),
+                    "stop_start": (seq[0][0], seq[0][2]) in stops,
+                    "stop_end": (seq[-1][0], seq[-1][3]) in stops})
     return out

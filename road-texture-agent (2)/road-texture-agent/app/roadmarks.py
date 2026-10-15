@@ -49,6 +49,8 @@ SOURCES = {"guide": "the guide (UTTIPEC, Delhi 2009)", "irc": "IRC 35, the code 
 # (the centre line between the two directions, the lines between lanes going the
 # same way, the edge lines of wide roads, and where lines end before a junction)
 LINE_FIELDS = [
+    {"key": "marking.min_m", "group": "eligibility", "label": "Minimum road width for markings", "guide": 6.0,
+     "min": 6.0, "max": 60.0, "src": "ours", "note": "Shared cutoff for lane lines and procedural junction decals in 2D and 3D; distinct from highway classification."},
     {"key": "centre.dash_m", "group": "centre", "label": "Dash", "guide": 3.0, "min": 0.3, "max": 30.0, "link": "len",
      "src": "guide", "note": "3 m dashes with 4.5 m gaps on two-lane roads"},
     {"key": "centre.gap_m", "group": "centre", "label": "Gap", "guide": 4.5, "min": 0.3, "max": 40.0, "link": "len",
@@ -78,14 +80,20 @@ LINE_FIELDS = [
                                          "gives a highway its own"},
 ]
 LINE_OPTS = [
+    {"key": "standard", "label": "Marking standard", "default": "saudi",
+     "choices": [["saudi", "Saudi Arabia — SHC 602"], ["custom", "Custom / previous guide"]]},
+    {"key": "speed", "label": "Design speed (km/h)", "default": "60",
+     "choices": [[str(s), str(s)] for s in (30, 50, 60, 80, 100, 120)]},
+    {"key": "posted_speed", "label": "Posted / approach speed (km/h)", "default": "60",
+     "choices": [[str(s), str(s)] for s in (30, 50, 60, 80, 100, 120)]},
     {"key": "rules", "label": "Lines", "default": "guide",
      "choices": [["guide", "By the road marking guide"], ["simple", "Every line dashed alike (as before)"]]},
     {"key": "drive", "label": "Traffic drives on the", "default": "right",
      "choices": [["right", "Right"], ["left", "Left"]]},
     {"key": "colours", "label": "Colours", "default": "guide",
-     "choices": [["guide", "Guide colours (yellow centre line)"], ["white", "All white"]]},
-    {"key": "sizes", "label": "Dash and line sizes", "default": "set",
-     "choices": [["set", "As set below"], ["learned", "Learned from your training images"]]},
+     "choices": [["guide", "Standard colours"], ["white", "All white"]]},
+    {"key": "sizes", "label": "Dash and line sizes", "default": "saudi",
+     "choices": [["saudi", "Saudi speed-based dimensions"], ["set", "As set below (custom dimensions)"], ["learned", "Learned from your training images"]]},
     {"key": "highways", "label": "Highways", "default": "on",
      "choices": [["on", "Lines run on past side streets and T-junctions"],
                  ["off", "None: every junction stops the lines (as before)"]]},
@@ -118,7 +126,8 @@ PRESETS = {
             {"key": "rb_back_m", "label": "At roundabouts: back from the give way line", "guide": 5.0, "min": 0.0,
              "max": 30.0, "src": "ours", "note": "one car length (IRC 65 practice)"},
         ],
-        "opts": [{"key": "junctions", "label": "At junctions", "default": True},
+        "opts": [{"key": "relative_fit", "label": "Scale and rotate to each road and junction", "default": False},
+                 {"key": "junctions", "label": "At junctions", "default": True},
                  {"key": "roundabouts", "label": "At roundabout entries", "default": True}],
     },
     "stop": {
@@ -209,9 +218,9 @@ PRESETS = {
                  {"key": "roundabouts", "label": "At roundabout entries", "default": True}],
     },
     "box": {
-        "label": "Yellow box (not in the guide)", "short": "Yellow box",
-        "note": "Criss-cross yellow lines inside big open junctions: do not stop here. Not in the guide; common "
-                "practice.",
+        "label": "Yellow box / Keep clear", "short": "Yellow box",
+        "note": "Yellow box: SHC 602 section 4.4.7. Automatic big-junction selection is a visual assumption; "
+                "the alpha map cannot identify traffic control or queues.",
         "fields": [
             {"key": "line_m", "label": "Line width", "guide": 0.15, "min": 0.03, "max": 0.6, "link": "w",
              "src": "ours"},
@@ -227,6 +236,12 @@ PRESETS = {
         "opts": [{"key": "all", "label": "At every junction, not only big ones", "default": False}],
     },
 }
+# Every procedural decal has the same optional fit control. Existing saved
+# layers stay off unless their own checkbox is enabled.
+for _name, _preset in PRESETS.items():
+    if not any(o["key"] == "relative_fit" for o in _preset["opts"]):
+        _preset["opts"].insert(0, {"key": "relative_fit", "label": "Fit scale and rotation to each road / lane", "default": False})
+
 PRESET_ORDER = ["zebra", "stop", "giveway", "arrows", "stopword", "cycle", "box"]
 # "The junction set": what Add the junction markings adds
 JUNCTION_SET = ["zebra", "stop", "giveway", "arrows"]
@@ -235,7 +250,8 @@ JUNCTION_SET = ["zebra", "stop", "giveway", "arrows"]
 def spec():
     """Everything the page needs to show the options: the lines' and the presets' fields."""
     return {"lines": {"fields": LINE_FIELDS, "opts": LINE_OPTS}, "presets": PRESETS, "order": PRESET_ORDER,
-            "junction_set": JUNCTION_SET, "sources": SOURCES}
+            "junction_set": JUNCTION_SET, "sources": SOURCES,
+            "saudi_references": __import__("app.saudi_rules", fromlist=["REFERENCES"]).REFERENCES}
 
 
 # ------------------------------------------------------------------ guide values, ranges and the chain
@@ -330,7 +346,12 @@ def lines_config(raw, learned_share=None, learned_ratio=None):
     o = _opts(LINE_OPTS, raw)
     v = _values(LINE_FIELDS, raw.get("values"))
     learned = o["sizes"] == "learned"
-    yellow = o["colours"] == "guide" and o["rules"] == "guide"
+    saudi = o["standard"] == "saudi"
+    if saudi and o["sizes"] == "saudi":
+        from app.saudi_rules import line_values
+        v.update(line_values(o["speed"], o["posted_speed"]))
+        learned = False
+    yellow = not saudi and o["colours"] == "guide" and o["rules"] == "guide"
 
     def dashed(dash, gap, width, yel=False):
         cycle = dash + gap
@@ -339,18 +360,21 @@ def lines_config(raw, learned_share=None, learned_ratio=None):
     kinds = {
         "dash": dashed(v["lane.dash_m"], v["lane.gap_m"], v["lane.width_m"]),
         "cdash": dashed(v["centre.dash_m"], v["centre.gap_m"], v["centre.width_m"], yellow),
-        "solid": {"width": None if learned and learned_ratio else v["edge.width_m"], "yellow": False},
+        "solid": {"width": None if learned and learned_ratio else v["edge.width_m"], "yellow": saudi and o["colours"] == "guide"},
         "csolid": {"width": None if learned and learned_ratio else v["centre.width_m"], "yellow": yellow},
         "cdouble": {"width": None if learned and learned_ratio else v["double.width_m"], "yellow": yellow,
                     "double_gap": v["double.gap_m"]},
     }
+    groups = [{"pt": [float(p["pt"][0]), float(p["pt"][1])], "group": int(p["group"])}
+              for p in raw.get("centre_groups", []) if isinstance(p, dict) and p.get("group") in (1, 2)
+              and isinstance(p.get("pt"), list) and len(p["pt"]) == 2]
     highway = ({"min_m": float(v["highway.min_m"]), "lanes": int(v["highway.lanes"])}
                if o["highways"] == "on" else None)
-    return {"rules": o["rules"], "drive": o["drive"], "colours": o["colours"], "learned": learned, "highway": highway,
+    return {"min_marking_m": v["marking.min_m"], "standard": o["standard"], "speed": float(o["speed"]), "posted_speed": float(o["posted_speed"]), "rules": o["rules"], "drive": o["drive"], "colours": o["colours"], "learned": learned, "highway": highway,
             "width_ratio": learned_ratio if learned else None,
             "edge_inset": v["edge.inset_m"] + v["edge.width_m"] / 2 if o["rules"] == "guide" else None,
             "setback_m": v["setback_m"], "kinds": kinds, "values": v, "opts": o, "fixed_width_m": v["lane.width_m"],
-            "exact": not learned}
+            "exact": not learned, "centre_groups": groups, "group_mpp": float(raw.get("group_mpp", 0.25))}
 
 
 def legacy_config(cycle_m, dash_share, width_m, width_ratio, setback_m):
@@ -418,7 +442,7 @@ def _raster(w_m, h_m, polys, rgb):
     """
     ppm = min(PX_PER_M, MAX_PX / max(w_m, h_m, 1e-6))
     W, H = max(2, int(round(w_m * ppm))), max(2, int(round(h_m * ppm)))
-    sx, sy = W * SS / w_m, H * SS / h_m
+    sx, sy = W * SS / max(w_m, 0.001), H * SS / max(h_m, 0.001)
     im = Image.new("L", (W * SS, H * SS), 0)
     d = ImageDraw.Draw(im)
     for poly in polys:
@@ -443,14 +467,14 @@ def _rect(x0, y0, x1, y1):
 
 def zebra_size(road_m, v):
     """How many stripes fit across a road road_m wide, and the crossing's width across: (n, width)."""
-    period = v["stripe_m"] + v["gap_m"]
+    period = max(0.001, float(v["stripe_m"]) + float(v["gap_m"]))
     usable = max(0.0, road_m - 2 * KERB_MARGIN_M)
     n = max(1, int((usable + v["gap_m"]) // period))
     return n, n * v["stripe_m"] + (n - 1) * v["gap_m"]
 
 
 def giveway_size(span_m, v):
-    period = v["seg_m"] + v["gap_m"]
+    period = max(0.001, float(v["seg_m"]) + float(v["gap_m"]))
     n = max(1, int((max(0.0, span_m) + v["gap_m"]) // period))
     return n, n * v["seg_m"] + (n - 1) * v["gap_m"]
 
@@ -543,7 +567,7 @@ def _box_picture(w, h, v, rgb):
     b, lw, sp = v["border_m"], v["line_m"], v["spacing_m"]
     outer, inner = box(0, 0, w, h), box(b, b, w - b, h - b)
     parts = [outer.difference(inner)]
-    step = sp * math.sqrt(2)                 # along x, for diagonals sp apart
+    step = max(0.001, sp) * math.sqrt(2)                 # along x, for diagonals sp apart
     k = -h
     while k < w + h:
         for (x0, y0, x1, y1) in ((k, 0, k + h, h), (k + h, 0, k, h)):
@@ -605,7 +629,7 @@ def pictures(placements, layers, colours):
         if p.get("rm") and p["decal"] not in out:
             L = layers[p["layer"]]
             if L.get("preset"):
-                out[p["decal"]] = picture(L, p["rm"], colours)
+                out[p["decal"]] = picture(dict(L, values=p.get("rm_values", L["values"])), p["rm"], colours)
     return out
 
 
@@ -764,25 +788,44 @@ def _through_arms(j, edges, cidx, px):
     """
     if cidx is None or not cidx.ok:
         return []
-    d, i = cidx.tree.query([j["cx"], j["cy"]])
-    if d > max(2.0, 0.5 * cidx.W[i]) / px:
-        return []
-    out = []
-    cos_in = math.cos(math.radians(THROUGH_IN_LINE))
-    for ai, e in enumerate(edges):
-        if e is None:
+    # An arm belongs to a through highway only when an opposing arm belongs
+    # to the SAME continuous chain. The junction centroid can lie in a side
+    # street, and neighbouring points in the flattened index can belong to
+    # different chains: neither is a reliable direction test.
+    matches = []
+    through = set()
+    cos_in = math.cos(math.radians(45.0))
+    for ai, edge in enumerate(edges):
+        if edge is None:
             continue
-        x, y, ox, oy, _ = e
-        d, k = cidx.tree.query([x, y])
-        if d > max(2.0, 0.35 * cidx.W[k]) / px:
+        x, y, ox, oy, _ = edge
+        distance, k = cidx.tree.query([x, y])
+        if distance > max(2.0 / px, 0.45 * cidx.W[k] / px):
             continue
-        # the centreline's way there
-        k0, k1 = max(0, k - 3), min(len(cidx.P) - 1, k + 3)
-        t = cidx.P[k1] - cidx.P[k0]
-        n = float(np.hypot(*t))
-        if n > 0 and abs(float(t @ np.array([ox, oy]))) / n >= cos_in:
-            out.append(ai)
-    return out
+        direction = float(cidx.tangents[k] @ np.array([ox, oy]))
+        if abs(direction) >= cos_in:
+            chain = int(cidx.chain_ids[k])
+            matches.append((ai, chain, direction, cidx.P[k]))
+            # A continuous highway can be missed as an opposite arm by a noisy
+            # junction skeleton. Require the chain to run INTO the junction
+            # by a whole carriageway width, not merely end beside its mouth.
+            inward = cidx.chain_arc[k] if direction > 0 else cidx.chain_lengths[chain] - cidx.chain_arc[k]
+            natural = cidx.chains[chain]
+            end = natural['pts'][0] if direction > 0 else natural['pts'][-1]
+            stops = natural.get('stop_start', True) if direction > 0 else natural.get('stop_end', True)
+            H, W = j.get('_shape', (0, 0))
+            # A road exiting the image continues outside it; the cropped edge
+            # must not turn a nearby side-road opening into a stopping junction.
+            exits_image = (not stops and H and W and
+                           min(end[0], end[1], W - 1 - end[0], H - 1 - end[1]) * px < cidx.W[k])
+            if inward * px > max(8.0, cidx.W[k]) or exits_image:
+                through.add(ai)
+    for i, (a, chain_a, way_a, point_a) in enumerate(matches):
+        for b, chain_b, way_b, point_b in matches[i + 1:]:
+            if chain_a == chain_b and way_a * way_b < 0 and np.linalg.norm(point_a - point_b) * px > 1.0:
+                through.update((a, b))
+    return sorted(through)
+
 
 
 def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None, big_m2=BIG_M2, open_x=OPEN_X,
@@ -810,7 +853,11 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
     from shapely.geometry import Polygon
     px = max(mpp, 1e-6)
     road_mask = det["road"]
-    junctions = [j for j in det["junctions"] if j["type"] != "interchange (flagged)"]
+    # Partial junctions cut by the image boundary have unknown approaches;
+    # the clipped skeleton must not invent crossings across the remaining road.
+    H, W = road_mask.shape
+    junctions = [j for j in det["junctions"] if j["type"] != "interchange (flagged)"
+                 and min(j["cx"], j["cy"], W - 1 - j["cx"], H - 1 - j["cy"]) > max(2.0, j["hw"])]
     rbs = roundabouts(det, mpp)
     # which street each segment is, and its lanes
     lays = {s: LN.layout(w, chosen.get(s), rules=rules, edge_inset=edge_inset, hw=hw) for s, (_, w) in found.items()}
@@ -855,7 +902,7 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             if math.hypot(j["cx"] - r["cx"], j["cy"] - r["cy"]) <= r["R"] + 2.0 / px:
                 rb = ri
         roles = ["equal"] * len(j["arms"])
-        through = _through_arms(j, edges, cidx, px) if rb is None else []
+        through = _through_arms(dict(j, _shape=road_mask.shape), edges, cidx, px) if rb is None else []
         if rb is not None:
             r = rbs[rb]
             ru = _unit(j["cx"] - r["cx"], j["cy"] - r["cy"])
@@ -920,6 +967,8 @@ def plan(det, mpp, found, chosen, rules="simple", drive="right", edge_inset=None
             inf = info[ai]
             fr = inf["frame"]
             road_m = 2 * (fr[4] if fr else half) * px
+            if not math.isfinite(road_m) or road_m <= 2 * KERB_MARGIN_M:
+                continue  # a clipped / collapsed approach cannot carry a decal
             st, lay, canon = inf["street"], inf["lay"], inf["canon"]
             if lay is None:
                 lay = LN.layout(road_m, None, rules=rules, edge_inset=edge_inset, hw=hw)
@@ -1037,10 +1086,15 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     markings ask the lines to stop ([{"x", "y", "ox", "oy", "m", "reach_m"}],
     app/lanes.py's end_setbacks).
     """
-    from app import decals as DC
+    from app import decals as DC, lanes as LN
     px = max(mpp, 1e-6)
     road = det["road"]
     H, W = road.shape
+    saudi = cfg.get("standard") == "saudi"
+    speed = cfg.get("posted_speed", cfg.get("speed", 60))
+    if saudi:
+        from app.saudi_rules import preset_values
+        layers = [(li, dict(L, values=preset_values(L["preset"], L["values"], speed))) for li, L in layers]
     colours = cfg.get("colours", "white")
     drive = cfg.get("drive", "right")
     box0 = next((L["values"] for _, L in layers if L["preset"] == "box"), {})
@@ -1057,13 +1111,21 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     preset_of = {li: L["preset"] for li, L in layers}
 
     def lay(li, L, variant, x, y, ux, uy, w, h, at):
+        if not all(math.isfinite(float(t)) for t in (x, y, ux, uy, w, h)) or min(w, h) < .001:
+            return None
         xi, yi = int(round(x)), int(round(y))
         if not (0 <= xi < W and 0 <= yi < H) or not road[yi, xi] or DC._in_bridge(x, y, bridges):
             return None
         n = math.hypot(ux, uy) or 1.0
+        if L["opts"].get("relative_fit") and not DC._fits(x, y, ux / n, uy / n, w / px, h / px, road):
+            return None
         p = {"layer": li, "decal": variant_id(li, L, variant, colours), "rm": variant,
              "x": round(float(x), 2), "y": round(float(y), 2), "ux": round(ux / n, 5), "uy": round(uy / n, 5),
-             "w_m": round(float(w), 3), "h_m": round(float(h), 3), "at": at}
+             "w_m": round(float(w), 3), "h_m": round(float(h), 3), "at": at,
+             "rm_values": dict(L["values"])}
+        if saudi:
+            from app.saudi_rules import REFERENCES
+            p["rule_ref"] = REFERENCES.get(L["preset"], "Custom decal geometry; no verified SHC dimension")
         c = DC._corners(p, mpp, 0.98)
         ci, cj = int(p["x"] // cell), int(p["y"] // cell)
         for lk, g in mine.items():
@@ -1119,6 +1181,8 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
     for ak, a in enumerate(P["approaches"]):
         if skip[ak]:
             continue                                           # a roundabout's ring, a highway or main road running on
+        if not LN.marking_eligible(a["road_m"], cfg) or a["road_m"] <= 2 * KERB_MARGIN_M:
+            continue
         reach = rooms[ak]
         rb = a["role"] == "entry"
         where = "roundabouts" if rb else "junctions"
@@ -1127,6 +1191,34 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
         far = 0.0                                              # the furthest edge of anything across the road
         line_far = None
         has_in = bool(a["lanes"])
+
+        # Fit each layer independently, without mutating its saved settings.
+        # Saudi paint widths and gaps remain in metres; only the crossing depth
+        # and non-standard artwork scale with the local road / lane width.
+        def fitted(L, lane_m=None):
+            if not L["opts"].get("relative_fit"):
+                return L
+            v = dict(L["values"])
+            factor = max(.05, min(4.0, (lane_m / 3.0 if lane_m is not None else a["road_m"] / 6.0)))
+            keys = {"zebra": ("length_m",) if saudi else ("stripe_m", "gap_m", "length_m"),
+                    "stop": ("width_m", "gap_m"), "giveway": ("width_m", "spacing_m", "seg_m", "gap_m"),
+                    "cycle": ("spacing_m", "width_m"), "arrows": ("length_m", "width_m"),
+                    "stopword": ("height_m", "width_m")}.get(L["preset"], ())
+            for key in keys:
+                v[key] = max(.001, v[key] * factor)
+            if saudi:
+                if L["preset"] == "zebra":
+                    v["length_m"] = max(2.0, min(6.0, v["length_m"]))
+                elif L["preset"] == "stop":
+                    v["width_m"] = max(.2, min(.6, v["width_m"]))
+                elif L["preset"] == "giveway":
+                    v.update(seg_m=.5, gap_m=.2)
+                elif L["preset"] == "stopword" and speed > 50:
+                    v["height_m"] = max(2.5, v["height_m"])
+            return dict(L, values=v)
+
+        zs = [(li, fitted(L)) for li, L in zs]
+        cs = [(li, fitted(L)) for li, L in cs]
 
         def across(items, d0, depth, kind):
             """Markings kerb to kerb, d0 out from the edge and depth deep: whether any was laid."""
@@ -1157,6 +1249,7 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                 return None
             depth_out = None
             for li, L in items:
+                L = fitted(L)
                 v = L["values"]
                 if kind == "stop":
                     depth = v["width_m"] * 2 + v["gap_m"] if L["opts"]["double"] else v["width_m"]
@@ -1181,6 +1274,8 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                     line_far = cursor + dep
                     far = max(far, line_far)
             start = (line_far or cursor) + (zs[0][1]["values"]["rb_back_m"] if zs else 0.0)
+            if saudi and zs:
+                start = max(6.0, start)  # edge of circulatory roadway, SHC 602 4.5.3
             if zs:
                 ln = zs[0][1]["values"]["length_m"]
                 if start + ln <= reach and across(zs, start, ln, "zebra"):
@@ -1223,14 +1318,18 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                         for li, L in words:
                             if L["opts"]["minor_only"] and not minor:
                                 continue
-                            v = L["values"]
-                            if line_far + v["dist_m"] + v["height_m"] > reach:
-                                continue
                             for (l0, l1) in a["lanes"]:
+                                fitted_word = fitted(L, abs(l1 - l0))
+                                v = dict(fitted_word["values"])
+                                if L["opts"].get("relative_fit"):
+                                    v["width_m"] = min(v["width_m"], max(.001, abs(l1 - l0) - 2 * KERB_MARGIN_M))
+                                    fitted_word = dict(fitted_word, values=v)
+                                if line_far + v["dist_m"] + v["height_m"] > reach:
+                                    continue
                                 if abs(l1 - l0) < v["width_m"] * 0.8:
                                     continue
                                 x, y, ux, uy = spot(a, line_far + v["dist_m"] + v["height_m"] / 2, (l0 + l1) / 2)
-                                lay(li, L, "STOP", x, y, ux, uy, v["width_m"], v["height_m"], "edge")
+                                lay(li, fitted_word, "STOP", x, y, ux, uy, v["width_m"], v["height_m"], "edge")
         # arrows in each lane coming in
         if has_in and a["moves"] is not None:
             base = line_far if line_far is not None else (far or EDGE_GAP_M)
@@ -1248,7 +1347,15 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                 for (l0, l1), kind in zip(a["lanes"], kinds):
                     if not kind:
                         continue
+                    fitted_arrow = fitted(L, abs(l1 - l0))
+                    v = dict(fitted_arrow["values"])
                     w, h = arrow_size(kind, v)
+                    if L["opts"].get("relative_fit") and w > abs(l1 - l0) - 2 * KERB_MARGIN_M:
+                        shrink = max(.001, abs(l1 - l0) - 2 * KERB_MARGIN_M) / w
+                        v["width_m"] *= shrink
+                        v["length_m"] *= shrink
+                        fitted_arrow = dict(fitted_arrow, values=v)
+                        w, h = arrow_size(kind, v)
                     if w > abs(l1 - l0) * 1.15:
                         continue                                  # the lane is too narrow for it
                     for k in range(int(v["count"])):
@@ -1256,10 +1363,19 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
                         if tip + h > room:
                             break
                         x, y, ux, uy = spot(a, tip + h / 2, (l0 + l1) / 2)
-                        lay(li, L, kind, x, y, ux, uy, w, h, "edge")
+                        lay(li, fitted_arrow, kind, x, y, ux, uy, w, h, "edge")
         if far > 0:
             # from the middle and way the markings were laid by (the kerbs' frame), else the edge
             ex, ey, eox, eoy = a["frame"][:4] if a.get("frame") else (a["x"], a["y"], a["ox"], a["oy"])
+            # Reserve the whole approach apron through the crossing and stop
+            # line, even if a highway's centreline continues through this spot.
+            # Geometry (including the median) remains untouched.
+            depth = far + .4
+            ends.append({"x": ex + eox * far / 2 / px, "y": ey + eoy * far / 2 / px,
+                         "reserve": {"cx": ex + eox * far / 2 / px,
+                                      "cy": ey + eoy * far / 2 / px,
+                                      "w": a["road_m"] / px, "h": depth / px,
+                                      "angle": math.degrees(math.atan2(eox, -eoy))}})
             ends.append({"x": round(ex, 2), "y": round(ey, 2), "ox": round(eox, 5), "oy": round(eoy, 5),
                          "m": round(far, 3), "reach_m": round(a["reach_m"], 2), "half_m": round(a["road_m"] / 2, 2)})
     # the yellow box inside big open junctions (or every junction)
@@ -1274,13 +1390,17 @@ def place(det, mpp, layers, found, chosen, cfg, bridges=None):
             c = np.array(rect.exterior.coords)[:4]
             e1, e2 = c[1] - c[0], c[2] - c[1]
             l1, l2 = float(np.hypot(*e1)) * px, float(np.hypot(*e2)) * px
-            if min(l1, l2) < 2.0:
+            if min(l1, l2) < cfg.get("min_marking_m", 6.0):
                 continue
             # its sides rounded to half a metre (one picture serves boxes of about the same size)
             w_m, h_m = round(l1 * 2) / 2, round(l2 * 2) / 2
             cx, cy = c.mean(axis=0)
             ux, uy = _unit(*e2)
-            lay(li, L, f"b{w_m:g}x{h_m:g}", cx, cy, ux, uy, w_m, h_m, "junction")
+            box_layer = L
+            if L["opts"].get("relative_fit"):
+                factor = max(.25, min(4.0, min(w_m, h_m) / 6.0))
+                box_layer = dict(L, values={**v, "spacing_m": max(.3, v["spacing_m"] * factor)})
+            lay(li, box_layer, f"b{w_m:g}x{h_m:g}", cx, cy, ux, uy, w_m, h_m, "junction")
     # the highways' centrelines their lines are laid along (app/lanes.py, app/highways.py)
     ends.extend(dict(c, chain=True) for c in P["chains"])
     return placements, ends, P

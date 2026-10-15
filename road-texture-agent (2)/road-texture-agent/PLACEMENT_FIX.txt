@@ -1,0 +1,55 @@
+Road Texture Agent 2026.10.12-placement4
+Focused patch on top of the Saudi Decal Fit Update (saudi-fit3).
+
+INSTALL
+Stop the Python server. Back up the matching code files, then extract this
+ZIP into the road-texture-agent folder containing server.py. Merge app/ and
+ui/ without deleting either folder. Restart, Ctrl+F5, and confirm the console
+version is 2026.10.12-placement4.
+
+USE
+Road markings now has an explicit Minimum road width for markings setting
+(default 6 m). This is distinct from Highway / From width (default 18 m),
+which classifies a highway. Roads below the marking cutoff receive neither
+lane lines nor procedural junction decals. Imported artwork remains manually
+controlled and is not restricted by this road-marking cutoff.
+
+Press Update 2D texture and then Update view on an existing loaded result.
+If the page was refreshed and lost its result, reload the alpha and generate
+once. The new engine version also triggers the marking-only correction even
+if the settings snapshot did not otherwise change.
+
+CHANGES
+- Crossings and stop/give-way lines reserve their entire approach apron.
+  Lane markings no longer paint through that area, even when it is inside a
+  continuous highway chain instead of at a segmented street endpoint.
+- The same reservations clip 3D marking strips. Dashed paint is omitted as a
+  whole dash rather than sliced through a pedestrian crossing; continuous
+  lines stop at the apron. Raster antialiasing caps also stay outside it.
+- Reservations follow output resolution changes and are recorded with the
+  junction marking data. Moving/removing decals recalculates the reserved
+  regions, restoring the lane paint that is no longer blocked.
+- Highway replacement now requires matching centreline position and road
+  direction. A crossing or parallel neighboring road is not silently stripped
+  of its own markings merely for lying inside a highway's wide envelope.
+- 2D lane paint, 3D lane strips and procedural decal placement share the same
+  minimum road width in metres. A manual lane split cannot bypass the cutoff.
+- Materials, wear, street geometry, crossings' junction selection logic and
+  highway group selections are retained. Explicit no-mark regions and the
+  user's Markings area still take priority; a width cutoff is eligibility,
+  not an instruction to paint over those exclusions or over junction cores.
+
+CHECKS
+Internal-road crossing exclusion: 2D dashed/solid paint and 3D strips.
+Width cutoff at 5.9 m versus 6 m and user-set 12 m; both 2D and 3D.
+Neighbor/crossing roads beside highways retain their own lane generation.
+Procedural crossings below cutoff omitted; reservation resolution scaling.
+Real 2048 x 1536 alpha: lane/decal generation completes; four eligible nearby
+segments that the proximity test previously suppressed are retained.
+Saudi fitting, original crossing crash, preset controls, syntax checks,
+settings/history, material preservation and partial 3D update checks pass.
+The screenshots' exact live generation was not available locally, and full
+live-browser interaction remains unverified.
+
+Only program files are included. No workspace, training, materials, uploads,
+generated outputs or the Saudi PDF are replaced.
