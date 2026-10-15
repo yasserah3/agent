@@ -1303,7 +1303,7 @@ function dotMaterial(size){
 		vec3 c = t < 0.33 ? mix( vec3( 0.01, 0.07, 0.65 ), vec3( 0.0, 0.5, 0.62 ), t / 0.33 )
 		       : t < 0.66 ? mix( vec3( 0.0, 0.5, 0.62 ), vec3( 0.12, 0.7, 0.1 ), ( t - 0.33 ) / 0.33 )
 		       : mix( vec3( 0.12, 0.7, 0.1 ), vec3( 1.0, 0.8, 0.03 ), ( t - 0.66 ) / 0.34 );
-		diffuseColor.rgb = c * ( 0.35 + 2.4 * L );               // markings and light paving brighter
+		diffuseColor.rgb = c * ( 0.3 + 1.6 * L );                // markings brighter, the paving a step behind the road
 	}
 	if ( uBuild > 0.0 ) {
 		// being built: a band of light sweeping across the square, and a slow pulse
@@ -1352,6 +1352,7 @@ async function showDots(gid, all, early){
     DOTS_U.uMaxH.value = Math.max(1, d.head.max_h); DOTS_U.uCell.value = d.head.patch_m;
     DOTS_U.uHeight.value = DOTS_PREF.colours === 'height' ? 1 : 0;
     scene.add(d.group);
+    const g = scene.getObjectByName('grid'); if(g) scene.remove(g);    // its lines showed between the dots
     groundVis();
     return d;
   }catch(e){

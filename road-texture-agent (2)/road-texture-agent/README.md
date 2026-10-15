@@ -1003,7 +1003,7 @@ from the first seconds, and you see what is being built:
   on disk after that (0.2 s), about 38 MB to the browser.
 - **Colours**: *By height* (blue on the road, cyan on the sidewalks and blocks,
   green to yellow up the objects, on a log scale so a 10 cm kerb shows as well
-  as a 20 m tree; markings and light paving brighter), or *The map's own
+  as a 20 m tree; markings brighter), or *The map's own
   colours* (the texture on the road, the paving's colour beside it). 3D tab,
   *Dot colours*.
 - **What is being built**: a band of light sweeps over the 1 km squares being
