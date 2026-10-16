@@ -80,9 +80,11 @@ def read_glb(path):
             continue
         if "translation" in nd or "rotation" in nd or "scale" in nd:
             sc = nd.get("scale", [1.0, 1.0, 1.0])
+            # one scale, or one for each axis (a layout's object stretched to its building)
+            sc = float(sc[0]) if sc[0] == sc[1] == sc[2] else tuple(float(v) for v in sc)
             places.setdefault(nd["mesh"], []).append((np.array(nd.get("translation", [0.0, 0.0, 0.0]), float),
                                                       np.array(nd.get("rotation", [0.0, 0.0, 0.0, 1.0]), float),
-                                                      float(sc[0])))
+                                                      sc))
         else:
             places.setdefault(nd["mesh"], None)
     objects = []
@@ -125,12 +127,15 @@ def face_front(model, front):
     c, s = math.cos(th), math.sin(th)
     R = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])          # about +Y (up)
     back = np.array([0.0, math.sin(-th / 2), 0.0, math.cos(-th / 2)])
+    # a scale for each axis turns with the mesh: a quarter turn swaps the X and Z ones
+    swap = round(abs(FRONT_TURN.get(front, 0.0))) % 180 == 90
+    turned = lambda sc: (sc[2], sc[1], sc[0]) if swap and isinstance(sc, tuple) else sc
     objs = []
     for o in model["objects"]:
         if o["places"]:
             o = dict(o, prims=[dict(p, positions=p["positions"] @ R.T,
                                     normals=None if p["normals"] is None else p["normals"] @ R.T) for p in o["prims"]],
-                     places=[(t, _qmul(q, back), sc) for t, q, sc in o["places"]])
+                     places=[(t, _qmul(q, back), turned(sc)) for t, q, sc in o["places"]])
         objs.append(o)
     return dict(model, objects=objs)
 
@@ -144,10 +149,17 @@ def _quat_matrix(q):
 
 
 def _placed(p, place):
-    """A primitive moved to a copy's place (rotation, uniform scale, then translation)."""
+    """A primitive moved to a copy's place (its scale, one or one for each axis, rotation, then translation)."""
     t, q, s = place
     R = _quat_matrix(q)
     out = dict(p)
+    if isinstance(s, tuple):
+        s3 = np.asarray(s, float)
+        out["positions"] = (p["positions"] * s3) @ R.T + t
+        if p["normals"] is not None:
+            n = p["normals"] / s3                       # normals of a stretched mesh: by the inverse scale
+            out["normals"] = (n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)) @ R.T
+        return out
     out["positions"] = p["positions"] @ R.T * s + t
     if p["normals"] is not None:
         out["normals"] = p["normals"] @ R.T
@@ -575,7 +587,8 @@ def write_fbx_zip(model, path, stem):
                 t, q, s = place
                 _P(p70, "Lcl Translation", "Lcl Translation", "", "A", *[float(v) for v in t])
                 _P(p70, "Lcl Rotation", "Lcl Rotation", "", "A", *[float(v) for v in _euler_xyz(q)])
-                _P(p70, "Lcl Scaling", "Lcl Scaling", "", "A", float(s), float(s), float(s))
+                s3 = tuple(float(v) for v in s) if isinstance(s, tuple) else (float(s),) * 3
+                _P(p70, "Lcl Scaling", "Lcl Scaling", "", "A", *s3)
             _P(p70, "DefaultAttributeIndex", "int", "Integer", "", 0)
             _P(p70, "InheritType", "enum", "", "", 1)
             n.child("MultiLayer", 0)

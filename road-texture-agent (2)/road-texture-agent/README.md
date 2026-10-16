@@ -122,6 +122,19 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
 - The street map's roads are drawn by Google at map widths, close to but not
   exactly the asphalt. The alpha keeps them; the satellite is for the details
   (the analysis, next).
+- **Both of Google's colour schemes** are read: the classic one (white streets,
+  yellow main roads) and the 2024 one (blue-grey streets, a lighter grey land,
+  buildings grey or cream). Which one a map is drawn in is worked out from its
+  colours ("style" in palette.json sets it instead); in the 2024 colours the
+  buildings' blue-grey outlines, a pixel or two wide, are taken off the road. A
+  classic map's alpha is the same as before, pixel for pixel. On the test city
+  drawn both ways, the 2024 colours' alpha matched the classic one's to 99.6%.
+- **The buildings** are read from the same street map (Google draws every
+  building from zoom 17 up), after the alpha, and kept with the area (Layout,
+  below). If your street map shows no buildings, set **Buildings map** (under
+  Downloader and PBF) to another Universal Maps Downloader map type number: that
+  map is downloaded too and the buildings read from it (0, the default: the
+  street map).
 
 ### The satellite analysis (after the alpha, in the background)
 
@@ -1826,6 +1839,55 @@ raised, hide the ones behind them, and the gaps between them stay in shade:
   every light and sky sample is shaded by the stones in its way, and the
   occlusion darkens the diffuse a little (the gaps a flat surface cannot trace).
   Puddles fill it (flat water).
+
+## Layout (an object on every building)
+
+For an area made from **Coordinates**, the Generate tab's **Layout** section (below
+Project Area) puts an object on every building of the area's map.
+
+- **The buildings** are read from the street map when the alpha is made
+  (`app/footprints.py`): the pixels of a building's fill (grey, or the 2024
+  colours' cream; tunable in palette.json, "buildings"), off the road; thin joins
+  cut, so two buildings wall to wall come apart along their outline; each piece of
+  at least 8 m² one building. Each gets the smallest rectangle round it (its width
+  across its front and its depth, in metres, and its angle) and a **front**: the
+  side that reaches a street soonest looking straight out from it. They are kept in
+  the area's folder, `buildings.json` (each one's middle in pixels and in longitude
+  and latitude, its size, where its front faces, its area and outline) with
+  `buildings_preview.png`. An area made before this version has them read the
+  first time Layout asks.
+- **The section** says how many buildings were read and how many are cut by the
+  map's edge, shows the picture (click it for the viewport: each building's
+  rectangle, a red tick on its front, grey where the map's edge cuts it), and
+  **Show the buildings on the map** draws them over the mask.
+- **Create layout from dataset** opens a window of the objects: the imported ones
+  and the buildings made in **Dynamic creation** (made objects as they are laid, as
+  Use as object does). Tick some (or Select all) and press **OK**:
+  - each building takes the ticked object whose **shape fits it best**: the
+    nearest in its width-to-depth proportion (long and narrow, or square), then
+    in size (`app/layout.py`);
+  - the object's **width and depth are stretched to the building's** outline, its
+    **height stays its own** (the map has no heights);
+  - it stands in the building's middle, its **front (+Y) to the building's
+    street**;
+  - buildings cut by the map's edge are left out unless you untick that.
+  The console says how many buildings each object took. The layout is a placement
+  like an automatic one: its objects on the map in each object's colour with an
+  arrow on their front, Turn single objects and Draw spaced work on them (ids "b"
+  and the building's number), and Create layout from dataset again lays it again
+  in its place.
+- **In the 3D model** (Generate 3D scene, Download 3D model) each object has a
+  scale for each of its axes: width and depth its building's, height its own. GLB,
+  FBX and OBJ keep it, and the front-axis option turns it with the object. On the
+  test city (62 buildings, 4 objects) every object stood within 1.5 cm of its
+  building's middle, with its width and depth exactly the building's and its front
+  exactly towards the street; scenes without a layout export byte for byte as
+  before.
+- **Measured** on the test city drawn in both colour schemes, at the area's own
+  0.136 m a pixel: every building found (62 of 62 inside the map, 8 more cut by its
+  edge, wall-to-wall ones apart), the outline 96% the same as the true one, width
+  and depth within 0.4 m for 90% of them, the front right for 59 of 62 (the others
+  corner buildings, a street on two sides).
 
 ## Project Area
 

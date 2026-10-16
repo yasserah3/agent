@@ -16,6 +16,10 @@ empty and every other copy stays where it is.
 An automatic placement ("auto", app/autoplace.py) has no rectangle: its copies are
 the objects it laid on the islands ("items"), ids "island-number", each turned to
 face its street; turns and empties apply to them the same way.
+
+A layout ("layout", app/layout.py) is the same, with an object on every building of an
+area made from coordinates (ids "b" and the building's number): each object's own width
+and depth stretched to its building's ("w", "d" metres), its height its own.
 """
 
 import math
@@ -31,6 +35,19 @@ def sized(meta):
     turn = int(meta.get("turn", 0)) % 4
     w, d = meta["width_m"] * k, meta["depth_m"] * k
     return (k, turn) + ((d, w) if turn % 2 else (w, d))    # a quarter turn swaps width and depth
+
+
+def copy_size(meta, sc):
+    """
+    A copy's height factor and footprint (w along its row, d across, after its quarter
+    turn as sized gives them): sc a number (a plant's random scale, 1 otherwise), or
+    (sw, sd), a layout's stretch of the object's own width and depth (its height kept).
+    """
+    k, turn, w, d = sized(meta)
+    if isinstance(sc, (tuple, list)):
+        sw, sd = sc
+        return k, (w * sd, d * sw) if turn % 2 else (w * sw, d * sd)
+    return k * sc, (w * sc, d * sc)
 
 
 def spaces_of(p):
@@ -56,6 +73,22 @@ def copies_of(p, objects, packages, mpp_mask):
     with a random transform (foliage), the centre its random offset, the angle
     its random turn, and scale its random scale (1 without).
     """
+    if isinstance(p.get("layout"), dict):
+        # a layout (app/layout.py): an object on each building, front to its street as an automatic
+        # placement's, its own width and depth stretched to the building's (sw, sd)
+        turns, empty = p.get("turns") or {}, set(p.get("empty") or [])
+        out = []
+        for it in p.get("items") or []:
+            oid = it["object"]
+            if oid not in objects or it["id"] in empty:
+                continue
+            meta = objects[oid]["meta"]
+            k = float(meta.get("scale", 1.0))
+            sw = float(it["w"]) / max(1e-6, meta["width_m"] * k)
+            sd = float(it["d"]) / max(1e-6, meta["depth_m"] * k)
+            a = float(it["a"]) - 90.0 * (int(meta.get("turn", 0)) % 4) + float(turns.get(it["id"], 0.0))
+            out.append((oid, np.array([it["x"], it["y"]], float) * mpp_mask, math.radians(a), it["id"], (sw, sd)))
+        return out, {"ids": [it["id"] for it in p.get("items") or []]}
     if isinstance(p.get("auto"), dict):
         # an automatic placement (app/autoplace.py): its objects as laid on the islands, each
         # with its X along its side and its front to the street, with its own extra turn; empties

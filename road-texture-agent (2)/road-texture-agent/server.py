@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.16-coords11"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.16-coords12"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1419,7 +1419,11 @@ def _scatter_for_export(raw, parts=True):
                     objs[oid]["parts"] = OB.load_saved(OBJECTS / oid)
         return oid in objs
     for p in pl:
-        if "package" in p:
+        if isinstance(p.get("layout"), dict):
+            # a layout: every object its buildings took
+            if [have(o) for o in {it["object"] for it in p.get("items") or []}].count(True):
+                keep.append(p)
+        elif "package" in p:
             pk = pkgs.get(p["package"]) or _package(p["package"])
             if pk is not None and [have(sl["object"]) for sl in pk["slots"]].count(True):
                 pkgs[p["package"]] = pk
@@ -1427,6 +1431,10 @@ def _scatter_for_export(raw, parts=True):
         elif have(p["object"]):
             keep.append(p)
     return {"placements": keep, "objects": objs, "packages": pkgs}
+
+
+# a copy's id: "row-column" (an automatic placement's "island-number"), or a layout's "b" and its building
+COPY_ID = r"\d{1,6}-\d{1,4}|b\d{1,7}"
 
 
 def _placement_list(raw):
@@ -1453,12 +1461,12 @@ def _placement_list(raw):
                                "seed": int(sp.get("seed", 1)) & 0xFFFFFFFF}
             # single objects turned on their own, by id ("row-column"): degrees, clockwise
             turns = {str(k): float(v) % 360.0 for k, v in (p.get("turns") or {}).items()
-                     if re.fullmatch(r"\d{1,6}-\d{1,4}", str(k))}
+                     if re.fullmatch(COPY_ID, str(k))}
             if turns:
                 q["turns"] = {k: v for k, v in turns.items() if v}
             # Draw spaced: single objects made empty spots, by id ("row-column"); the
             # rest of the grid stays where it is
-            empty = sorted({str(k) for k in (p.get("empty") or []) if re.fullmatch(r"\d{1,6}-\d{1,4}", str(k))})
+            empty = sorted({str(k) for k in (p.get("empty") or []) if re.fullmatch(COPY_ID, str(k))})
             if empty:
                 q["empty"] = empty[:100000]
             # foliage: a placement of plants, each with its own random scale, turn (degrees)
@@ -1509,6 +1517,11 @@ def _placement_list(raw):
             if isinstance(p.get("auto"), dict):
                 q["auto"] = AP.settings(p["auto"])
                 q["items"] = AP.item_list(p.get("items"))
+            # a layout (app/layout.py): an object on every building of a coordinates area, as laid
+            if isinstance(p.get("layout"), dict):
+                from app import layout as LY
+                q["layout"] = LY.settings(p["layout"])
+                q["items"] = LY.item_list(p.get("items"))
             out.append(q)
         except (KeyError, TypeError, ValueError):
             continue
@@ -1594,6 +1607,80 @@ def autoplace(payload: dict):
     except AP.Superseded:
         raise HTTPException(409, "asked again with other settings")
     return {"items": items, "note": note, "generation": gid, "seconds": round(time.time() - t0, 2)}
+
+
+def _mask_area(mask_id):
+    """The coordinates area (its folder and area.json) a mask, or the mask it was made from, came from; or (None, None)."""
+    rec = mem.image(mask_id) if mask_id else None
+    for r in (rec, mem.image(((rec or {}).get("meta") or {}).get("base")) if rec else None):
+        c = ((r or {}).get("meta") or {}).get("coords") or {}
+        key = c.get("key")
+        if key and re.fullmatch(r"[0-9a-f]{12}", str(key)) and (COORDS / key / "area.json").exists():
+            return COORDS / key, json.loads((COORDS / key / "area.json").read_text())
+    return None, None
+
+
+def _area_buildings(folder, area):
+    """An area's buildings (app/footprints.py), read now from its street map when they were not yet (an older area)."""
+    from app import footprints as FP
+    doc = FP.load(folder)
+    if doc is None:
+        if not (folder / "street.png").exists() or not (folder / "alpha.png").exists():
+            raise HTTPException(409, "this area has no street map: press Download and make the alpha again")
+        doc = FP.read_area(folder, area)
+    return doc
+
+
+@app.get("/api/layout/buildings")
+def layout_buildings(mask: str):
+    """The buildings of the area a mask came from (app/footprints.py), for the Layout section and the map."""
+    folder, area = _mask_area(mask)
+    if folder is None:
+        return {"coords": False, "buildings": [], "count": 0}
+    doc = _area_buildings(folder, area)
+    b = doc["buildings"]
+    return {"coords": True, "key": area["key"], "count": len(b), "edge": sum(1 for x in b if x.get("edge")),
+            "notes": doc.get("notes"), "source": doc.get("source"), "buildings": [
+                {k: x[k] for k in ("id", "cx", "cy", "w_m", "d_m", "a", "rect", "edge", "fill", "area_m2")} for x in b],
+            "preview": f"/api/coords/area/{area['key']}/buildings"}
+
+
+@app.post("/api/layout/create")
+def layout_create(payload: dict):
+    """
+    Layout from the dataset (app/layout.py): an object on every building of the area the mask
+    came from, the ticked one whose shape fits best, its width and depth its building's, its
+    height its own. payload: "mask", "objects" (imported object ids), "buildings" (Dynamic
+    creation building ids: made objects first, as Use as object does). Returns the items for
+    the page's layout placement and what was laid.
+    """
+    from app import layout as LY
+    folder, area = _mask_area(str(payload.get("mask") or ""))
+    if folder is None:
+        raise HTTPException(400, "Layout reads the buildings of an area made from coordinates: load one with Coordinates")
+    doc = _area_buildings(folder, area)
+    oids = [str(o) for o in payload.get("objects") or [] if re.fullmatch(r"[0-9a-f]{12}", str(o))]
+    made = []
+    for bid in payload.get("buildings") or []:
+        r = building_object(str(bid))                       # Dynamic creation's building as an object
+        made.append({"building": str(bid), "object": r["id"], "name": r["name"]})
+        if r["id"] not in oids:
+            oids.append(r["id"])
+    kinds, names = [], {}
+    for oid in oids:
+        meta = _object_meta(oid)
+        if not meta:
+            continue
+        w, d = _own_size(meta)
+        kinds.append((oid, w, d))
+        names[oid] = meta.get("name") or oid
+    if not kinds:
+        raise HTTPException(400, "tick at least one object or building")
+    items, note = LY.lay(doc["buildings"], kinds, skip_edge=bool(payload.get("skip_edge", True)))
+    note["names"] = names
+    mem.record("layout", f"layout on {note['laid']} buildings of area {area['key']} with {len(kinds)} object(s)",
+               {"key": area["key"], "note": note, "made": made})
+    return {"items": items, "note": note, "made": made, "key": area["key"]}
 
 
 @app.get("/api/scatter")
@@ -3866,8 +3953,14 @@ def points(payload: dict):
             meta = sc["objects"][oid]["meta"]
             s, _, w, d = PL.sized(meta)
             hh = float(meta.get("height_m") or max(w, d)) * s
+            if isinstance(k, (tuple, list)):
+                # a layout's object: its width and depth its building's, its height its own
+                _, (w, d) = PL.copy_size(meta, k)
+                k, hk = 1.0, 1.0
+            else:
+                hk = k
             objects.append((round(float(cc[0]), 2), round(float(cc[1]), 2), round(float(a), 4),
-                            round(w * k, 2), round(d * k, 2), round(hh * k, 2), block_h or 0.0))
+                            round(w * k, 2), round(d * k, 2), round(hh * hk, 2), block_h or 0.0))
 
     def stamp(path):
         return [str(path), Path(path).stat().st_mtime if path and Path(path).exists() else None]
@@ -4096,6 +4189,12 @@ def coords_settings_save(payload: dict):
             s["zoom"] = max(15, min(22, int(payload["zoom"])))
         except (TypeError, ValueError):
             raise HTTPException(400, "zoom: a whole number, 15 to 22")
+    if "buildings_map" in payload:
+        # the buildings read from the street map (0), or from this Universal Maps Downloader map type
+        try:
+            s["buildings_map"] = max(0, min(10000, int(payload["buildings_map"] or 0)))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "buildings map: a map type number (0: the street map)")
     return CO.save_settings(COORDS, s)
 
 
@@ -4403,7 +4502,7 @@ def coords_file(key: str, name: str):
     """An area's picture: satellite, street, alpha, check (the alpha's edge over the satellite), overlay."""
     files = {"satellite": "satellite_preview.jpg", "street": "street_preview.png", "alpha": "alpha_preview.png",
              "check": "check_preview.jpg", "overlay": "overlay.png", "satellite_full": "satellite.png",
-             "street_full": "street.png", "alpha_full": "alpha.png",
+             "street_full": "street.png", "alpha_full": "alpha.png", "buildings": "buildings_preview.png",
              "findings": "analysis/findings_preview.jpg", "confidence": "analysis/confidence_preview.jpg"}
     if not re.fullmatch(r"[0-9a-f]{12}", key) or name not in files:
         raise HTTPException(404, "unknown file")

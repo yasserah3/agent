@@ -532,7 +532,8 @@ def write_glb_scene(path, meshes, materials, images):
             for k, (tr, q, sc) in enumerate(m["instances"]):
                 nodes.append({"mesh": len(gl_meshes) - 1, "name": "%s_%d" % (m["name"], k + 1),
                               "translation": [float(v) for v in tr], "rotation": [float(v) for v in q],
-                              "scale": [float(sc)] * 3})
+                              "scale": [float(v) for v in sc] if isinstance(sc, (tuple, list, np.ndarray))
+                              else [float(sc)] * 3})
         else:
             nodes.append({"mesh": len(gl_meshes) - 1, "name": m["name"]})
 
@@ -2287,10 +2288,16 @@ def _object_meshes(mesh, scatter, mpp_mask, scale, mpp_out, W, H, stand_m, image
         spots, _ = PL.copies_of(p, scatter["objects"], scatter.get("packages", {}), mpp_mask)
         # an automatic placement's objects are on their islands by its rule, set back from the
         # kerb: kept, even where the model's kerb line runs a pixel from the islands' outline
-        laid_by_rule = isinstance(p.get("auto"), dict)
+        laid_by_rule = isinstance(p.get("auto"), dict) or isinstance(p.get("layout"), dict)
         for oid, cc, a, cid, sc in spots:
             k, turn, w, d = sized(oid)
-            k, w, d = k * sc, w * sc, d * sc                  # a plant's random scale (1 otherwise)
+            if isinstance(sc, (tuple, list)):
+                # a layout's object (app/layout.py): its own width (X) and depth (Z) stretched to its
+                # building's, its height (Y) its own: a scale for each of its axes
+                _, (w, d) = PL.copy_size(scatter["objects"][oid]["meta"], sc)
+                k = (k * sc[0], k, k * sc[1])
+            else:
+                k, w, d = k * sc, w * sc, d * sc              # a plant's random scale (1 otherwise)
             fp = Polygon([(x / mpp_out, y / mpp_out) for x, y in PL.footprint(cc, a, w, d)])
             if not laid_by_rule and road.intersects(fp) and road.intersection(fp).area > 0.02 * fp.area:
                 skipped += 1

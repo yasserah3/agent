@@ -343,6 +343,9 @@
   .sat-card{ max-height:calc(100% - 60px); overflow-y:auto; }
   .sat-card.folded .sat-save{ display:none !important; } .sat-save .btn{ width:100%; }
   .sat-card.folded .sat-tex{ display:none !important; }
+  .lay-thumb{ display:block; width:100%; padding:0; margin:0 0 6px; border:1px solid var(--line); border-radius:4px; background:var(--field); cursor:zoom-in; overflow:hidden; }
+  .lay-thumb img{ display:block; width:100%; height:auto; }
+  .ds-group{ padding:8px 2px 2px; color:var(--muted); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
   /* Save to the dataset: the popup's list of kinds */
   .ds-all{ display:flex; align-items:center; gap:8px; padding:6px 2px; border-bottom:1px solid var(--line); font-weight:600; cursor:pointer; }
   .ds-list{ max-height:300px; overflow-y:auto; margin:4px 0 8px; }
@@ -620,6 +623,8 @@
                 <input type="text" id="coDownloader" spellcheck="false" placeholder="C:\…\Universal Maps Downloader\downloader.exe"></label>
               <label>Saudi Arabia OSM file (.osm.pbf)
                 <input type="text" id="coPbf" spellcheck="false" placeholder="C:\…\gcc-states-latest.osm.pbf"></label>
+              <label>Buildings map: a Universal Maps Downloader map type number (0: read from the street map)
+                <input type="number" id="coBldMap" min="0" step="1" value="0"></label>
               <div class="note" id="coFilesNote">Paste each file's full path (in Explorer: Shift + right-click the file, Copy as path).</div>
             </details>
             <button type="button" class="btn" id="btnCoords">Download and make the alpha</button>
@@ -647,6 +652,16 @@
           <div class="note" id="pareaNote" style="margin:0 0 6px">Load a street mask, then pick the islands (blocks, squares, traffic islands) your project takes.</div>
           <div class="lanes-bar"><button type="button" id="btnParea" aria-pressed="false" disabled title="Click islands on the map to make them street; Done builds them in at once">Select islands</button>
             <button type="button" id="btnPareaClear" disabled title="Take every island out of the Project Area">Clear</button></div>
+        </div>
+      </section>
+
+      <section class="panel" id="layPanel">
+        <div class="panel-h">Layout <small id="layCount"></small></div>
+        <div class="panel-b">
+          <div class="note" id="layNote" style="margin:0 0 6px">Load an area with Coordinates: its buildings are read from its street map.</div>
+          <button type="button" class="lay-thumb" id="layThumb" hidden title="Show the buildings read from the map: each one's rectangle, a tick on its front"><img alt="The area's buildings"></button>
+          <label class="sat-chk"><input type="checkbox" id="layShow" disabled> Show the buildings on the map</label>
+          <button type="button" class="btn" id="btnLayout" disabled title="Put an object on every building: the ticked one whose shape fits it best, stretched to its width and depth, its height its own">Create layout from dataset</button>
         </div>
       </section>
 
@@ -1357,6 +1372,20 @@
     <div class="btn-row">
       <button type="button" class="btn secondary" id="dsCancel">Cancel</button>
       <button type="button" class="btn" id="dsGo">Save</button>
+    </div>
+  </div>
+</div>
+<div id="layPop" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="layTitle">
+  <div class="modal-card">
+    <div class="mp-h"><b id="layTitle">Create layout from dataset</b><button type="button" class="mp-x" id="layClose" title="Close (Esc)">×</button></div>
+    <div class="note" id="layPopNote">Tick the objects to stand on the buildings. Each building takes the one whose shape fits it best (long and narrow, or square); its width and depth are stretched to the building's, its height stays its own, its front faces the building's street.</div>
+    <label class="ds-all"><input type="checkbox" id="layAll"> Select all</label>
+    <div class="ds-list" id="layList"></div>
+    <label class="sat-chk"><input type="checkbox" id="layEdge" checked> Leave out the buildings cut by the map's edge</label>
+    <div class="note" id="layWhere"></div>
+    <div class="btn-row">
+      <button type="button" class="btn secondary" id="layCancel">Cancel</button>
+      <button type="button" class="btn" id="layGo">OK</button>
     </div>
   </div>
 </div>

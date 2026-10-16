@@ -347,8 +347,8 @@ def inner_streets(road, mpp, placements, objects, packages):
     for p in placements:
         try:
             for oid, cc, a, cid, sc in PL.copies_of(p, objects, packages, mpp)[0]:
-                _, _, w, d = PL.sized(objects[oid]["meta"])
-                all_feet.append([tuple(q) for q in PL.footprint(cc, a, w * sc, d * sc)])
+                _, (w, d) = PL.copy_size(objects[oid]["meta"], sc)
+                all_feet.append([tuple(q) for q in PL.footprint(cc, a, w, d)])
         except Exception:
             continue
     objects_area = unary_union([Polygon(f) for f in all_feet]) if all_feet else None

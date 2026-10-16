@@ -55,10 +55,14 @@ PALETTE = {
     "hole_m2": 25.0,                # holes in a road smaller than this filled (one-way arrows)
     "speck_m2": 10.0,               # road pieces smaller than this dropped
     "osm_reach_m": 15.0,            # with the PBF: road pieces with no OSM road this near dropped
+    # Google's 2024 colours: streets blue-grey (188, 200, 212), main roads a darker blue-grey, land
+    # light grey; "style": "auto" works out which a map is drawn in, "classic" or "new" sets it
+    "style": "auto",
+    "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6},
 }
 
-COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("crop", 1.0), ("missing", 0.5),
-               ("alpha", 1.0), ("osm", 1.0), ("previews", 0.5)]
+COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("buildings_map", 1.0), ("crop", 1.0),
+               ("missing", 0.5), ("alpha", 1.0), ("osm", 1.0), ("buildings", 1.0), ("previews", 0.5)]
 
 
 def ground_mpp(lat, zoom):
@@ -133,7 +137,7 @@ def osm_tool_dir():
 
 def load_settings(root):
     """The downloader's path, the PBF's path and the zoom (saved once; the OSM tool's downloader path as a start)."""
-    s = {"downloader": "", "pbf": "", "zoom": 20}
+    s = {"downloader": "", "pbf": "", "zoom": 20, "buildings_map": 0}
     try:
         s.update(json.loads((Path(root) / "settings.json").read_text()))
     except (OSError, ValueError):
@@ -155,7 +159,7 @@ def load_settings(root):
 
 
 def save_settings(root, s):
-    keep = {k: s[k] for k in ("downloader", "pbf", "zoom") if k in s}
+    keep = {k: s[k] for k in ("downloader", "pbf", "zoom", "buildings_map") if k in s}
     Path(root).mkdir(parents=True, exist_ok=True)
     tmp = Path(root) / f".settings.{uuid.uuid4().hex[:6]}.tmp"
     tmp.write_text(json.dumps(keep, indent=2))
@@ -204,19 +208,55 @@ def road_index(pbf, root, note=lambda s: None, cancelled=lambda: False):
 
 # ------------------------------------------------------------------ the street map's roads
 
-def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
-    """
-    The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
-    orange, small holes filled (the one-way arrows drawn on a street), small specks
-    dropped; with osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no
-    OSM road within osm_reach_m dropped too. Returns (road, notes).
-    """
+def _classic_road(rgb, pal):
+    """Google's classic colours: the streets' white, the main roads' yellow to orange."""
     r, g, b = (rgb[..., i].astype(np.int16) for i in range(3))
     wm = int(pal["white_min"])
     road = (r >= wm) & (g >= wm) & (b >= wm)
     y = pal["yellow"]
     road |= (r >= y["r_min"]) & (g >= y["g_min"]) & (b <= y["b_max"]) & (r - b >= y["r_minus_b"])
-    notes = {"coloured_px": int(road.sum())}
+    return road
+
+
+def _new_colour(rgb, pal):
+    """Google's 2024 colours: the roads' blue-grey (bluer than red, not as light as the land or the buildings)."""
+    p = {**PALETTE["new"], **(pal.get("new") or {})}
+    r, g, b = (rgb[..., i].astype(np.int16) for i in range(3))
+    return (b - r >= int(p["b_minus_r"])) & (r >= int(p["r_min"])) & (r <= int(p["r_max"])) & (b >= g) & (g >= r - 2)
+
+
+def street_style(rgb, pal=PALETTE):
+    """
+    Which colours a street map is drawn in: "classic" (white streets, yellow main roads) or
+    "new" (Google's 2024 colours: blue-grey streets), from its colours, unless the palette
+    sets "style".
+    """
+    forced = pal.get("style", "auto")
+    if forced in ("classic", "new"):
+        return forced
+    sample = np.ascontiguousarray(rgb[::4, ::4])
+    white, blue = float(_classic_road(sample, pal).mean()), float(_new_colour(sample, pal).mean())
+    return "new" if blue > max(0.02, 2.0 * white) else "classic"
+
+
+def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
+    """
+    The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
+    orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
+    the building outlines, as blue as the roads but a pixel or two wide, taken off), small
+    holes filled (the one-way arrows drawn on a street), small specks dropped; with
+    osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
+    osm_reach_m dropped too. Returns (road, notes).
+    """
+    style = street_style(rgb, pal)
+    if style == "new":
+        p = {**PALETTE["new"], **(pal.get("new") or {})}
+        road = _new_colour(rgb, pal)
+        k = max(1, int(round(float(p["open_m"]) / mpp / 2)))
+        road = ndi.binary_opening(road, structure=np.ones((2 * k + 1, 2 * k + 1), bool))
+    else:
+        road = _classic_road(rgb, pal)
+    notes = {"coloured_px": int(road.sum()), "style": style}
     px_m2 = mpp * mpp
     # holes: what is not road and does not reach the edge, small
     holes = ~road
@@ -453,6 +493,12 @@ def build_area(est, settings, root, register, job=None):
 
     sat_path = download("satellite", SATELLITE_ID, "sat", "satellite map")
     street_path = download("street", STREET_ID, "street", "street map")
+    # the buildings: read from the street map, or from another map type set for them
+    bmap = int(settings.get("buildings_map") or 0)
+    if area.get("buildings_map_type") != bmap:
+        area.pop("buildings_map", None)              # another map type than the one downloaded before
+    bmap_path = download("buildings_map", bmap, f"bld{bmap}", f"buildings map (type {bmap})") if bmap > 0 else None
+    area["buildings_map_type"] = bmap
 
     prog.stage("crop", "cutting both maps to the area")
     sat_geo = read_geo(sat_path)
@@ -463,6 +509,10 @@ def build_area(est, settings, root, register, job=None):
     street = onto_grid(street_path, read_geo(street_path), ext, size)
     sat.save(folder / "satellite.png")
     street.save(folder / "street.png")
+    if bmap_path is not None:
+        onto_grid(bmap_path, read_geo(bmap_path), ext, size).save(folder / "buildings_map.png")
+    else:
+        (folder / "buildings_map.png").unlink(missing_ok=True)
     world = world_file(ext, size)
     for stem in ("satellite", "street", "alpha", "overlay"):
         (folder / f"{stem}.pgw").write_text(world)
@@ -505,12 +555,22 @@ def build_area(est, settings, root, register, job=None):
         raise ValueError("no road found on the street map: is it the street map without labels (id 66)? "
                          "Its colours may differ from the ones expected (workspace/coords/palette.json)")
 
+    prog.stage("buildings", "the buildings on the street map")
+    from app import footprints as FP
+    try:
+        bdoc = FP.read_area(folder, area, None if bmap_path is not None else np.asarray(street), road, palette(root))
+        area["buildings"] = dict(bdoc["notes"], source=bdoc["source"])
+        say(f"{len(bdoc['buildings'])} buildings on the {'buildings' if bmap_path is not None else 'street'} map")
+    except Exception as e:                    # noqa: BLE001 - the alpha stands without them
+        area["buildings"] = {"buildings": 0, "error": f"{type(e).__name__}: {e}"}
+        say(f"the buildings could not be read: {e}")
+
     prog.stage("previews", "previews")
     _previews(folder, sat, street, road, osm_lines, gaps)
     save()
     info = {"key": key, "bounds": bounds, "zoom": zoom, "mpp": mpp, "extent": list(ext),
             "width": size[0], "height": size[1], "missing_tiles": len(gaps), "osm_roads": area.get("osm_roads"),
-            "osm_on_road": area.get("osm_on_road"), "alpha": notes}
+            "osm_on_road": area.get("osm_on_road"), "alpha": notes, "buildings": area.get("buildings")}
     rec = register(alpha_path, info)
     area["mask_id"] = rec.get("id")
     save()

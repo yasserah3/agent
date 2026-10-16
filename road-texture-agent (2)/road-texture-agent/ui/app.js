@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -848,6 +848,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
         await loadLanes(rec.id);
         await loadMarea(rec.id);
         await loadParea(rec.id);
+        loadLayout();
         if(S.gen.placements.length) log(`${S.gen.placements.length} saved object placement(s) restored for this mask.`);
         renderObjList();
         drawBridges();
@@ -892,9 +893,10 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
   async function coSettings(save){
     try{
       const s = save ? await api('/api/coords/settings', { method:'POST', headers:{'Content-Type':'application/json'},
-                         body: JSON.stringify({ downloader: $('#coDownloader').value, pbf: $('#coPbf').value, zoom: +$('#coZoom').value }) })
+                         body: JSON.stringify({ downloader: $('#coDownloader').value, pbf: $('#coPbf').value, zoom: +$('#coZoom').value,
+                                                buildings_map: Math.max(0, Math.round(+$('#coBldMap').value || 0)) }) })
                      : await api('/api/coords/settings');
-      $('#coDownloader').value = s.downloader || ''; $('#coPbf').value = s.pbf || '';
+      $('#coDownloader').value = s.downloader || ''; $('#coPbf').value = s.pbf || ''; $('#coBldMap').value = s.buildings_map || 0;
       if(!save) $('#coZoom').value = s.zoom || 20;
       const from = [s.downloader_from && `downloader from ${s.downloader_from}`, s.pbf_from && `PBF from ${s.pbf_from}`].filter(Boolean);
       $('#coFilesState').textContent = s.downloader ? (s.pbf ? '· set' : '· no PBF') : '· not set';
@@ -904,7 +906,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
       return s;
     }catch(e){ $('#coFilesNote').textContent = e.message; return null; }
   }
-  ['coDownloader', 'coPbf'].forEach(k => $('#' + k).addEventListener('change', () => coSettings(true)));
+  ['coDownloader', 'coPbf', 'coBldMap'].forEach(k => $('#' + k).addEventListener('change', () => coSettings(true)));
   function coBar(frac, text){
     const b = $('#coBar'); b.hidden = false;
     $('i', b).style.width = `${Math.round(Math.max(0, Math.min(1, frac || 0)) * 100)}%`;
@@ -2074,7 +2076,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
   new ResizeObserver(scheduleOverlay).observe($('#genVp'));             // resized, or shown again (its tab)
   function drawOverlay(){
     const want = !!S.gen.mask && ((ISLS.data && (ISLS.show || ISLS.pick >= 0 || AUTO.pick >= 0)) || (LANES.on && LANES.streets) || hasAuto()
-                                  || (PAREA.data && (PAREA.on || PAREA.sel.size > 0)));
+                                  || (PAREA.data && (PAREA.on || PAREA.sel.size > 0)) || layShown());
     ovl.hidden = !want;
     if(!want) return;
     const root = $('#genVp'), r = root.getBoundingClientRect(), { s, tx, ty } = genVp.view();
@@ -2093,6 +2095,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
                 hr: Math.max(4, genVp.canvas.width / 260) * dpr * s, minFont: 7 * dpr };
     drawIslandsOn(ctx, v);
     drawPareaOn(ctx, v);
+    drawBuildingsOn(ctx, v);
     drawAutoOn(ctx, v);
     drawLanesOn(ctx, v);
     drawHighwayGroups(ctx, v);
@@ -3160,6 +3163,135 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     if(!PAREA.on) pareaBuild();
   });
   addEventListener('keydown', e => { if(e.key === 'Escape' && PAREA.on && !MAT.open) pareaMode(false); });
+
+  /* ---- Layout (app/footprints.py, app/layout.py): the buildings of an area made from coordinates, read
+     from its street map, and an object on each: Create layout from dataset opens a window of the objects
+     (imported, and Dynamic creation's buildings); each building takes the ticked one whose shape fits it
+     best, its width and depth stretched to the building's, its height its own, its front to the street.
+     The layout is a placement like an automatic one (its objects on the map, Turn single objects, Draw
+     spaced), laid again by pressing Create layout from dataset again */
+  const LAY = { data: null, show: false, mask: null };
+  const layCoords = () => !!(S.gen.mask && S.gen.mask.coords && S.gen.mask.coords.key);
+  function layShown(){ return !!(LAY.show && LAY.data && LAY.data.coords && LAY.data.count && LAY.mask === (S.gen.mask || {}).id); }
+  async function loadLayout(){
+    LAY.data = null; LAY.mask = S.gen.mask ? S.gen.mask.id : null;
+    renderLayout();
+    if(!S.gen.mask) return;
+    const mask = S.gen.mask.id;
+    try{
+      const d = await api('/api/layout/buildings?mask=' + mask);
+      if(!S.gen.mask || S.gen.mask.id !== mask) return;
+      LAY.data = d;
+    }catch(e){ LAY.data = { error: e.message }; }
+    renderLayout(); drawBridges();
+  }
+  function renderLayout(){
+    const d = LAY.data, on = !!(d && d.coords);
+    $('#btnLayout').disabled = !on || !d.count;
+    $('#layShow').disabled = !on || !d.count;
+    $('#layCount').textContent = on ? `${fmt(d.count)}` : '';
+    const th = $('#layThumb');
+    th.hidden = !on || !d.count;
+    if(on && d.count){
+      const src = `${API}${d.preview}?v=${d.key}${d.count}`;
+      if($('img', th).dataset.src !== src){ $('img', th).src = src; $('img', th).dataset.src = src; }
+    }
+    $('#layNote').textContent = !S.gen.mask ? 'Load an area with Coordinates: its buildings are read from its street map.'
+      : d && d.error ? `Layout: ${d.error}`
+      : !d ? (layCoords() ? 'Reading the buildings…' : 'This mask is not from coordinates: Layout reads the buildings of an area loaded with Coordinates (from its street map).')
+      : !on ? 'This mask is not from coordinates: Layout reads the buildings of an area loaded with Coordinates (from its street map).'
+      : !d.count ? 'No buildings on this area\'s map (its colours may differ from the ones expected: workspace/coords/palette.json, "buildings").'
+      : `${fmt(d.count)} buildings read from the ${d.source === 'buildings_map.png' ? 'buildings map' : 'street map'}`
+        + (d.edge ? `, ${d.edge} cut by the map's edge` : '') + '. Create layout from dataset puts an object on each.';
+  }
+  $('#layShow').addEventListener('change', () => { LAY.show = $('#layShow').checked; drawBridges(); });
+  $('#layThumb').addEventListener('click', async () => {
+    if(!LAY.data || !LAY.data.preview) return;
+    const img = await loadImage(`${API}${LAY.data.preview}?v=${Date.now().toString(36)}`);
+    genVp.show(img, 'Buildings read from the map: each one\'s rectangle (grey: cut by the map\'s edge), a tick on its front');
+  });
+  // on the overlay: each building's rectangle, a tick on its front (grey, dashed: cut by the map's edge)
+  function drawBuildingsOn(ctx, v){
+    if(!layShown()) return;
+    const X = q => q[0] * v.k + v.ox, Y = q => q[1] * v.k + v.oy, lw = Math.max(v.dpr, v.hr * 0.14);
+    for(const b of LAY.data.buildings){
+      const r = Math.max(b.w_m, b.d_m) / mppMask();
+      if(b.cx + r < v.x0 || b.cx - r > v.x1 || b.cy + r < v.y0 || b.cy - r > v.y1) continue;
+      ctx.beginPath(); b.rect.forEach((q, k) => k ? ctx.lineTo(X(q), Y(q)) : ctx.moveTo(X(q), Y(q))); ctx.closePath();
+      ctx.fillStyle = b.edge ? 'rgba(150,150,150,.15)' : 'rgba(255,170,60,.16)'; ctx.fill();
+      if(b.edge) ctx.setLineDash([v.hr * 0.5, v.hr * 0.4]);
+      ctx.strokeStyle = b.edge ? 'rgba(170,170,170,.9)' : 'rgba(255,170,60,.95)'; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]);
+      const a = b.a * DEG, f = [Math.sin(a), -Math.cos(a)], reach = b.d_m / 2 / mppMask();
+      ctx.beginPath(); ctx.moveTo(X([b.cx, b.cy]), Y([b.cx, b.cy]));
+      ctx.lineTo(X([b.cx + f[0] * reach, 0]), Y([0, b.cy + f[1] * reach]));
+      ctx.strokeStyle = 'rgba(220,60,60,.95)'; ctx.lineWidth = lw * 1.4; ctx.stroke();
+    }
+  }
+  // the window: the objects, and Dynamic creation's buildings (made objects as they are laid)
+  async function layOpen(){
+    if(!LAY.data || !LAY.data.count) return;
+    let blds = [];
+    try{ blds = (await api('/api/buildings')).buildings || []; }catch(_){}
+    const objs = S.gen.objects.filter(o => !o.foliage && o.format !== 'building');
+    const row = (kind, id, name, size, on) => `<label class="ds-row"><input type="checkbox" data-kind="${kind}" data-id="${id}"${on ? ' checked' : ''}>`
+      + `<span>${esc(name)}</span><small>${size}</small></label>`;
+    const sizeOf = o => { const k = o.scale || 1; return `${(o.width_m * k).toFixed(1)} × ${(o.depth_m * k).toFixed(1)} m, ${(o.height_m * k).toFixed(1)} m high`; };
+    const had = new Set(((S.gen.placements.find(p => p.layout) || {}).layout || {}).objects || []);
+    let html = '';
+    if(objs.length) html += '<div class="ds-group">Imported objects</div>' + objs.map(o => row('object', o.id, o.name, sizeOf(o), had.has(o.id))).join('');
+    if(blds.length) html += '<div class="ds-group">Dynamic creation</div>' + blds.map(b => {
+      const o = b.object ? objById(b.object) : null;
+      return row('building', b.id, b.name, o ? sizeOf(o) : `${b.levels} level${b.levels === 1 ? '' : 's'}, made an object when laid`, b.object && had.has(b.object));
+    }).join('');
+    $('#layList').innerHTML = html || '<div class="note">No objects yet: import one (Objects), or make a building in Dynamic creation.</div>';
+    const d = LAY.data;
+    $('#layWhere').textContent = `${fmt(d.count)} buildings on this area's map${d.edge ? `, ${d.edge} of them cut by the map's edge` : ''}.`;
+    $('#layEdge').checked = true;
+    $$('#layList input').forEach(b => b.addEventListener('change', layAllState));
+    layAllState();
+    $('#layPop').hidden = false;
+  }
+  function layAllState(){
+    const bs = $$('#layList input'), n = bs.filter(b => b.checked).length;
+    $('#layAll').checked = n === bs.length && n > 0;
+    $('#layAll').indeterminate = n > 0 && n < bs.length;
+    $('#layGo').disabled = !n;
+    $('#layGo').textContent = !n ? 'OK' : `OK: lay ${n} ${n === 1 ? 'object' : 'objects'}`;
+  }
+  const layClose = () => { $('#layPop').hidden = true; };
+  $('#btnLayout').addEventListener('click', layOpen);
+  $('#layAll').addEventListener('change', () => { $$('#layList input').forEach(b => { b.checked = $('#layAll').checked; }); layAllState(); });
+  $('#layClose').addEventListener('click', layClose);
+  $('#layCancel').addEventListener('click', layClose);
+  addEventListener('keydown', e => { if(e.key === 'Escape' && !$('#layPop').hidden) layClose(); });
+  $('#layGo').addEventListener('click', async () => {
+    const picked = $$('#layList input').filter(b => b.checked);
+    if(!picked.length || !S.gen.mask) return;
+    $('#layGo').disabled = true;
+    try{
+      const r = await api('/api/layout/create', { method:'POST', headers:{'Content-Type':'application/json'}, job: 'Laying objects on the buildings',
+        body: JSON.stringify({ mask: S.gen.mask.id, skip_edge: $('#layEdge').checked,
+          objects: picked.filter(b => b.dataset.kind === 'object').map(b => b.dataset.id),
+          buildings: picked.filter(b => b.dataset.kind === 'building').map(b => b.dataset.id) }) });
+      layClose();
+      if(r.made.length) await loadObjects();                    // Dynamic creation's buildings, now objects
+      const used = [...new Set(r.items.map(it => it.object))];
+      const p = { object: used[0] || picked[0].dataset.id, cx: S.gen.mask.width / 2, cy: S.gen.mask.height / 2, angle: 0, nx: 1, ny: 1,
+                  gap_x: 0, gap_y: 0, seed: 1, layout: { key: r.key, objects: Object.keys(r.note.names) }, items: r.items };
+      // one layout an area: laid again, it takes the place of the one before
+      const at = S.gen.placements.findIndex(q => q.layout);
+      if(at >= 0) S.gen.placements[at] = p; else S.gen.placements.push(p);
+      S.gen.plSel = at >= 0 ? at : S.gen.placements.length - 1; S.gen.edit = null;
+      saveScatter(); renderObjList();
+      const n = r.note;
+      log(`Layout: ${fmt(n.laid)} of ${fmt(n.buildings)} buildings got an object: `
+        + Object.entries(n.by_object).sort((a, b) => b[1] - a[1]).map(([id, k]) => `${k} × ${n.names[id] || id}`).join(', ')
+        + (n.edge ? `; ${n.edge} cut by the map's edge left out` : '') + (n.small ? `; ${n.small} too small (under 2 m a side)` : '') + '.', 'ok');
+      log('  Each object\'s width and depth are its building\'s, its height its own, its front to the building\'s street. Generate 3D scene or Download 3D model to see them.');
+      if(r.made.length) log(`  Made objects of ${r.made.map(m => m.name).join(', ')} (Dynamic creation), as Use as object does.`);
+    }catch(e){ log('Layout: ' + e.message, 'bad'); }
+    finally{ $('#layGo').disabled = false; }
+  });
   // the islands' sizes (and which small ones count) go by the scale: found again for a new one
   $('#scale').addEventListener('change', async () => {
     if(!S.gen.mask || !PAREA.data || PAREA.scale === pareaScale()) return;
@@ -4353,6 +4485,22 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
         [p.cx + u[0]*sx*Lx/2 + v[0]*o, p.cy + u[1]*sx*Lx/2 + v[1]*o]) };
     };
     const front0 = lay => lay.rows[0].front / m;            // the first row's front, in mask pixels
+    if(p.layout){
+      // a layout (app/layout.py): an object on each building, its front to the building's street, its
+      // own width and depth stretched to the building's ("w", "d" metres), as the 3D export takes them
+      // (app/placements.py); each object its own colour. A quarter-turned object's frame is turned back
+      // by its turn, so its front still faces the street: its footprint along that frame swaps
+      const ids = [...new Set((p.items || []).map(it => it.object))], slots = {}, copies = [];
+      ids.forEach((id, k) => { const o = objById(id); if(o) slots[id] = { o, turn: o.turn || 0, colour: SLOT_COLOURS[k % SLOT_COLOURS.length] }; });
+      (p.items || []).forEach(it => {
+        const sl = slots[it.object]; if(!sl) return;
+        const odd = sl.turn % 2 === 1;
+        const c = copyAt(it.x, it.y, (it.a - 90 * (sl.turn % 4)) * DEG, odd ? it.d : it.w, odd ? it.w : it.d, sl, it.id);
+        c.onRoad = false;                     // on its building, by the map
+        copies.push(c);
+      });
+      return { auto: true, layout: true, slots: Object.values(slots), copies };
+    }
     if(p.auto){
       // an automatic placement: the objects it laid on the islands, as the 3D export takes them
       // (app/placements.py). "a" is where the front (+Y) faces: a quarter-turned object's frame
@@ -4498,7 +4646,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
 
   function drawScatter(f, hr){
     S.gen.placements.forEach((p, i) => {
-      if(p.auto) return;                                     // on the overlay (drawAutoOn)
+      if(laid(p)) return;                                    // on the overlay (drawAutoOn)
       const g0 = placementGeom(p); if(!g0) return;
       const sel = i === S.gen.plSel;
       // an edit mode for this placement: 'streets' (draw inner streets) or 'objects' (turn single objects)
@@ -4762,14 +4910,15 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     const box = $('#plBox');
     const p = S.gen.placements[S.gen.plSel];
     // duplicate and flip act on the selected placement, from its own panel
-    Object.values(KIND).forEach(K => { $(K.dup).disabled = $(K.flip).disabled = !p || kindOf(p) !== K || !!p.auto; });
+    Object.values(KIND).forEach(K => { $(K.dup).disabled = $(K.flip).disabled = !p || kindOf(p) !== K || laid(p); });
     if(AUTO.pick >= 0 && AUTO.pick !== S.gen.plSel) AUTO.pick = -1;      // picking belongs to the selected placement
     if(!p){ box.hidden = true; S.gen.edit = null; return; }
     box.hidden = false;
     // an automatic placement: its own settings, none of a rectangle's
-    box.classList.toggle('auto', !!p.auto);
+    box.classList.toggle('auto', laid(p));
     $('#autoBox').hidden = !p.auto;
-    $('#objEditNote').textContent = p.auto ? 'Click an object to pick it, Shift-click to pick more. Ids are island-number: the island, then its objects in order round it.'
+    $('#objEditNote').textContent = p.layout ? 'Click an object to pick it, Shift-click to pick more. Ids are b and the number of its building.'
+      : p.auto ? 'Click an object to pick it, Shift-click to pick more. Ids are island-number: the island, then its objects in order round it.'
       : 'Click an object to pick it, Shift-click to pick more. Ids are row-column, counted from the top left.';
     // in the panel of its kind; foliage has no random spaces, curve lines, inner
     // streets, single turns or alignment, and objects have no random transform
@@ -4822,7 +4971,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     $('#objEditInfo').textContent = (picked.length ? `Picked: ${picked.join(', ')}. ` : (ed === 'objects' ? 'Nothing picked yet. ' : ''))
       + (turned ? `${turned} object${turned > 1 ? 's' : ''} turned on their own.` : '');
     const o = p.package ? null : objById(p.object), pk = p.package ? pkgById(p.package) : null;
-    const g0 = p.auto ? autoGeom(p) : placementGeom(p);
+    const g0 = laid(p) ? autoGeom(p) : placementGeom(p);
     // the drawn streets, and the road the narrowest of them gets
     let stNote = '';
     if(st.cells.length && g0 && g0.layout){
@@ -4841,6 +4990,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     $('#plTitle').textContent = `${p.foliage ? 'Foliage placement' : 'Placement'} ${S.gen.plSel + 1}: `
       + (p.package ? (pk ? `package ${pk.name}` : 'missing package') : (o ? o.name : 'missing object')) + (curve ? ', curved' : '');
     $('#btnShuffle').hidden = !p.package;
+    if(p.layout){ renderLayoutBox(p, g0); return; }
     if(p.auto){ renderAutoBox(p, g0, o, pk, onRoad); return; }
     $('#gapXLabel').textContent = curve ? 'Gap along the line (m)' : 'Gap along X (m)';
     $('#gapYLabel').textContent = curve ? 'Gap between rows (m)' : 'Gap along Y (m)';
@@ -4884,6 +5034,17 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
         + road + lineNote
       : `${p.nx} × ${p.ny} = ${p.nx * p.ny} copies${road}`
         + (g0 ? `, area ${(g0.Lx * mppMask()).toFixed(1)} × ${(g0.Ly * mppMask()).toFixed(1)} m` : '')) + spNote;
+  }
+  // a layout's panel: how many buildings each object stands on
+  function renderLayoutBox(p, g0){
+    $('#plTitle').textContent = `Placement ${S.gen.plSel + 1}: layout on the buildings`;
+    $('#plCurveBox').hidden = true; $('#btnCurve').hidden = true; $('#btnShuffle').hidden = true;
+    const n = {}, copies = g0 ? g0.copies : [];
+    copies.forEach(c => { if(!c.empty) n[c.slot.o.name] = (n[c.slot.o.name] || 0) + 1; });
+    const nEmptied = copies.filter(c => c.empty).length, missing = (p.items || []).length - copies.length;
+    $('#plInfo').textContent = `${(p.items || []).length} buildings: ` + (Object.entries(n).map(([k, v]) => `${v} ${k}`).join(', ') || 'no object')
+      + (nEmptied ? `, ${nEmptied} left empty (Draw spaced)` : '') + (missing > 0 ? `, ${missing} whose object is gone` : '')
+      + '. Each object\'s width and depth are its building\'s, its height its own; Create layout from dataset lays them again.';
   }
   // an automatic placement's panel: its settings, its islands, and what it laid
   function renderAutoBox(p, g0, o, pk, onRoad){
@@ -5183,6 +5344,8 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
   // its settings, its islands or the texture change. Drawn on the overlay, at screen size and
   // only what is in view: a city takes thousands of them
   const AUTO_DEFAULT = { weight: 1, islands: 'all', setback: 3, gap: 2 };
+  // a placement laid copy by copy: an automatic one (on the islands) or a layout (on the buildings)
+  function laid(p){ return !!(p && (p.auto || p.layout)); }
   const autoOf = p => ({ ...AUTO_DEFAULT, ...(p.auto || {}) });
   const autoAsk = new WeakMap(), autoNote = new WeakMap(), autoTimer = new WeakMap(), autoLaidFor = new WeakMap(), autoKey = new WeakMap();
   const AUTO_BIG = 200;                 // islands from which the console follows the laying (a city: a few seconds)
@@ -5267,7 +5430,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
   function autoCopyAt(x, y, only){
     for(let i = S.gen.placements.length - 1; i >= 0; i--){
       const p = S.gen.placements[i];
-      if((only != null && i !== only) || !p.auto || !(p.items || []).length) continue;
+      if((only != null && i !== only) || !laid(p) || !(p.items || []).length) continue;
       const g0 = autoGeom(p); if(!g0) continue;
       for(const c of g0.copies){
         const dx = x - c.cx, dy = y - c.cy;
@@ -5276,13 +5439,13 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     }
     return null;
   }
-  function hasAuto(){ return S.gen.placements.some(p => p.auto && (p.items || []).length); }
+  function hasAuto(){ return S.gen.placements.some(p => laid(p) && (p.items || []).length); }
   // on the overlay (drawOverlay): each object's footprint in its colour (a package's slot
   // colour), the arrow on its front; in Turn single objects its axis and id, in Draw spaced
   // its empty spots dashed. The selected placement's outlines drawn heavier
   function drawAutoOn(ctx, v){
     S.gen.placements.forEach((p, i) => {
-      if(!p.auto || !(p.items || []).length) return;
+      if(!laid(p) || !(p.items || []).length) return;
       const g0 = autoGeom(p); if(!g0) return;
       const sel = i === S.gen.plSel, ed = S.gen.edit && S.gen.edit.i === i ? S.gen.edit.kind : null;
       const X = q => q[0] * v.k + v.ox, Y = q => q[1] * v.k + v.oy;
@@ -5389,7 +5552,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
   $('#genVp').addEventListener('pointerdown', e => {
     const ed = S.gen.edit;
     if(!S.gen.mask || !ed || (ed.kind !== 'objects' && ed.kind !== 'spaces') || e.button !== 0 || onHandle(e) || e.target.closest('.vp-tools')) return;
-    const p = S.gen.placements[ed.i]; if(!p || !p.auto) return;
+    const p = S.gen.placements[ed.i]; if(!p || !laid(p)) return;
     const [x, y] = toMask(e), hit = autoCopyAt(x, y, ed.i); if(!hit) return;
     if(ed.kind === 'objects') pickObject(e, hit[1].id);
     else spaceAt(e, ed.i, hit[1].id, !hit[1].empty, true);
@@ -5398,7 +5561,7 @@ const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
     // Draw spaced: dragging on empties (or brings back) every object passed over
     const ed = S.gen.edit;
     if(!ed || ed.kind !== 'spaces' || ed.paint == null || !(e.buttons & 1)) return;
-    const p = S.gen.placements[ed.i]; if(!p || !p.auto) return;
+    const p = S.gen.placements[ed.i]; if(!p || !laid(p)) return;
     const [x, y] = toMask(e), hit = autoCopyAt(x, y, ed.i);
     if(hit) spaceAt(e, ed.i, hit[1].id, ed.paint, false);
   });
