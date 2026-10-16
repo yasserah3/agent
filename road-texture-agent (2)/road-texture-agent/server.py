@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.16-coords10"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.16-coords11"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1873,7 +1873,10 @@ def generate(payload: dict):
                {"mask": rec["id"], "result": res, "libraries": libraries,
                 "decisions": decisions})
 
-    return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions,
+    # the speed-up files of every other texture go (app/caches.py): only this one's are kept
+    from app import caches as CA
+    _, freed = CA.release(ARTIFACTS, keep={gid})
+    return {"ok": True, "id": gid, "urls": urls, "summary": res, "decisions": decisions, "caches_freed": freed,
             "routes": routes, "inner_streets": streets["report"], "project_areas": streets["project_areas"],
             "dash_share": round(dash_share, 3),
             "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
@@ -2821,6 +2824,23 @@ def texture_update(payload: dict):
         event = UP.commit(ARTIFACTS, gid, now, changes, parts)
         return {"ok": True, "changed": changes, "parts": event["parts"], "revision": event["revision"],
                 "urls": urls, "decals": result, "islands": islands}
+
+
+@app.post("/api/caches/release")
+def caches_release(payload: dict):
+    """
+    Another mask was loaded (an alpha map, coordinates, another street): the speed-up files
+    of the textures of other masks go (app/caches.py); those of this mask's stay.
+    """
+    from app import caches as CA
+    mask = str(payload.get("mask") or "")
+
+    def keep(gid):
+        art = mem.artifact(f"{gid}_map")
+        meta = (art or {}).get("meta") or {}
+        return bool(mask) and mask in (meta.get("mask"), meta.get("base_mask"))
+    n, freed = CA.release(ARTIFACTS, keep=keep)
+    return {"ok": True, "files": n, "freed": freed, "freed_text": CA.size_text(freed)}
 
 
 @app.get("/api/texture/tiles/{gid}")
@@ -4428,5 +4448,13 @@ if __name__ == "__main__":
         print("")
         input("  Press Enter to close this window...")
         sys.exit(1)
+    # the speed-up files of the session before go, and from now on those unused for an hour
+    # (app/caches.py); only once this server is the one running (not a second copy)
+    from app import caches as CA
+    _n, _freed = CA.release(ARTIFACTS)
+    _freed += CA.clear_leftovers(ARTIFACTS)
+    if _freed:
+        print("  Freed %s: the speed-up files of the textures of the last session." % CA.size_text(_freed))
+    CA.start_sweeper(ARTIFACTS)
     print("Road Texture Agent %s: http://127.0.0.1:8765" % VERSION)
     uvicorn.run(app, host="127.0.0.1", port=8765, log_level="warning")

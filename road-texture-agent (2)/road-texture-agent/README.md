@@ -372,6 +372,29 @@ file the same).
     street's tiles came out ×0.67 to ×0.82, the faded one's ×1.37 to ×1.43, and a
     tile rated 40% kept the area's tone.
 
+### The speed-up files go by themselves
+
+Each Generate texture used to leave two big files in `workspace/artifacts` for
+good: `gen_<id>_geometry.cache` (the mask cleaned, its junctions and streets:
+tens to hundreds of MB, more on big maps) and `gen_<id>_surface.npz` (the
+material and wear before their settings). Only **Update 2D texture on that same
+texture** reads them, to skip making them again; without them it makes them
+again, the same picture, only slower. Nothing else uses them: not the training
+(the libraries and trees), not the satellite analysis's confidence, not the
+dataset. So now they are deleted by themselves (`app/caches.py`):
+
+- **when the server starts**: those of the session before (the console says how
+  much was freed);
+- **when a texture is made**: those of every other texture, only the new one's
+  kept;
+- **when you load another mask** (an alpha map, coordinates, another street):
+  those of the other masks' textures (the console says how much was freed);
+- **an hour after they were last used**, made or read (looked for every 10
+  minutes).
+
+A file written in the last two minutes is always left. On the test workspace
+the first start freed 909 MB.
+
 ## Memory tab and the ordered libraries
 
 Every pair keeps its own library for each part of the road: junction, kerb and

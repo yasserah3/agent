@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.16-coords10';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.16-coords11';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -824,8 +824,14 @@ const UI_VERSION = '2026.10.16-coords10';   // must match VERSION in server.py
   });
   // a street mask to generate from: a loaded alpha map, or an area's alpha from its coordinates
   async function useGenMask(rec){
+      const otherMask = !S.gen.mask || S.gen.mask.id !== rec.id;
       S.gen.mask = rec; S.gen.junctions = null;
       $('#satTexBox').hidden = !(rec.coords && rec.coords.key);
+      // another mask: the speed-up files of other masks' textures go (app/caches.py)
+      if(otherMask) api('/api/caches/release', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ mask: rec.id }) })
+        .then(r => { if(r && r.freed > 0) log(`Freed ${r.freed_text}: the speed-up files of earlier textures (Update 2D texture makes them again if it needs them).`); })
+        .catch(() => {});
       drawInto($('.thumb', genRow), rec.img);
       $('.imgrow-s', genRow).textContent = `${rec.name}, ${rec.width} × ${rec.height}`;
       drawInto($('#genMaskPrev'), rec.img);
@@ -1472,6 +1478,7 @@ const UI_VERSION = '2026.10.16-coords10';   // must match VERSION in server.py
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
       if(s.street_material) log(`  Streets: ${s.street_material}, laid at its real size; your material's lighter and darker areas kept on it.`);
       if(s.tiles) texTilesLog(s.tiles);
+      if(res.caches_freed > 0) log(`  Freed ${res.caches_freed >= 1e9 ? (res.caches_freed / 1e9).toFixed(1) + ' GB' : Math.round(res.caches_freed / 1e6) + ' MB'}: the speed-up files of earlier textures.`);
       Object.entries(res.decisions || {}).forEach(([k,d]) => log(`  ${k}: ${d.label || 'none'}${d.rank ? ` (position ${d.rank})` : ''}${d.exhausted ? ', all rejected' : ''}`));
       log(`  Lines ${s.markings.rules === 'guide' ? 'by the road marking guide' : 'all dashed alike'}${s.markings.yellow ? ', centre lines yellow' : ''}: `
         + `${s.markings.dashes} dashes placed, lines ${s.markings.width_px} px wide${

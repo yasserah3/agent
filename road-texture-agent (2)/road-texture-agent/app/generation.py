@@ -1094,6 +1094,8 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         with open(geometry, "rb") as fh:
             det = pickle.load(fh)
         coverage = det["coverage"]
+        from app import caches as CA
+        CA.used(geometry)                     # kept another hour (app/caches.py)
     else:
         prepared, coverage = prepare_mask(gray, scale)
         prog.stage("junctions", "finding the junctions and streets")
@@ -1114,6 +1116,9 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     cached_surface = params.get("_surface_cache")
     reuse = params.get("_reuse_surface") and cached_surface and Path(cached_surface).exists()
     cached = np.load(cached_surface) if reuse else None
+    if reuse:
+        from app import caches as CA
+        CA.used(cached_surface)
     run = None
     if reuse:
         material = cached["material"].copy()
