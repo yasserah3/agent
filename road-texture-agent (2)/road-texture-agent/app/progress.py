@@ -34,6 +34,7 @@ class Job:
         self.same, self.same_note = None, ""     # another job doing this one's work
         self.ended = None
         self.error = None
+        self.detail = None                       # what the page may draw besides the bar (the tiles done...)
 
     def stage(self, key, label):
         if self.key is not None:
@@ -67,9 +68,12 @@ class Job:
         left = None
         if not self.ended and done > 0.02 and elapsed > 1.5:
             left = elapsed * (1.0 - done) / done
-        return {"id": self.id, "name": self.name, "stage": self.label, "done": round(done, 4),
-                "elapsed": round(elapsed, 1), "left": None if left is None else round(left, 1),
-                "finished": self.ended is not None, "error": self.error}
+        out = {"id": self.id, "name": self.name, "stage": self.label, "done": round(done, 4),
+               "elapsed": round(elapsed, 1), "left": None if left is None else round(left, 1),
+               "finished": self.ended is not None, "error": self.error}
+        if self.detail is not None:
+            out["detail"] = self.detail
+        return out
 
 
 class job:
@@ -110,6 +114,31 @@ def note(label):
     j = getattr(_here, "job", None)
     if j is not None:
         j.label = label
+
+
+def current():
+    """This thread's job (to report to from other threads), or None."""
+    return getattr(_here, "job", None)
+
+
+def replan(plan):
+    """This thread's job goes by another list of stages from here on (a texture made in tiles...)."""
+    j = getattr(_here, "job", None)
+    if j is not None:
+        done = [k for k in j.plan if k == j.key]
+        j.plan = dict(plan)
+        j.total = sum(j.plan.values()) or 1.0
+        j.finished_share = 0.0
+        keys = list(j.plan)
+        if done and done[0] in j.plan:
+            j.finished_share = sum(j.plan[k] for k in keys[:keys.index(done[0])])
+
+
+def detail(value):
+    """What this thread's job tells the page besides its bar (a dict the page knows how to draw)."""
+    j = getattr(_here, "job", None)
+    if j is not None:
+        j.detail = value
 
 
 def follow(jid, why=""):

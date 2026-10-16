@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.16-coords10';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -56,6 +56,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
         const r = await fetch(API + '/api/progress/' + id);
         const j = r.ok ? await r.json() : null;
         if(j && timer) snap = j;                           // not once the page has taken over
+        if(j && j.detail && window.onJobDetail) window.onJobDetail(j.detail, j);
       }catch(_){}
       busy = false; draw();
     };
@@ -824,6 +825,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
   // a street mask to generate from: a loaded alpha map, or an area's alpha from its coordinates
   async function useGenMask(rec){
       S.gen.mask = rec; S.gen.junctions = null;
+      $('#satTexBox').hidden = !(rec.coords && rec.coords.key);
       drawInto($('.thumb', genRow), rec.img);
       $('.imgrow-s', genRow).textContent = `${rec.name}, ${rec.width} × ${rec.height}`;
       drawInto($('#genMaskPrev'), rec.img);
@@ -986,7 +988,85 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
       else if(r && r.confidence != null){ fill = satRamp(r.confidence / 100); label = Math.round(r.confidence); ink = '#fff'; }
       g.fillStyle = fill; g.fillRect(x + 1, y + 1, cs - 2, cs - 2);
       if(cs >= 16 && label !== ''){ g.fillStyle = ink; g.fillText(String(label), x + cs / 2, y + cs / 2 + 0.5); }
+      if(TEX.live && texHere()){
+        // Generate texture at work: the tiles it has done framed, the others dimmed
+        if(TEX.live.done.has(t.id)){ g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x + 2, y + 2, cs - 4, cs - 4); }
+        else { g.fillStyle = 'rgba(10,12,14,.55)'; g.fillRect(x + 1, y + 1, cs - 2, cs - 2); }
+      }
     }
+  }
+  /* ---- the texture made in the same tiles (app/tiled.py): while Generate texture works, the tiles done
+     framed white and the others dimmed; afterwards each tile tells where its asphalt's tone came from */
+  const TEX = { live: null, tiles: null, gid: null, info: null };
+  const texHere = () => !!(SAT.key && satAreaKey() === SAT.key);
+  window.onJobDetail = d => {
+    if(!d || d.kind !== 'texture_tiles') return;
+    TEX.live = { phase: d.phase, done: new Set(d.done || []), total: d.total };
+    texCardState(); satDraw();
+  };
+  function texTilesLog(t){
+    const b = t.by_tone || {};
+    log(`  Made in ${t.count} tiles, the satellite analysis's ${t.tile_px} px squares (${t.with_road} with road, `
+      + `${t.workers === 'here' ? 'one after another' : `${t.workers} at a time`}), one set of materials for all, so they join without a seam.`);
+    if(t.tone) log(`  Asphalt tone from the satellite: ${b.satellite || 0} tile(s) seen well enough follow it, `
+      + `${b.rules || 0} keep the area's usual tone (rated under ${$('#satThr').value}%).`);
+    else if(+$('#satTone').value > 0) log('  Asphalt tone: one tone everywhere (the satellite analysis is not finished, or saw too little asphalt): Generate texture again once its card says done.');
+  }
+  async function texTilesLoad(res){
+    TEX.live = null; TEX.tiles = null; TEX.gid = null; TEX.info = null;
+    const t = res && res.summary && res.summary.tiles;
+    if(t && t.url){
+      try{
+        const r = await api(t.url);
+        TEX.tiles = Object.fromEntries((r.reports || []).map(x => [x.id, x]));
+        TEX.gid = res.id; TEX.info = t;
+      }catch(_){}
+    }
+    texCardState(); satDraw();
+  }
+  // after Update 2D texture (a new tone, say): the tiles' report as it is now
+  async function texTilesRefresh(gid){
+    if(!TEX.info || TEX.gid !== gid) return;
+    try{
+      const r = await api(TEX.info.url + '?v=' + Date.now().toString(36));
+      const reps = r.reports || [], by = {};
+      reps.forEach(x => { const k = x.tone || (x.road_px ? 'area' : 'no road'); by[k] = (by[k] || 0) + 1; });
+      TEX.tiles = Object.fromEntries(reps.map(x => [x.id, x]));
+      TEX.info = { ...TEX.info, tone: r.tone || null, by_tone: by };
+    }catch(_){}
+    texCardState(); satDraw();
+  }
+  function texCardState(){
+    const box = $('#satTex'), here = texHere();
+    if(TEX.live && here){
+      box.hidden = false; $('#btnSatTexPic').hidden = true;
+      $('#satTexNote').textContent = `Generate texture: ${TEX.live.phase === 'material' ? 'material and wear' : 'the pictures'}, `
+        + `tile ${TEX.live.done.size} of ${TEX.live.total}. Framed: done.`;
+      return;
+    }
+    const on = !!(TEX.info && here && S.gen.result && S.gen.result.id === TEX.gid);
+    box.hidden = !on; $('#btnSatTexPic').hidden = !on;
+    if(!on) return;
+    const t = TEX.info, b = t.by_tone || {};
+    $('#satTexNote').textContent = `The texture was made in these tiles: ${t.with_road} of ${t.count} with road, one set of materials. `
+      + (t.tone ? `Asphalt tone: ${b.satellite || 0} from the satellite, ${b.rules || 0} the area's. Point at a tile.` : 'One asphalt tone everywhere.');
+  }
+  $('#btnSatTexPic').addEventListener('click', async () => {
+    if(!TEX.gid) return;
+    try{
+      const img = await loadImage(`${API}/api/texture/tiles/${TEX.gid}?v=${Date.now().toString(36)}`);
+      genVp.show(img, TEX.info && TEX.info.tone ? 'Texture tiles: green, tone from the satellite · amber, the area\'s tone (rules) · grey, no road'
+                                                : 'Texture tiles: white, one tone (asphalt tone from the satellite at 0) · grey, no road');
+    }catch(e){ log('Texture tiles: ' + e.message, 'bad'); }
+  });
+  function texTip(id){
+    if(!TEX.tiles || !texHere() || !S.gen.result || S.gen.result.id !== TEX.gid) return '';
+    const r = TEX.tiles[id];
+    if(!r) return '';
+    if(!r.road_px) return ' · texture: no road (background only)';
+    if(r.tone === 'satellite') return ` · texture: asphalt tone from the satellite (×${(r.gain ?? 1).toFixed(2)})`;
+    if(r.tone === 'rules') return ' · texture: the area\'s usual tone (rated under the threshold)';
+    return '';
   }
   function satTip(){ $('#satTip').textContent = 'Each square a tile: 100 until it is looked at, then how well its road is seen. Point at one for why.'; }
   $('#satTiles').addEventListener('mousemove', e => {
@@ -996,11 +1076,12 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
     const col = Math.floor((e.clientX - rc.left) / c.cs), row = Math.floor((e.clientY - rc.top) / c.cs);
     const t = d.grid.find(t => t.row === row && t.col === col);
     const r = t && d.tiles[t.id];
-    $('#satTip').textContent = !t ? '' : !r ? `Tile ${t.id}: not looked at yet (100 for now).`
+    $('#satTip').textContent = !t ? '' : (!r ? `Tile ${t.id}: not looked at yet (100 for now).`
       : r.state === 'no_road' ? `Tile ${t.id}: no road.`
       : r.state === 'failed' ? `Tile ${t.id}: could not be analysed.`
       : `Tile ${t.id}: road ${Math.round(r.confidence)}%, markings ${Math.round(r.confidence_marks ?? r.confidence)}%`
-        + ((r.reasons || []).length ? ` · ${r.reasons.map(x => `${x.why} −${x.minus}`).join('; ')}` : ' · nothing hides the road');
+        + ((r.reasons || []).length ? ` · ${r.reasons.map(x => `${x.why} −${x.minus}`).join('; ')}` : ' · nothing hides the road'))
+      + texTip(t.id);
   });
   $('#satTiles').addEventListener('mouseleave', satTip);
   function satRender(){
@@ -1027,6 +1108,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
     } else { $('#satSum').textContent = ''; $('#satBtns').hidden = true; }
     satPlaceState();
     dsCardState();
+    texCardState();
   }
   async function satPoll(){
     if(!SAT.key) return;
@@ -1051,6 +1133,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
     satPoll();
   }
   $('#satHead').addEventListener('click', () => $('#satCard').classList.toggle('folded'));
+  $('#satTone').addEventListener('input', () => { $('#satToneVal').textContent = $('#satTone').value; });
   $$('#satBtns [data-pic]').forEach(b => b.addEventListener('click', async () => {
     if(!SAT.key) return;
     const k = b.dataset.pic;
@@ -1321,7 +1404,12 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
           grain: +$('#grainAmt').value, match_material: $('#matchMat').checked,
           line_width_mode: MARKS.opts.sizes === 'learned' ? 'learned' : 'fixed',
           materials: { street: $('#matStreet').value }, match_tone: $('#matTone').checked, lane_picks: LANES.picks,
-          mark_area: MAREA.area }, model, layers: DEC.layers}));
+          mark_area: MAREA.area,
+          // made from coordinates (in the satellite's tiles): the asphalt's tone from the satellite, and
+          // the confidence a tile needs for it (the card's "Rules in tiles under")
+          ...(S.gen.mask.coords && S.gen.mask.coords.key
+            ? { sat_tone: +$('#satTone').value, sat_threshold: Math.max(0, Math.min(100, Number($('#satThr').value) || 0)) } : {}) },
+        model, layers: DEC.layers}));
   }
   async function updateTexture2D(quiet=false){
     if(!S.gen.result) return false;
@@ -1340,6 +1428,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
       if(res.islands) S.gen.islandTex={...res.islands,gid:S.gen.result.id};
       else if(S.gen.islandTex && res.urls.full) S.gen.islandTex.urls.full=res.urls.full;
       S.gen.updateRevision=res.revision;renderTextureLogs();
+      if((res.parts || []).includes('surfaces')) texTilesRefresh(gid);
       S.gen.marksPainted=marksKey();S.gen.lanesPainted=JSON.stringify(LANES.picks);MAREA.painted=JSON.stringify(MAREA.area);
       if(res.changed.length){
         log(`2D texture updated: ${res.changed.map(c=>c.field).join(', ')}. Saved update ${res.revision}.`,'ok');
@@ -1382,6 +1471,7 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
       log(`Output ${s.size[0]} × ${s.size[1]} (${s.output_scale}× the mask${s.soft_edges ? ', smooth edges' : ''}), grain ${Math.round(s.grain*50)}${s.matched_tone != null ? `, colour matched to tone ${s.matched_tone}` : ''}.`);
       log(`  Road ${s.road_width_px} px wide (${s.road_width_m} m), ${s.junctions} junctions.`);
       if(s.street_material) log(`  Streets: ${s.street_material}, laid at its real size; your material's lighter and darker areas kept on it.`);
+      if(s.tiles) texTilesLog(s.tiles);
       Object.entries(res.decisions || {}).forEach(([k,d]) => log(`  ${k}: ${d.label || 'none'}${d.rank ? ` (position ${d.rank})` : ''}${d.exhausted ? ', all rejected' : ''}`));
       log(`  Lines ${s.markings.rules === 'guide' ? 'by the road marking guide' : 'all dashed alike'}${s.markings.yellow ? ', centre lines yellow' : ''}: `
         + `${s.markings.dashes} dashes placed, lines ${s.markings.width_px} px wide${
@@ -1424,7 +1514,8 @@ const UI_VERSION = '2026.10.15-coords9';   // must match VERSION in server.py
       renderLayerThumbs();
       renderInfo();
       refreshTopView(res.id);
-    }catch(e){ log(e.message, 'bad'); $('#genNote').textContent = e.message; }
+      await texTilesLoad(res);
+    }catch(e){ log(e.message, 'bad'); $('#genNote').textContent = e.message; TEX.live = null; texCardState(); satDraw(); }
     status('Ready.'); $('#btnGenerate').disabled = false; renderMemory();
   });
 

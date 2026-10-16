@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.15-coords9"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.16-coords10"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1788,6 +1788,8 @@ def generate(payload: dict):
         prog.stage("junction_marks", "where the junction markings go")
         _, line_ends, jplan = _junction_marks(streets["lines_path"] or rec["path"], float(payload.get("scale", 0.25)),
                                               lane_picks, streets["nomark"], marks, presets, _bridges_of(base, rec))
+    # made from coordinates: the texture made in the satellite analysis's tiles (app/tiled.py)
+    tiles_cfg = _texture_tiles(base, payload)
     gen_params = {
         "marks": marks,
         "line_ends": line_ends,
@@ -1795,6 +1797,7 @@ def generate(payload: dict):
         "mark_area": mark_area,
         "nomark": streets["nomark"],
         **({"lines_mask": streets["lines_path"]} if streets["lines_path"] else {}),
+        **({"tiles": tiles_cfg} if tiles_cfg else {}),
         "metres_per_pixel": float(payload.get("scale", 0.25)),
         "wear": float(payload.get("wear", 50)) / 100.0,
         "seed": int(payload.get("seed", 7)),
@@ -1817,6 +1820,14 @@ def generate(payload: dict):
     res = G.generate(rec["path"], libraries, gen_params, dict(outs, streets=streets_path, lanes=lanes_path), map_path)
     _write_json(ARTIFACTS / f"gen_{gid}_inputs.json", {"libraries": libraries,
                 "params": {k: v for k, v in gen_params.items() if k not in ("street_material", "nomark")}})
+    tiles = res.get("tiles")
+    if tiles:
+        # the tiles it was made in, each with its road and where its asphalt's tone came from
+        _write_json(ARTIFACTS / f"gen_{gid}_tiles.json", tiles)
+        mem.add_artifact(f"{gid}_tiles", "generation_tiles", ARTIFACTS / f"gen_{gid}_tiles.json",
+                         {"mask": rec["id"], "count": tiles["count"]})
+        res["tiles"] = dict({k: v for k, v in tiles.items() if k != "reports"}, url=f"/api/artifact/{gid}_tiles",
+                            by_tone=_tile_tones(tiles["reports"]))
     from app import updates as UP
     UP.initialise(ARTIFACTS, gid, payload.get("snapshot") or {"texture": payload, "model": {}})
     mem.add_artifact(f"{gid}_streets", "generated_streets", streets_path, {"mask": rec["id"]})
@@ -1868,6 +1879,38 @@ def generate(payload: dict):
             "islands": {"count": len(islands), "url": f"/api/artifact/{gid}_islands"},
             "streets": {"url": f"/api/artifact/{gid}_streets"}, "lane_picks": lane_picks, "mark_area": mark_area,
             "marks": _marks_out(marks), "junction_marks": jplan}
+
+
+def _texture_tiles(base, payload):
+    """
+    An alpha made from coordinates (app/coords.py) is textured in its satellite analysis's
+    tiles (app/tiled.py): their settings (the area's folder, the tile, the asphalt's tone from
+    the satellite and the confidence it needs), or None for any other mask.
+    """
+    c = ((base or {}).get("meta") or {}).get("coords") or {}
+    key = c.get("key")
+    if not key or not re.fullmatch(r"[0-9a-f]{12}", str(key)) or not (COORDS / key / "area.json").exists():
+        return None
+    from app import observed as OBS
+    from app import sat_analysis as SA
+
+    def num(v, default):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+    return {"area": str(COORDS / key), "key": key, "tile": SA.TILE, "tmp": str(ARTIFACTS / "tiles_tmp"),
+            "tone": min(1.0, max(0.0, num(payload.get("sat_tone", 50), 50.0) / 100.0)),
+            "threshold": min(100.0, max(0.0, num(payload.get("sat_threshold", OBS.THRESHOLD), OBS.THRESHOLD)))}
+
+
+def _tile_tones(reports):
+    """How many tiles took their asphalt's tone from the satellite, from the rules, or had no road."""
+    out = {}
+    for r in reports:
+        k = r.get("tone") or ("no road" if not r.get("road_px") else "area")
+        out[k] = out.get(k, 0) + 1
+    return out
 
 
 def _marks_out(marks):
@@ -2693,7 +2736,8 @@ def texture_update(payload: dict):
             return {"ok": True, "changed": changes, "parts": ["geometry"], "revision": event["revision"],
                     "generation_result": replacement, "urls": replacement["urls"], "decals": decals, "islands": islands}
         surface_fields = {"texture.wear", "texture.grain", "texture.quality", "texture.seed", "texture.match_material",
-                          "texture.materials.street", "texture.match_tone", "texture.soft_edges"}
+                          "texture.materials.street", "texture.match_tone", "texture.soft_edges",
+                          "texture.sat_tone", "texture.sat_threshold"}
         surface_changed = bool(fields & surface_fields)
         lines_changed = bool(fields & {"texture.align_lines", "marking_engine"}) or any(f.startswith(("texture.marks.", "texture.lane_picks", "texture.mark_area")) for f in fields)
         decal_changed = "marking_engine" in fields or any(f.startswith(("layers", "texture.mark_area", "texture.marks.")) for f in fields) or "model.decals" in fields
@@ -2722,13 +2766,20 @@ def texture_update(payload: dict):
                           soft_edges=bool(texture.get("soft_edges", True)),
                           street_material=_street_material(texture), align_lines=bool(texture.get("align_lines")))
             # Patch placement is unchanged for grain, wear strength and material selection changes.
+            if params.get("tiles"):
+                # made in tiles (an area from coordinates): the asphalt's tone as now set
+                fresh = _texture_tiles(mem.image(gm["meta"].get("base_mask") or gm["meta"]["mask"]), texture)
+                if fresh:
+                    params["tiles"] = dict(params["tiles"], tone=fresh["tone"], threshold=fresh["threshold"])
             params["_reuse_surface"] = not bool(fields & {"texture.quality", "texture.seed"})
             params["_keep_markings"] = not lines_changed
             nm = gm["meta"].get("nomark")
             params["nomark"] = np.array(Image.open(nm).convert("L")) > 127 if nm and Path(nm).exists() else None
             outs = {k: ARTIFACTS / f"gen_{gid}_{k}.png" for k in ("result", "material", "wear", "markings")}
-            G.generate(rec["path"], saved["libraries"], params,
-                       dict(outs, streets=ARTIFACTS/f"gen_{gid}_streets.json", lanes=Path(lanes_art["path"])))
+            gres = G.generate(rec["path"], saved["libraries"], params,
+                              dict(outs, streets=ARTIFACTS/f"gen_{gid}_streets.json", lanes=Path(lanes_art["path"])))
+            if gres.get("tiles"):
+                _write_json(ARTIFACTS / f"gen_{gid}_tiles.json", gres["tiles"])
             base = ARTIFACTS / f"gen_{gid}_result_base.png"
             if base.exists():
                 import shutil
@@ -2770,6 +2821,49 @@ def texture_update(payload: dict):
         event = UP.commit(ARTIFACTS, gid, now, changes, parts)
         return {"ok": True, "changed": changes, "parts": event["parts"], "revision": event["revision"],
                 "urls": urls, "decals": result, "islands": islands}
+
+
+@app.get("/api/texture/tiles/{gid}")
+def texture_tiles_picture(gid: str):
+    """
+    A texture made in tiles (an area from coordinates, app/tiled.py), with its tiles drawn
+    on it: framed green where the asphalt's tone came from the satellite, amber where the
+    area's usual tone was kept (rated under the threshold), white where the tone is off
+    (one tone everywhere), grey where there is no road.
+    """
+    if not re.fullmatch(r"[0-9a-f]{12}", gid or ""):
+        raise HTTPException(404, "unknown generation")
+    art, res = mem.artifact(f"{gid}_tiles"), mem.artifact(f"{gid}_result")
+    if not art or not res or not Path(art["path"]).exists():
+        raise HTTPException(404, "this texture was not made in tiles")
+    out = ARTIFACTS / f"gen_{gid}_tiles_picture.png"
+    src = [Path(art["path"]), Path(res["path"])]
+    if not out.exists() or out.stat().st_mtime < max(f.stat().st_mtime for f in src):
+        from PIL import ImageDraw
+        tiles = json.loads(src[0].read_text())
+        img = Image.open(src[1]).convert("RGB")
+        mw = max(r["core"][2] for r in tiles["reports"])
+        f = min(1.0, 1600 / max(img.width, img.height))
+        img = img.resize((max(1, round(img.width * f)), max(1, round(img.height * f))), Image.Resampling.BOX)
+        k = img.width / mw
+        veil = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        dv = ImageDraw.Draw(veil)
+        colours = {"satellite": (60, 200, 90), "rules": (240, 170, 30)}
+        for r in tiles["reports"]:
+            x0, y0, x1, y1 = [round(v * k) for v in r["core"]]
+            # with the tone off (0) a tile with road keeps one tone: white
+            c = colours.get(r.get("tone"), (235, 235, 235)) if r.get("road_px") else None
+            if c is None:
+                dv.rectangle([x0, y0, x1 - 1, y1 - 1], fill=(0, 0, 0, 90), outline=(140, 140, 140, 200))
+            else:
+                dv.rectangle([x0, y0, x1 - 1, y1 - 1], fill=c + (12,), outline=c + (255,), width=2)
+            label = r["id"] + (f"  x{r['gain']:.2f}" if r.get("gain") is not None else "")
+            tw = dv.textlength(label)
+            dv.rectangle([x0 + 3, y0 + 3, x0 + 9 + tw, y0 + 17], fill=(0, 0, 0, 160))
+            dv.text((x0 + 6, y0 + 4), label, fill=(255, 255, 255, 240))
+        img = Image.alpha_composite(img.convert("RGBA"), veil).convert("RGB")
+        img.save(out)
+    return FileResponse(out, media_type="image/png")
 
 
 @app.get("/api/marks/spec")

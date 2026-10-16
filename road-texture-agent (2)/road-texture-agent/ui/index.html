@@ -342,6 +342,7 @@
   .sat-card.folded .sat-place{ display:none !important; }
   .sat-card{ max-height:calc(100% - 60px); overflow-y:auto; }
   .sat-card.folded .sat-save{ display:none !important; } .sat-save .btn{ width:100%; }
+  .sat-card.folded .sat-tex{ display:none !important; }
   /* Save to the dataset: the popup's list of kinds */
   .ds-all{ display:flex; align-items:center; gap:8px; padding:6px 2px; border-bottom:1px solid var(--line); font-weight:600; cursor:pointer; }
   .ds-list{ max-height:300px; overflow-y:auto; margin:4px 0 8px; }
@@ -835,6 +836,12 @@
           <div class="field"><label for="noiseAmt">Wear amount</label><input type="range" id="noiseAmt" min="0" max="100" value="50"></div>
           <div class="field"><label for="matchMat">Match my material colour</label><input type="checkbox" id="matchMat" style="justify-self:start;accent-color:var(--blue)"></div>
           <div class="field"><label for="seed">Variation seed</label><input type="number" id="seed" value="7" step="1" min="1"></div>
+          <div id="satTexBox" hidden>
+            <div style="margin-top:12px;font-weight:600;font-size:13px">From the satellite</div>
+            <div class="note" style="margin:2px 0 6px">This alpha came from coordinates: Generate texture makes it in the satellite analysis's tiles, side by side, with one set of materials for all of them, so they join without a seam.</div>
+            <div class="field"><label for="satTone">Asphalt tone from the satellite <span id="satToneVal" class="mono" style="color:var(--faint)">50</span></label><input type="range" id="satTone" min="0" max="100" value="50"></div>
+            <div class="note" id="satToneNote" style="margin:-2px 0 6px">0: one tone everywhere. Higher: each street lighter or darker as the satellite shows it (new black asphalt, old grey), in the tiles it saw well (at or above the card's "Rules in tiles under"); the other tiles keep the area's usual tone.</div>
+          </div>
           <div class="rm-box" id="rmBox"><div class="note">Loading the road marking guide…</div></div>
           <div style="margin-top:12px;font-weight:600;font-size:13px">Lanes</div>
           <div class="note" id="lanesNote" style="margin:2px 0 6px">Every street's lanes are split evenly between its two sides, as many as its width holds (3 m a lane at least). Generate texture, then Set lanes and click a street to choose its own; Done lays just that street's lines on the texture (no new texture).</div>
@@ -975,6 +982,11 @@
           <button type="button" class="btn secondary" data-pic="findings" style="margin-top:6px">Findings</button>
           <button type="button" class="btn secondary" data-pic="confidence" style="margin-top:6px">Confidence</button>
           <button type="button" class="btn secondary" data-pic="satellite" style="margin-top:6px">Satellite</button>
+        </div>
+        <div class="sat-place sat-tex" id="satTex" hidden>
+          <div class="sat-ph">Texture tiles</div>
+          <div class="sat-tip" id="satTexNote" style="min-height:0;margin:0 0 6px"></div>
+          <button type="button" class="btn secondary" id="btnSatTexPic" hidden style="width:100%" title="The texture with its tiles: where each tile's asphalt tone came from">Show the texture tiles</button>
         </div>
         <div class="sat-place" id="satPlace" hidden>
           <div class="sat-ph">Decals from what it saw</div>

@@ -639,12 +639,13 @@ def finish(arr, road, cov, soft_edges, nearest=None, mask=None, soft=True):
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def save_lane_state(path, worn, wear_map, road, cov, found, meta):
+def save_lane_state(path, worn, wear_map, road, cov, found, meta, extra=None):
     """
     What laying a street's lanes again needs (repaint_lanes): the worn road
     without its markings, the wear, the road and its soft edge's coverage, every
     street's centreline and width, and the settings the lines were laid with.
-    One zip of .npy files (np.load reads it), packed fast.
+    One zip of .npy files (np.load reads it), packed fast. extra: more arrays
+    to keep with them (the lines laid: paint, yellow, island, island_top).
     """
     import io
     import json
@@ -662,6 +663,8 @@ def save_lane_state(path, worn, wear_map, road, cov, found, meta):
         "paths": np.concatenate(paths) if paths else np.zeros((0, 2), np.float64),
         "meta": np.array(json.dumps(meta)),
     }
+    if extra:
+        arrays.update(extra)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
         for k, v in arrays.items():
             buf = io.BytesIO()
@@ -1079,6 +1082,10 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     mpp_out = mpp / scale                     # each output pixel covers less ground
 
     gray = np.array(Image.open(mask_path).convert("L"))
+    # an area made from coordinates: its texture made in its satellite analysis's tiles (app/tiled.py)
+    tcfg = params.get("tiles") or None
+    if tcfg:
+        prog.replan(TILED_PLAN)
     prog.stage("mask", "cleaning and smoothing the mask")
     import pickle
     from pathlib import Path
@@ -1107,9 +1114,24 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     cached_surface = params.get("_surface_cache")
     reuse = params.get("_reuse_surface") and cached_surface and Path(cached_surface).exists()
     cached = np.load(cached_surface) if reuse else None
+    run = None
     if reuse:
         material = cached["material"].copy()
         used, size_ratio = {}, {}
+    elif tcfg:
+        used, size_ratio, ratios = {}, {}, {}
+        scales = libraries.get("scales") or {}
+        for name in groups:
+            trained_mpp = scales.get(name)
+            ratios[name] = (trained_mpp / mpp_out) if trained_mpp else float(scale)
+        ratios["wear"] = (scales["open"] / mpp_out) if scales.get("open") else float(scale)
+        run = _tiles_run(tcfg, (H, W), scale, gray.shape)
+        prog.stage("tiles", f"material and wear in {len(run.grid)} tiles (the satellite's)")
+        material, wear_raw, libs = run.synthesize(groups, libraries, ratios, int(params.get("seed", 7)), overlap,
+                                                  jitter, on_tile=_tile_progress(run, "material"))
+        for name, (n, size) in libs.items():
+            used[name] = {"patches": n, "size_px": size}
+            size_ratio[name] = round(ratios[name], 3)
     else:
         acc = np.zeros((H, W, 3), np.float32)
         wtot = np.zeros((H, W), np.float32)
@@ -1161,6 +1183,18 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     if street is not None and road.any():
         material = lay_material(street, material, road, mpp_out)
 
+    # ---- the asphalt's tone the satellite shows, in the tiles it saw well (app/tiled.py)
+    tone_info = None
+    if tcfg and float(tcfg.get("tone") or 0) > 0 and road.any():
+        prog.stage("tone", "the asphalt's tone from the satellite")
+        from app import tiled as TL
+        from app import observed as OBS
+        gain, tone_info = TL.tone_field(tcfg["area"], OBS.load_analysis(tcfg["area"]),
+                                        float(tcfg.get("threshold", OBS.THRESHOLD)), mpp, float(tcfg["tone"]), (H, W))
+        if gain is not None:
+            material = material * gain
+            del gain
+
     # ---- 2. wear ----
     prog.stage("wear", "wear patches")
     wear_strength = float(params.get("wear", 0.5))
@@ -1169,6 +1203,13 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
     if reuse:
         wear_map = cached["wear"].copy()
         cached.close()
+    elif tcfg:
+        if wear_raw is not None:
+            wl = wear_raw
+            lo, hi = np.percentile(wl[road], [5, 95]) if road.any() else (0, 1)
+            wear_map = np.clip((wl - lo) / max(hi - lo, 1e-6), 0, 1)
+            wear_map[~road] = 0                 # only the road's is used: off it, the same whatever the tiles
+            del wear_raw, wl
     else:
         if wear_npz:
             wp, wm = load_patches(wear_npz, with_masks=True)
@@ -1215,6 +1256,64 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
         with open(out_paths["streets"], "w") as fh:
             json.dump({"mpp": mpp, "streets": streets}, fh, separators=(",", ":"))
 
+    if tcfg:
+        lum_mean = float(worn.mean(axis=2)[road].mean()) if road.any() else 1.0
+        run = run or _tiles_run(tcfg, (H, W), scale, gray.shape)
+        tiles_out = _finish_tiled(run, out_paths, params, material, wear_map, worn, road, coverage, soft_edges,
+                                  (paint, yellow, island, island_top), paint_rgb, wear_strength, lum_mean, det_lines,
+                                  mpp_out, scale, marks, align_lines, tone_info)
+    else:
+        tiles_out = _finish_whole(out_paths, params, material, wear_map, worn, road, coverage, soft_edges,
+                                  (paint, yellow, island, island_top), paint_rgb, wear_strength, det_lines, mpp_out,
+                                  scale, marks, align_lines)
+    if map_path is not None:
+        np.savez_compressed(
+            map_path,
+            groups=group_map(det, groups),
+            junction_ids=junction_id_map(det),
+            edge_m=(det["dt"] * mpp_out).astype(np.float32),
+            junction_types=np.array([f"{j['id']}:{j['type']}" for j in det["junctions"]]),
+            metres_per_pixel=np.array([mpp_out], np.float32),
+        )
+
+    return dict({
+        "ok": True,
+        "size": [int(W), int(H)],
+        "road_px": int(road.sum()),
+        "road_width_px": round(road_width, 1),
+        "road_width_m": round(road_width * mpp_out, 2),
+        "output_scale": scale,
+        "patch_size_ratio": size_ratio,
+        "grain": round(float(params.get("grain", 1.0)), 2),
+        "matched_tone": params.get("match_tone"),
+        "soft_edges": soft_edges,
+        "kerb_band_m": round(band_m, 2),
+        "junctions": det["summary"]["junctions"],
+        "by_type": det["summary"]["by_type"],
+        "groups": {k: {"share": round(float(v.sum() / max(1, road.sum())), 4),
+                       "library": used.get(k)} for k, v in groups.items()},
+        "markings": dash_info,
+        "wear_strength": wear_strength,
+        "street_material": (street or {}).get("name"),
+        "quality": quality,
+        "align_lines": align_lines,
+    }, **({"tiles": tiles_out} if tiles_out else {}))
+
+
+def _lane_meta(params, mpp_out, scale, shape, soft_edges, paint_rgb, wear_strength, lum_mean, align_lines, marks):
+    H, W = shape
+    return {"mpp_out": mpp_out, "scale": scale, "shape": [int(H), int(W)], "soft_edges": soft_edges,
+            "paint_rgb": [float(v) for v in paint_rgb], "wear_strength": wear_strength, "lum_mean": lum_mean,
+            "cycle_m": float(params.get("cycle_m", 9.0)), "dash_share": float(params.get("dash_share", 0.6)),
+            "width_m": float(params.get("width_m", 0.15)), "setback_m": float(params.get("setback_m", 2.0)),
+            "align": align_lines, "width_ratio": params.get("width_ratio"), "marks": marks}
+
+
+def _finish_whole(out_paths, params, material, wear_map, worn, road, coverage, soft_edges, lines, paint_rgb,
+                  wear_strength, det_lines, mpp_out, scale, marks, align_lines):
+    """The pictures (and the lanes' state) of a texture made whole."""
+    paint, yellow, island, island_top = lines
+    H, W = road.shape
     prog.stage("finishing", "blending and saving the pictures")
     lum_mean = float(worn.mean(axis=2)[road].mean()) if road.any() else 1.0
     result = with_lanes(worn, wear_map, paint, island, island_top, paint_rgb, wear_strength, lum_mean, yellow)
@@ -1247,35 +1346,108 @@ def generate(mask_path, libraries, params, out_paths, map_path=None):
             arrays = {k: state[k] for k in state.files}
         arrays.update(paint=paint, yellow=yellow, island=island, island_top=island_top)
         np.savez_compressed(out_paths["lanes"], **arrays)
-    if map_path is not None:
-        np.savez_compressed(
-            map_path,
-            groups=group_map(det, groups),
-            junction_ids=junction_id_map(det),
-            edge_m=(det["dt"] * mpp_out).astype(np.float32),
-            junction_types=np.array([f"{j['id']}:{j['type']}" for j in det["junctions"]]),
-            metres_per_pixel=np.array([mpp_out], np.float32),
-        )
+    return None
 
-    return {
-        "ok": True,
-        "size": [int(W), int(H)],
-        "road_px": int(road.sum()),
-        "road_width_px": round(road_width, 1),
-        "road_width_m": round(road_width * mpp_out, 2),
-        "output_scale": scale,
-        "patch_size_ratio": size_ratio,
-        "grain": round(float(params.get("grain", 1.0)), 2),
-        "matched_tone": params.get("match_tone"),
-        "soft_edges": soft_edges,
-        "kerb_band_m": round(band_m, 2),
-        "junctions": det["summary"]["junctions"],
-        "by_type": det["summary"]["by_type"],
-        "groups": {k: {"share": round(float(v.sum() / max(1, road.sum())), 4),
-                       "library": used.get(k)} for k, v in groups.items()},
-        "markings": dash_info,
-        "wear_strength": wear_strength,
-        "street_material": (street or {}).get("name"),
-        "quality": quality,
-        "align_lines": align_lines,
-    }
+
+TILED_PLAN = [("preparing", 0.5), ("mask", 5.0), ("junctions", 5.0), ("areas", 1.0), ("tiles", 5.0), ("tone", 0.5),
+              ("wear", 0.5), ("markings", 1.0), ("tiles_finish", 3.0), ("saving_pictures", 2.0), ("lane_state", 1.5),
+              ("saving", 0.5), ("islands", 5.0)]
+
+
+def _tiles_run(tcfg, shape, scale, mask_shape):
+    from app import tiled as TL
+    return TL.Run(dict(tcfg, mask_size=[int(mask_shape[1]), int(mask_shape[0])]), shape, scale)
+
+
+def _tile_progress(run, phase):
+    """As each tile is done: the job's bar, its line (tile n of all) and the tiles done, for the page's tile squares."""
+    job = prog.current()
+    done = []
+
+    def on_tile(kind, info, n, total):
+        done.append(info["id"])
+        if job is not None:
+            job.part(n / max(1, total))
+            job.label = (f"{'material and wear' if phase == 'material' else 'the pictures'}: tile {n} of {total}"
+                         f" (the satellite's)")
+            job.detail = {"kind": "texture_tiles", "phase": phase, "done": list(done), "total": total}
+    return on_tile
+
+
+def _save_whole(img, path):
+    """
+    A picture saved beside its place and then put there, so what reads it meanwhile (the
+    Top view building from the texture before, say) never finds half a file. Where the
+    old one cannot be replaced (Windows, while another reader has it open), saved in
+    place after a few tries.
+    """
+    import os
+    import time as _t
+    from pathlib import Path
+    path = Path(path)
+    tmp = path.with_name(path.stem + ".saving" + path.suffix)
+    img.save(tmp)
+    for _ in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            _t.sleep(0.1)
+    tmp.unlink(missing_ok=True)
+    img.save(path)
+
+
+def _finish_tiled(run, out_paths, params, material, wear_map, worn, road, coverage, soft_edges, lines, paint_rgb,
+                  wear_strength, lum_mean, det_lines, mpp_out, scale, marks, align_lines, tone_info):
+    """
+    The pictures of a texture made in tiles (app/tiled.py): each tile's four pictures made
+    in the workers, put together and saved side by side; the lanes' state written once.
+    Returns the tiles' report.
+    """
+    import threading as _th
+    paint, yellow, island, island_top = lines
+    H, W = road.shape
+    keep = bool(params.get("_keep_markings"))
+    try:
+        prog.stage("tiles_finish", f"the pictures in {len(run.grid)} tiles")
+        has_island = bool(island.any())
+        pics = run.finish({"material": material, "wear_map": wear_map, "road": road,
+                           "coverage": coverage if soft_edges else None, "paint": paint,
+                           "yellow": yellow if yellow is not None and yellow.any() else None,
+                           "island": island if has_island else None, "island_top": island_top if has_island else None},
+                          {"soft_edges": soft_edges, "paint_rgb": [float(v) for v in paint_rgb],
+                           "wear_strength": wear_strength, "lum_mean": lum_mean, "keep_markings": keep},
+                          on_tile=_tile_progress(run, "finish"))
+        reports = [run.reports[t["id"]] for t in run.grid]
+    finally:
+        run.close()
+    prog.stage("saving_pictures", "saving the pictures")
+    errors = []
+
+    def save_one(name):
+        try:
+            _save_whole(Image.fromarray(pics[name]), out_paths[name])
+        except Exception as e:                       # noqa: BLE001 - reported below
+            errors.append(f"{name}: {e}")
+    threads = [_th.Thread(target=save_one, args=(n,)) for n in pics]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise RuntimeError("the pictures could not be saved: " + "; ".join(errors))
+    del pics
+    if out_paths.get("lanes"):
+        prog.stage("lane_state", "what the Lanes tool needs")
+        save_lane_state(out_paths["lanes"], worn, wear_map, road, coverage,
+                        street_paths(det_lines, mpp_out, _at_size(params.get("nomark"), scale, road.shape)),
+                        _lane_meta(params, mpp_out, scale, (H, W), soft_edges, paint_rgb, wear_strength, lum_mean,
+                                   align_lines, marks),
+                        extra={"paint": paint, "yellow": yellow, "island": island, "island_top": island_top})
+    from app import tiled as TL
+    tone_tiles = (tone_info or {}).get("tiles") or {}
+    for r in reports:
+        r.update(tone_tiles.get(r["id"]) or {})
+    return {"count": len(reports), "with_road": sum(1 for r in reports if r.get("road_px")),
+            "tile_px": int(run.cfg.get("tile") or TL.TILE), "workers": "here" if run.cfg.get("local") else TL.workers(),
+            "tone": {k: v for k, v in (tone_info or {}).items() if k != "tiles"} or None, "reports": reports}

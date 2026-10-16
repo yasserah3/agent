@@ -318,6 +318,60 @@ is saved by itself: you choose when, and what.
 - **Saving an area again** replaces its examples of the kinds saved: none twice.
 - On the test area: 474 examples of 10 kinds in about a second.
 
+### Texture in tiles (Generate texture on an area from coordinates)
+
+An alpha made from coordinates is textured in the **same tiles its satellite
+analysis read** (512 px of the alpha a side, r0c0, r0c1...), so each texture tile
+lies on one satellite tile. Nothing to switch on: Generate texture does it for
+every coordinate alpha (an alpha map you load is made whole, as before, file for
+file the same).
+
+- **Side by side.** The tiles are made at once in worker processes (up to 4),
+  first the material and wear, then the pictures (the texture with its lines,
+  the material, the wear, the markings), and put together into the usual
+  pictures: the Lanes tool, decals, Update 2D texture and the 3D model use them
+  as any other texture.
+- **One set of materials, not one per tile.** The libraries are chosen and
+  scaled once for the whole area. Where each patch goes is one pattern for the
+  whole area: every spot of the patch grid takes its patch, turn and nudge from
+  the seed and its own place, so a tile (with a margin) lays exactly what its
+  neighbour lays along their edge. The tiles put together are the same, to the
+  bit, as the whole area made as one tile: no seam, no change of material at a
+  tile's edge. What is worked out over the whole area (the road's width and kerb
+  band, the tone to match, the wear's range, a scanned street material's colour)
+  is worked out once, for all of them.
+- **Adaptive to the analysis.** A tile with no road lays no patches.
+  **Asphalt tone from the satellite** (Settings → From the satellite, shown for a
+  coordinate alpha; 50 at first): in the tiles the analysis rated at or above the
+  card's *Rules in tiles under* (60%), each street takes the lighter or darker
+  tone the satellite shows there (new black asphalt, old grey), against the
+  area's usual asphalt; tiles under it keep the area's tone (the rules), eased in
+  from their neighbours over about 12 m, so no tile edge shows. The satellite's
+  asphalt is read in 2 m cells (each cell's median, leaving out missing tiles,
+  shadows, trees and colours, then paint and cars). Brightness only: the
+  picture's colour cast is the camera's. 0 keeps one tone everywhere. Changing it
+  (or the threshold) and pressing Update 2D texture lays the surfaces again
+  without making the patches again.
+- **What you see.** While it works, the satellite card frames each tile white as
+  it is done and dims the rest, and the console line counts the tiles. Then the
+  card's **Texture tiles** says how many had road and where their tone came from;
+  point at a square for its tile's tone (×0.95 = 5% darker than usual), and
+  **Show the texture tiles** puts the texture in the viewport with its tiles
+  framed: green, tone from the satellite; amber, the area's tone; white, one tone
+  (the tone at 0); grey, no road.
+  The console says it too.
+- **Measured** (4 cores, 3 workers):
+  - the test area (330 × 223 m at 0.136 m a pixel, 20 tiles, 16 with road):
+    21 s made whole, 11.5 s in tiles;
+  - a 36-megapixel area (990 × 668 m, 150 tiles): 249 s and 10.5 GB of memory
+    made whole, 154 s and 5.1 GB in tiles. The material and wear went from 72 s
+    to 17 s and the pictures from 91 s to 33 s; cleaning the mask and finding
+    the junctions (86 s) still run over the whole area at once, as the junctions
+    and streets cross the tiles;
+  - a test satellite with one street repaved and one faded: the repaved
+    street's tiles came out ×0.67 to ×0.82, the faded one's ×1.37 to ×1.43, and a
+    tile rated 40% kept the area's tone.
+
 ## Memory tab and the ordered libraries
 
 Every pair keeps its own library for each part of the road: junction, kerb and
