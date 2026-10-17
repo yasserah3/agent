@@ -18,7 +18,8 @@ front (+Y) to the building's front, as an automatic placement's objects
 map.
 
 Buildings cut by the map's edge are left out (only part of them is on the map), and so
-are those under MIN_SIDE_M on a side.
+are those under MIN_SIDE_M on a side; the cream ones (Google's shops, halls and stands)
+when the Layout window says so.
 """
 
 import math
@@ -31,18 +32,22 @@ def score(W, D, w, d):
     return abs(math.log((W / D) / (w / d))) + SIZE_WEIGHT * abs(math.log((W * D) / (w * d)))
 
 
-def lay(buildings, kinds, skip_edge=True):
+def lay(buildings, kinds, skip_edge=True, skip_fills=()):
     """
-    buildings: an area's (app/footprints.py: cx, cy pixels, w_m, d_m, a, edge); kinds:
+    buildings: an area's (app/footprints.py: cx, cy pixels, w_m, d_m, a, edge, fill); kinds:
     [(object id, w, d)] in metres, the object's own width across its front and depth, at
-    its scale. Returns (items, note): items {"id": "b<n>", "x", "y" (pixels), "a", "object",
-    "w", "d" (metres)}, note {"buildings", "laid", "edge", "small", "by_object": {id: n}}.
+    its scale; skip_fills: the fills left out ("cream"). Returns (items, note): items
+    {"id": "b<n>", "x", "y" (pixels), "a", "object", "w", "d" (metres)}, note {"buildings",
+    "laid", "edge", "small", "fill" (left out by their fill), "by_object": {id: n}}.
     """
     kinds = [(oid, float(w), float(d)) for oid, w, d in kinds if w > 0 and d > 0]
-    items, edge, small, by = [], 0, 0, {}
+    items, edge, small, by_fill, by = [], 0, 0, 0, {}
     for b in buildings:
         if skip_edge and b.get("edge"):
             edge += 1
+            continue
+        if b.get("fill") in skip_fills:
+            by_fill += 1
             continue
         W, D = float(b["w_m"]), float(b["d_m"])
         if min(W, D) < MIN_SIDE_M:
@@ -54,7 +59,8 @@ def lay(buildings, kinds, skip_edge=True):
         by[oid] = by.get(oid, 0) + 1
         items.append({"id": f"b{b['id']}", "x": b["cx"], "y": b["cy"], "a": b["a"], "object": oid,
                       "w": round(W, 3), "d": round(D, 3)})
-    return items, {"buildings": len(buildings), "laid": len(items), "edge": edge, "small": small, "by_object": by}
+    return items, {"buildings": len(buildings), "laid": len(items), "edge": edge, "small": small, "fill": by_fill,
+                   "by_object": by}
 
 
 def settings(raw):

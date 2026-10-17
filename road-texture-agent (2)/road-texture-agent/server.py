@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.16-coords12"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.17-coords13"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -1621,7 +1621,7 @@ def _mask_area(mask_id):
 
 
 def _area_buildings(folder, area):
-    """An area's buildings (app/footprints.py), read now from its street map when they were not yet (an older area)."""
+    """An area's buildings (app/footprints.py), read now from its street map when they were not yet (an older area, or an older version's reading)."""
     from app import footprints as FP
     doc = FP.load(folder)
     if doc is None:
@@ -1640,6 +1640,7 @@ def layout_buildings(mask: str):
     doc = _area_buildings(folder, area)
     b = doc["buildings"]
     return {"coords": True, "key": area["key"], "count": len(b), "edge": sum(1 for x in b if x.get("edge")),
+            "cream": sum(1 for x in b if x.get("fill") == "cream"),
             "notes": doc.get("notes"), "source": doc.get("source"), "buildings": [
                 {k: x[k] for k in ("id", "cx", "cy", "w_m", "d_m", "a", "rect", "edge", "fill", "area_m2")} for x in b],
             "preview": f"/api/coords/area/{area['key']}/buildings"}
@@ -1651,8 +1652,9 @@ def layout_create(payload: dict):
     Layout from the dataset (app/layout.py): an object on every building of the area the mask
     came from, the ticked one whose shape fits best, its width and depth its building's, its
     height its own. payload: "mask", "objects" (imported object ids), "buildings" (Dynamic
-    creation building ids: made objects first, as Use as object does). Returns the items for
-    the page's layout placement and what was laid.
+    creation building ids: made objects first, as Use as object does), "skip_edge", "cream"
+    (false: the cream buildings left out). Returns the items for the page's layout placement
+    and what was laid.
     """
     from app import layout as LY
     folder, area = _mask_area(str(payload.get("mask") or ""))
@@ -1676,7 +1678,8 @@ def layout_create(payload: dict):
         names[oid] = meta.get("name") or oid
     if not kinds:
         raise HTTPException(400, "tick at least one object or building")
-    items, note = LY.lay(doc["buildings"], kinds, skip_edge=bool(payload.get("skip_edge", True)))
+    items, note = LY.lay(doc["buildings"], kinds, skip_edge=bool(payload.get("skip_edge", True)),
+                         skip_fills=() if payload.get("cream", True) else ("cream",))
     note["names"] = names
     mem.record("layout", f"layout on {note['laid']} buildings of area {area['key']} with {len(kinds)} object(s)",
                {"key": area["key"], "note": note, "made": made})

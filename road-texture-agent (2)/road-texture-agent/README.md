@@ -129,6 +129,9 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   buildings' blue-grey outlines, a pixel or two wide, are taken off the road. A
   classic map's alpha is the same as before, pixel for pixel. On the test city
   drawn both ways, the 2024 colours' alpha matched the classic one's to 99.6%.
+  A real street map of Riyadh (zoom 20) came in the 2024 colours: streets
+  (170, 185, 201), land (248, 247, 247), buildings (233, 234, 239), cream
+  buildings (250, 245, 235).
 - **The buildings** are read from the same street map (Google draws every
   building from zoom 17 up), after the alpha, and kept with the area (Layout,
   below). If your street map shows no buildings, set **Buildings map** (under
@@ -1847,15 +1850,29 @@ Project Area) puts an object on every building of the area's map.
 
 - **The buildings** are read from the street map when the alpha is made
   (`app/footprints.py`): the pixels of a building's fill (grey, or the 2024
-  colours' cream; tunable in palette.json, "buildings"), off the road; thin joins
-  cut, so two buildings wall to wall come apart along their outline; each piece of
-  at least 8 m² one building. Each gets the smallest rectangle round it (its width
-  across its front and its depth, in metres, and its angle) and a **front**: the
-  side that reaches a street soonest looking straight out from it. They are kept in
-  the area's folder, `buildings.json` (each one's middle in pixels and in longitude
-  and latitude, its size, where its front faces, its area and outline) with
-  `buildings_preview.png`. An area made before this version has them read the
-  first time Layout asks.
+  colours' cream; tunable in palette.json, "buildings"), off the road, each fill's
+  pieces on their own; thin joins cut, so two buildings wall to wall come apart
+  along the line between them; each piece of at least 8 m² one building. Each gets
+  a rectangle (its width across its front and its depth, in metres, and its angle)
+  and a **front**: the side that reaches a street soonest looking straight out
+  from it. They are kept in the area's folder, `buildings.json` (each one's middle
+  in pixels and in longitude and latitude, its size, where its front faces, its
+  area and outline) with `buildings_preview.png`.
+  - **No rectangle reaches over another building.** A building that fills the
+    smallest rectangle round it (85% or more) and whose rectangle covers no other
+    building is that rectangle. Any other (an L or a T, a row of houses the map
+    did not part, a curved hall, a trapezoid lot) stands as its **parts**: the
+    largest rectangle inside its outline, then the largest inside what is left,
+    and so on while a part is at least 2 m a side and 15% of the largest (so a
+    trapezoid's sliver is not a part). The outline is grown by half the line round
+    a building, but never past halfway to the next one, so neighbours never
+    overlap.
+  - **Cream buildings** (the 2024 colours: Google's shops, halls, stands and other
+    public buildings, as the satellite shows them) are kept apart from the grey
+    ones: teal in the pictures and on the map, and the Layout window can leave
+    them out.
+  - An area read by an older version (or made before buildings were read) has
+    them read again the first time Layout asks: nothing is downloaded again.
 - **The section** says how many buildings were read and how many are cut by the
   map's edge, shows the picture (click it for the viewport: each building's
   rectangle, a red tick on its front, grey where the map's edge cuts it), and
@@ -1870,7 +1887,9 @@ Project Area) puts an object on every building of the area's map.
     **height stays its own** (the map has no heights);
   - it stands in the building's middle, its **front (+Y) to the building's
     street**;
-  - buildings cut by the map's edge are left out unless you untick that.
+  - buildings cut by the map's edge are left out unless you untick that, and the
+    cream ones too when you untick **Objects on the cream buildings too** (shown
+    when the map has cream buildings; the window remembers it).
   The console says how many buildings each object took. The layout is a placement
   like an automatic one: its objects on the map in each object's colour with an
   arrow on their front, Turn single objects and Draw spaced work on them (ids "b"
@@ -1884,10 +1903,13 @@ Project Area) puts an object on every building of the area's map.
   exactly towards the street; scenes without a layout export byte for byte as
   before.
 - **Measured** on the test city drawn in both colour schemes, at the area's own
-  0.136 m a pixel: every building found (62 of 62 inside the map, 8 more cut by its
+  0.136 m a pixel: every building found (62 of 62 inside the map, 9 more cut by its
   edge, wall-to-wall ones apart), the outline 96% the same as the true one, width
   and depth within 0.4 m for 90% of them, the front right for 59 of 62 (the others
-  corner buildings, a street on two sides).
+  corner buildings, a street on two sides). On a real street map of Riyadh (a 1 km
+  area at zoom 20, 7455 × 7496 pixels) the reading takes about 13 s; on the part
+  of it tested, no two rectangles overlap (25 pairs did before parts), and the
+  objects laid on them do not either.
 
 ## Project Area
 

@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.17-coords13';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -3170,7 +3170,7 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
      best, its width and depth stretched to the building's, its height its own, its front to the street.
      The layout is a placement like an automatic one (its objects on the map, Turn single objects, Draw
      spaced), laid again by pressing Create layout from dataset again */
-  const LAY = { data: null, show: false, mask: null };
+  const LAY = { data: null, show: false, mask: null, cream: true };
   const layCoords = () => !!(S.gen.mask && S.gen.mask.coords && S.gen.mask.coords.key);
   function layShown(){ return !!(LAY.show && LAY.data && LAY.data.coords && LAY.data.count && LAY.mask === (S.gen.mask || {}).id); }
   async function loadLayout(){
@@ -3202,6 +3202,7 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
       : !on ? 'This mask is not from coordinates: Layout reads the buildings of an area loaded with Coordinates (from its street map).'
       : !d.count ? 'No buildings on this area\'s map (its colours may differ from the ones expected: workspace/coords/palette.json, "buildings").'
       : `${fmt(d.count)} buildings read from the ${d.source === 'buildings_map.png' ? 'buildings map' : 'street map'}`
+        + (d.cream ? ` (${fmt(d.cream)} cream: shops, halls, stands)` : '')
         + (d.edge ? `, ${d.edge} cut by the map's edge` : '') + '. Create layout from dataset puts an object on each.';
   }
   $('#layShow').addEventListener('change', () => { LAY.show = $('#layShow').checked; drawBridges(); });
@@ -3210,7 +3211,7 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
     const img = await loadImage(`${API}${LAY.data.preview}?v=${Date.now().toString(36)}`);
     genVp.show(img, 'Buildings read from the map: each one\'s rectangle (grey: cut by the map\'s edge), a tick on its front');
   });
-  // on the overlay: each building's rectangle, a tick on its front (grey, dashed: cut by the map's edge)
+  // on the overlay: each building's rectangle (teal: cream on the map), a tick on its front (grey, dashed: cut by the map's edge)
   function drawBuildingsOn(ctx, v){
     if(!layShown()) return;
     const X = q => q[0] * v.k + v.ox, Y = q => q[1] * v.k + v.oy, lw = Math.max(v.dpr, v.hr * 0.14);
@@ -3218,9 +3219,10 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
       const r = Math.max(b.w_m, b.d_m) / mppMask();
       if(b.cx + r < v.x0 || b.cx - r > v.x1 || b.cy + r < v.y0 || b.cy - r > v.y1) continue;
       ctx.beginPath(); b.rect.forEach((q, k) => k ? ctx.lineTo(X(q), Y(q)) : ctx.moveTo(X(q), Y(q))); ctx.closePath();
-      ctx.fillStyle = b.edge ? 'rgba(150,150,150,.15)' : 'rgba(255,170,60,.16)'; ctx.fill();
+      const col = b.edge ? '170,170,170' : b.fill === 'cream' ? '40,190,200' : '255,170,60';      // teal: a cream building
+      ctx.fillStyle = `rgba(${col},${b.edge ? .15 : .16})`; ctx.fill();
       if(b.edge) ctx.setLineDash([v.hr * 0.5, v.hr * 0.4]);
-      ctx.strokeStyle = b.edge ? 'rgba(170,170,170,.9)' : 'rgba(255,170,60,.95)'; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle = `rgba(${col},.95)`; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]);
       const a = b.a * DEG, f = [Math.sin(a), -Math.cos(a)], reach = b.d_m / 2 / mppMask();
       ctx.beginPath(); ctx.moveTo(X([b.cx, b.cy]), Y([b.cx, b.cy]));
       ctx.lineTo(X([b.cx + f[0] * reach, 0]), Y([0, b.cy + f[1] * reach]));
@@ -3245,8 +3247,11 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
     }).join('');
     $('#layList').innerHTML = html || '<div class="note">No objects yet: import one (Objects), or make a building in Dynamic creation.</div>';
     const d = LAY.data;
-    $('#layWhere').textContent = `${fmt(d.count)} buildings on this area's map${d.edge ? `, ${d.edge} of them cut by the map's edge` : ''}.`;
+    $('#layWhere').textContent = `${fmt(d.count)} buildings on this area's map${d.cream ? `, ${fmt(d.cream)} of them cream` : ''}`
+      + `${d.edge ? `, ${d.edge} cut by the map's edge` : ''}.`;
     $('#layEdge').checked = true;
+    $('#layCreamRow').hidden = !d.cream;
+    $('#layCream').checked = LAY.cream;
     $$('#layList input').forEach(b => b.addEventListener('change', layAllState));
     layAllState();
     $('#layPop').hidden = false;
@@ -3270,7 +3275,7 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
     $('#layGo').disabled = true;
     try{
       const r = await api('/api/layout/create', { method:'POST', headers:{'Content-Type':'application/json'}, job: 'Laying objects on the buildings',
-        body: JSON.stringify({ mask: S.gen.mask.id, skip_edge: $('#layEdge').checked,
+        body: JSON.stringify({ mask: S.gen.mask.id, skip_edge: $('#layEdge').checked, cream: LAY.cream = $('#layCream').checked,
           objects: picked.filter(b => b.dataset.kind === 'object').map(b => b.dataset.id),
           buildings: picked.filter(b => b.dataset.kind === 'building').map(b => b.dataset.id) }) });
       layClose();
@@ -3286,7 +3291,8 @@ const UI_VERSION = '2026.10.16-coords12';   // must match VERSION in server.py
       const n = r.note;
       log(`Layout: ${fmt(n.laid)} of ${fmt(n.buildings)} buildings got an object: `
         + Object.entries(n.by_object).sort((a, b) => b[1] - a[1]).map(([id, k]) => `${k} × ${n.names[id] || id}`).join(', ')
-        + (n.edge ? `; ${n.edge} cut by the map's edge left out` : '') + (n.small ? `; ${n.small} too small (under 2 m a side)` : '') + '.', 'ok');
+        + (n.edge ? `; ${n.edge} cut by the map's edge left out` : '') + (n.fill ? `; ${fmt(n.fill)} cream left out` : '')
+        + (n.small ? `; ${n.small} too small (under 2 m a side)` : '') + '.', 'ok');
       log('  Each object\'s width and depth are its building\'s, its height its own, its front to the building\'s street. Generate 3D scene or Download 3D model to see them.');
       if(r.made.length) log(`  Made objects of ${r.made.map(m => m.name).join(', ')} (Dynamic creation), as Use as object does.`);
     }catch(e){ log('Layout: ' + e.message, 'bad'); }
