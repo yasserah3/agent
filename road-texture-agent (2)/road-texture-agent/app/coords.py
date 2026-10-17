@@ -57,9 +57,11 @@ PALETTE = {
     "speck_m2": 10.0,               # road pieces smaller than this dropped
     "osm_reach_m": 15.0,            # with the PBF: road pieces with no OSM road this near dropped
     # Google's 2024 colours: streets blue-grey (188, 200, 212), main roads a darker blue-grey, land
-    # light grey; "style": "auto" works out which a map is drawn in, "classic" or "new" sets it
+    # light grey; "style": "auto" works out which a map is drawn in, "classic" or "new" sets it.
+    # thin_m, thin_len_m: blue-grey lines narrower than thin_m and at least thin_len_m long are
+    # footpaths, parking lanes and service passages, not streets (thin_m 0: kept)
     "style": "auto",
-    "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6},
+    "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6, "thin_m": 2.0, "thin_len_m": 6.0},
 }
 
 COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("buildings_map", 1.0), ("crop", 1.0),
@@ -240,12 +242,45 @@ def street_style(rgb, pal=PALETTE):
     return "new" if blue > max(0.02, 2.0 * white) else "classic"
 
 
+def thin_lines(road, mpp, width_m, length_m, strip=1024):
+    """
+    The road's thin lines (bool, H x W): its parts narrower than width_m (where no disk that
+    wide fits) running at least length_m (the corner of two streets, also too narrow for the
+    disk, is a small piece, not a line). None when width_m is under 3 pixels (a map too
+    coarse to tell a footpath from a street). Worked in strips of rows, the disk's reach
+    added round each, so the memory stays small on a big map.
+    """
+    r = float(width_m) / mpp / 2
+    if width_m <= 0 or 2 * r < 3:
+        return None
+    h = road.shape[0]
+    m = int(math.ceil(2 * r)) + 2
+    thin = np.zeros(road.shape, bool)
+    for y0 in range(0, h, strip):
+        a, b = max(0, y0 - m), min(h, y0 + strip + m)
+        part = road[a:b]
+        if not part.any():
+            continue
+        inner = ndi.distance_transform_edt(part) > r          # where a disk of radius r fits: its middles
+        opened = ndi.distance_transform_edt(~inner) <= r if inner.any() else np.zeros(part.shape, bool)
+        thin[y0:y0 + strip] = (part & ~opened)[y0 - a:y0 - a + min(strip, h - y0)]
+    lab, n = ndi.label(thin, structure=np.ones((3, 3), bool))
+    if not n:
+        return thin
+    sl = ndi.find_objects(lab)
+    span = np.array([math.hypot(s[0].stop - s[0].start, s[1].stop - s[1].start) for s in sl]) * mpp
+    line = np.zeros(n + 1, bool)
+    line[1:] = span >= float(length_m)
+    return line[lab]
+
+
 def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
     """
     The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
     orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
-    the building outlines, as blue as the roads but a pixel or two wide, taken off), small
-    holes filled (the one-way arrows drawn on a street), small specks dropped; with
+    the building outlines, as blue as the roads but a pixel or two wide, taken off, and the
+    thin lines: footpaths, parking lanes, service passages), small holes filled (the one-way
+    arrows drawn on a street), small specks dropped; with
     osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
     osm_reach_m dropped too. Returns (road, notes).
     """
@@ -255,10 +290,16 @@ def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
         road = _new_colour(rgb, pal)
         k = max(1, int(round(float(p["open_m"]) / mpp / 2)))
         road = ndi.binary_opening(road, structure=np.ones((2 * k + 1, 2 * k + 1), bool))
+        thin = thin_lines(road, mpp, float(p["thin_m"]), float(p["thin_len_m"]))
     else:
         road = _classic_road(rgb, pal)
+        thin = None
     notes = {"coloured_px": int(road.sum()), "style": style}
     px_m2 = mpp * mpp
+    if thin is not None and thin.any():
+        road &= ~thin
+        notes["thin_lines"] = int(ndi.label(thin, structure=np.ones((3, 3), bool))[1])
+        notes["thin_m2"] = round(float(thin.sum()) * px_m2, 1)
     # holes: what is not road and does not reach the edge, small
     holes = ~road
     lab, n = ndi.label(holes)
@@ -602,6 +643,9 @@ def build_area(est, settings, root, register, job=None):
     if not unchanged:
         _write(Image.fromarray(alpha, "L"), alpha_path)
     area["alpha"] = notes
+    if notes.get("thin_lines"):
+        say(f"{notes['thin_lines']} thin line(s) left out of the alpha ({notes['thin_m2']:.0f} m²): "
+            "footpaths, parking lanes, service passages, under 2 m wide")
     if osm_lines is not None and osm_lines.any():
         on = osm_lines & road
         area["osm_on_road"] = round(float(on.sum()) / max(1, int(osm_lines.sum())), 3)
