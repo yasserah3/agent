@@ -20,6 +20,7 @@ Every area keeps its files in workspace/coords/<key>/ (key: the bounds and zoom)
 so asking for the same area again downloads nothing.
 """
 
+import errno
 import hashlib
 import json
 import math
@@ -305,6 +306,38 @@ def read_geo(path):
     return geo
 
 
+def _write(img, path, optional=False, **kw):
+    """
+    Save one of the area's pictures. Windows will not write over a file another program
+    has open (an image viewer, Paint: "[Errno 22] Invalid argument" or "Permission
+    denied"): then a plain message, or for a preview (optional) just False.
+    """
+    try:
+        img.save(path, **kw)
+        return True
+    except OSError as e:
+        if isinstance(e, PermissionError) or e.errno in (errno.EINVAL, errno.EACCES):
+            if optional:
+                return False
+            raise ValueError(f"{Path(path).name} could not be written: it is probably open in another program "
+                             f"(Paint, Photos, an image viewer). Close it there and press Download and make the alpha "
+                             f"again ({e.strerror or e})") from e
+        raise
+
+
+def _kept(png, sources, size):
+    """A picture cut before from the same downloads (newer than they are, the same size): read, not written again."""
+    try:
+        if png.stat().st_mtime < max(Path(s).stat().st_mtime for s in sources):
+            return None
+        with Image.open(png) as im:
+            if im.size != tuple(size):
+                return None
+            return im.convert("RGB")
+    except OSError:
+        return None
+
+
 def crop_box(geo, bounds):
     """The source pixels (x0, y0, x1, y1) covering the area, snapped to the source's pixel grid, and their extent."""
     l, r, t, b = bounds
@@ -503,16 +536,30 @@ def build_area(est, settings, root, register, job=None):
     prog.stage("crop", "cutting both maps to the area")
     sat_geo = read_geo(sat_path)
     box, ext = crop_box(sat_geo, bounds)
-    with Image.open(sat_path) as im:
-        sat = im.convert("RGB").crop(box)
-    size = sat.size
-    street = onto_grid(street_path, read_geo(street_path), ext, size)
-    sat.save(folder / "satellite.png")
-    street.save(folder / "street.png")
-    if bmap_path is not None:
-        onto_grid(bmap_path, read_geo(bmap_path), ext, size).save(folder / "buildings_map.png")
+    size = (box[2] - box[0], box[3] - box[1])
+    # cut before from these same downloads (the area asked for again): kept as they are, so a
+    # picture open in another program (Paint, Photos) does not stop the alpha being made again
+    same = len(area.get("extent") or []) == 4 and all(math.isclose(a, b, rel_tol=0, abs_tol=1e-6)
+                                                       for a, b in zip(area["extent"], ext))
+    sat = _kept(folder / "satellite.png", [sat_path], size) if same else None
+    street = _kept(folder / "street.png", [street_path], size) if sat is not None else None
+    if sat is not None and street is not None:
+        say("the satellite and street maps: cut before from the same downloads, kept")
     else:
-        (folder / "buildings_map.png").unlink(missing_ok=True)
+        with Image.open(sat_path) as im:
+            sat = im.convert("RGB").crop(box)
+        street = onto_grid(street_path, read_geo(street_path), ext, size)
+        _write(sat, folder / "satellite.png")
+        _write(street, folder / "street.png")
+    if bmap_path is not None:
+        if _kept(folder / "buildings_map.png", [bmap_path], size) is None:
+            _write(onto_grid(bmap_path, read_geo(bmap_path), ext, size), folder / "buildings_map.png")
+    else:
+        try:
+            (folder / "buildings_map.png").unlink(missing_ok=True)
+        except OSError as e:
+            raise ValueError("buildings_map.png could not be deleted: it is probably open in another program; "
+                             f"close it there and press Download and make the alpha again ({e.strerror or e})") from e
     world = world_file(ext, size)
     for stem in ("satellite", "street", "alpha", "overlay"):
         (folder / f"{stem}.pgw").write_text(world)
@@ -538,7 +585,7 @@ def build_area(est, settings, root, register, job=None):
         lines = core.render(roads, tuple(bounds), size[0], size[1], line_width=1, transparent=True)
         osm_lines = np.asarray(lines)[..., 3] > 0
         over = core.render(roads, tuple(bounds), size[0], size[1], line_width=max(2, int(round(1.0 / mpp))), transparent=True)
-        over.save(folder / "overlay.png")
+        _write(over, folder / "overlay.png")
         _geojson(roads, folder / "roads.geojson")
         area["osm_roads"] = len(roads)
         say(f"{len(roads)} OSM road ways in the area")
@@ -546,7 +593,14 @@ def build_area(est, settings, root, register, job=None):
     prog.stage("alpha", "the alpha from the street map's roads")
     road, notes = street_alpha(np.asarray(street), mpp, palette(root), osm_lines)
     alpha_path = folder / "alpha.png"
-    Image.fromarray((road * 255).astype(np.uint8), "L").save(alpha_path)
+    alpha = (road * 255).astype(np.uint8)
+    try:                                       # the same as before: left as it is (it may be open elsewhere)
+        with Image.open(alpha_path) as im:
+            unchanged = im.mode == "L" and im.size == (alpha.shape[1], alpha.shape[0]) and np.array_equal(np.asarray(im), alpha)
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        _write(Image.fromarray(alpha, "L"), alpha_path)
     area["alpha"] = notes
     if osm_lines is not None and osm_lines.any():
         on = osm_lines & road
@@ -596,10 +650,11 @@ def _previews(folder, sat, street, road, osm_lines, gaps):
     """Small pictures for the page: each map, the alpha, and the alpha's edge over the satellite."""
     k = min(1.0, PREVIEW_PX / max(sat.size))
     ps = (max(1, round(sat.width * k)), max(1, round(sat.height * k)))
-    sat.resize(ps, Image.Resampling.LANCZOS).save(folder / "satellite_preview.jpg", quality=88)
-    street.resize(ps, Image.Resampling.LANCZOS).save(folder / "street_preview.png")
+    # a preview open in another program is left as it was
+    _write(sat.resize(ps, Image.Resampling.LANCZOS), folder / "satellite_preview.jpg", optional=True, quality=88)
+    _write(street.resize(ps, Image.Resampling.LANCZOS), folder / "street_preview.png", optional=True)
     al = Image.fromarray((road * 255).astype(np.uint8), "L")
-    al.resize(ps, Image.Resampling.BOX).save(folder / "alpha_preview.png")
+    _write(al.resize(ps, Image.Resampling.BOX), folder / "alpha_preview.png", optional=True)
     # the check: the satellite, the alpha's edge in amber, the OSM roads in cyan, missing tiles in red
     edge = road ^ ndi.binary_erosion(road, iterations=max(2, int(round(2.5 / k))))     # about 2.5 px in the preview
     view = np.asarray(sat).copy()
@@ -609,7 +664,7 @@ def _previews(folder, sat, street, road, osm_lines, gaps):
     for x0, y0, x1, y1 in gaps:
         view[y0:y1, x0:x0 + 3] = view[y0:y1, x1 - 3:x1] = (230, 40, 40)
         view[y0:y0 + 3, x0:x1] = view[y1 - 3:y1, x0:x1] = (230, 40, 40)
-    Image.fromarray(view).resize(ps, Image.Resampling.LANCZOS).save(folder / "check_preview.jpg", quality=88)
+    _write(Image.fromarray(view).resize(ps, Image.Resampling.LANCZOS), folder / "check_preview.jpg", optional=True, quality=88)
 
 
 def forget(root, key):

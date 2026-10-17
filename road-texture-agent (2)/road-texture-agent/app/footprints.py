@@ -397,7 +397,10 @@ def read_area(folder, area, street_rgb=None, road=None, pal=None, style=None):
     tmp = folder / ".buildings.tmp"
     tmp.write_text(json.dumps(doc, separators=(",", ":")))
     tmp.replace(folder / "buildings.json")
-    preview(street_rgb, buildings, folder / "buildings_preview.png")
+    try:
+        preview(street_rgb, buildings, folder / "buildings_preview.png")
+    except OSError:                            # open in another program (Windows): the one before stays
+        pass
     return doc
 
 

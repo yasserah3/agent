@@ -118,7 +118,12 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   from it as from a loaded mask.
 - **Every area keeps its files** in `workspace/coords/<key>/` (satellite, street
   map, alpha and overlay as PNGs with world files, the OSM roads as GeoJSON, the
-  downloads): asking for the same area at the same zoom again downloads nothing.
+  downloads): asking for the same area at the same zoom again downloads nothing,
+  and the satellite and street maps cut before from the same downloads are kept
+  as they are (not written again), as is an alpha that comes out the same. So a
+  picture you have open in another program (Paint, Photos) does not stop it; if a
+  file that has to change is open elsewhere, Windows will not let it be written
+  and the console says which one to close.
 - The street map's roads are drawn by Google at map widths, close to but not
   exactly the asphalt. The alpha keeps them; the satellite is for the details
   (the analysis, next).
