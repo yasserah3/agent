@@ -61,7 +61,11 @@ PALETTE = {
     # thin_m, thin_len_m: blue-grey lines narrower than thin_m and at least thin_len_m long are
     # footpaths, parking lanes and service passages, not streets (thin_m 0: kept)
     "style": "auto",
-    "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6, "thin_m": 2.0, "thin_len_m": 6.0},
+    # straight: the streets' edges straightened (Google's square caps, the notches of buildings
+    # drawn over a street's edge, the steps where its pieces join), steps up to straight_share of
+    # the streets' width deep (between straight_min_m and straight_max_m; straight_share 0: kept)
+    "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6, "thin_m": 2.0, "thin_len_m": 6.0,
+            "straight_share": 0.35, "straight_min_m": 1.0, "straight_max_m": 3.0},
 }
 
 COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("buildings_map", 1.0), ("crop", 1.0),
@@ -274,13 +278,341 @@ def thin_lines(road, mpp, width_m, length_m, strip=1024):
     return line[lab]
 
 
+# ------------------------------------------------------------------ the streets' edges straightened
+
+STRAIGHT_NEAR_M = 0.25        # a point this near a piece's line is on it (and never under 1.5 pixels)
+STRAIGHT_SHARE = 0.5          # a piece is straightened when at least this share of its points are on its line
+STRAIGHT_CURVE_PX = 0.6       # ... and they do not bow away from it more than this: a curve, kept
+STRAIGHT_CORNER_DEG = 30.0    # a corner straightened only where the two edges meet at this angle or more
+STRAIGHT_RAMP = 0.35          # ... and its points off the line jump to a step's depth: if more than this share
+                              # of them are only just off it (under twice the near distance), it drifts: a curve
+
+
+def _steplike(r, near):
+    """Whether the points off a line (offsets r) are a step's: most of them well off it, not drifting away."""
+    off = np.abs(r) > near
+    if not off.any():
+        return True
+    return float((off & (np.abs(r) < 2 * near)).sum()) / float(off.sum()) <= STRAIGHT_RAMP
+
+
+def _dp(P, t):
+    """Douglas-Peucker on an open polyline (n x 2): the indices of the points kept."""
+    n = len(P)
+    keep = np.zeros(n, bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b <= a + 1:
+            continue
+        A, B = P[a], P[b]
+        seg = P[a + 1:b]
+        ab = B - A
+        L = math.hypot(ab[0], ab[1])
+        d = (np.hypot(seg[:, 0] - A[0], seg[:, 1] - A[1]) if L < 1e-9
+             else np.abs(ab[0] * (seg[:, 1] - A[1]) - ab[1] * (seg[:, 0] - A[0])) / L)
+        k = int(np.argmax(d))
+        if d[k] > t:
+            m = a + 1 + k
+            keep[m] = True
+            stack += [(a, m), (m, b)]
+    return np.flatnonzero(keep)
+
+
+def _piece_line(seg, near):
+    """The line most of a piece's points lie on (within near): (point, unit direction, each point's offset)."""
+    n = len(seg)
+    qs = [int(round(q * (n - 1))) for q in (0.0, 0.15, 0.35, 0.5, 0.65, 0.85, 1.0)]
+    best = None
+    for i in range(len(qs)):
+        for j in range(i + 1, len(qs)):
+            p, q = seg[qs[i]], seg[qs[j]]
+            v = q - p
+            L = math.hypot(v[0], v[1])
+            if L < 1e-6:
+                continue
+            v = v / L
+            k = int((np.abs(v[0] * (seg[:, 1] - p[1]) - v[1] * (seg[:, 0] - p[0])) <= near).sum())
+            if best is None or k > best[0]:
+                best = (k, p, v)
+    if best is None:
+        return None
+    _, p, v = best
+    for _ in range(2):                      # then the least-squares line of the points on it
+        r = v[0] * (seg[:, 1] - p[1]) - v[1] * (seg[:, 0] - p[0])
+        on = seg[np.abs(r) <= near]
+        if len(on) < 2:
+            break
+        c = on.mean(axis=0)
+        _, _, vt = np.linalg.svd(on - c, full_matrices=False)
+        p, v = c, vt[0] * (1 if np.dot(vt[0], v) >= 0 else -1)
+    return p, v, v[0] * (seg[:, 1] - p[1]) - v[1] * (seg[:, 0] - p[0])
+
+
+def _pieces(seg, t, near, Lmin, out):
+    """
+    A stretch of an edge (its points, in order) sorted into pieces, appended to out as
+    [kind, points, line point, line direction, straight already]: "line" when it is a
+    straight edge with steps no deeper than t, both its ends on its line and not bowing like
+    a curve; "raw" otherwise. One whose end runs off its line (it turns) is split where it
+    turns; a long one that fits badly, where it fits worst.
+    """
+    A, B = seg[0], seg[-1]
+    L = math.hypot(B[0] - A[0], B[1] - A[1])
+    if L >= Lmin and len(seg) >= 4:
+        fit = _piece_line(seg, near)
+        if fit is not None:
+            p, v, r = fit
+            on = np.abs(r) <= near
+            # both ends on the line: a step comes back to it; a bend (the street turning) does not
+            ok = on.mean() >= STRAIGHT_SHARE and np.abs(r).max() <= t and on[0] and on[-1] and _steplike(r, near)
+            exact = ok and bool(np.abs(r).max() <= near)
+            if ok and not exact and on.sum() >= 6:
+                s = (seg - p) @ v
+                span = float(s.max() - s.min())
+                ok = abs(np.polyfit(s[on], r[on], 2)[0]) * span * span / 4 <= max(STRAIGHT_CURVE_PX, 0.5 * near)
+            if ok:
+                out.append(["line", seg, p, v, exact])
+                return
+            m = None
+            if not on[-1] and on.any():
+                m = int(np.flatnonzero(on)[-1])          # it turns at its end: from the last point on the line
+            elif not on[0] and on.any():
+                m = int(np.flatnonzero(on)[0])
+            elif L >= 2 * Lmin:
+                m = int(np.argmax(np.abs(r)))
+            if m is not None and 2 <= m <= len(seg) - 3:
+                _pieces(seg[:m + 1], t, near, Lmin, out)
+                _pieces(seg[m:], t, near, Lmin, out)
+                return
+    out.append(["raw", seg, None, None, False])
+
+
+def _cross(p1, v1, p2, v2, min_deg=15.0):
+    """Where two lines meet, or None when they are within min_deg of parallel."""
+    det = v1[0] * v2[1] - v1[1] * v2[0]
+    if abs(det) < math.sin(math.radians(min_deg)):
+        return None
+    d = p2 - p1
+    return p1 + v1 * ((d[0] * v2[1] - d[1] * v2[0]) / det)
+
+
+def _square(seg, dirs, near, deg=15.0):
+    """The share of a stretch's length running along or across the given directions (a cap or a notch is square; a curve sweeps)."""
+    w = max(2, int(round(2 * near)))
+    if len(seg) <= w:
+        return 1.0
+    d = seg[w:] - seg[:-w]
+    L = np.hypot(d[:, 0], d[:, 1])
+    ok = L > 1e-9
+    if not ok.any():
+        return 1.0
+    u = d[ok] / L[ok, None]
+    c = math.cos(math.radians(deg))
+    along = np.zeros(len(u), bool)
+    for v in dirs:
+        along |= np.abs(u @ v) >= c
+    return float(L[ok][along].sum() / L[ok].sum())
+
+
+def _corners(pcs, t, near):
+    """
+    Short raw stretches between two straight edges (one stretch or a few in a row), marked
+    in place. Where the edges meet at an angle (Google's square cap or a notch at a junction's
+    corner): "corner", with the point where their lines meet, when the stretch's points all
+    lie within t of the two lines, that point is near it, and it is square, not a curve (a
+    rounded corner stays). Where they are one line (a step cut in two): "bridge", the edge
+    carried straight across, when the stretch lies within t of it.
+    """
+    n = len(pcs)
+    if n < 3 or all(pc[0] == "raw" for pc in pcs):
+        return
+    start = next(j for j in range(n) if pcs[j][0] == "line")
+    j = 0
+    while j < n:
+        jj = (start + j) % n
+        if pcs[jj][0] != "raw":
+            j += 1
+            continue
+        run = []
+        while j < n and pcs[(start + j) % n][0] == "raw":
+            run.append((start + j) % n)
+            j += 1
+        i, k = (run[0] - 1) % n, (run[-1] + 1) % n
+        if pcs[i][0] != "line" or pcs[k][0] != "line" or i == k:
+            continue
+        seg = np.vstack([pcs[r][1] for r in run])
+        p1, v1, p2, v2 = pcs[i][2], pcs[i][3], pcs[k][2], pcs[k][3]
+        d1 = np.abs(v1[0] * (seg[:, 1] - p1[1]) - v1[1] * (seg[:, 0] - p1[0]))
+        d2 = np.abs(v2[0] * (seg[:, 1] - p2[1]) - v2[1] * (seg[:, 0] - p2[0]))
+        X = _cross(p1, v1, p2, v2, STRAIGHT_CORNER_DEG)
+        if X is None:
+            if _cross(p1, v1, p2, v2) is not None:
+                continue                         # a shallow turn (a curve meeting a straight): kept
+            # one line: the second edge's line on the first's, and the stretch within t of it
+            gap = abs(v1[0] * (p2[1] - p1[1]) - v1[1] * (p2[0] - p1[0]))
+            if gap <= 2 * near and d1.max() <= t and _steplike(d1, near):
+                for r in run:
+                    pcs[r] = ["bridge", pcs[r][1], None, None, False]
+            continue
+        if np.minimum(d1, d2).max() > t or np.hypot(seg[:, 0] - X[0], seg[:, 1] - X[1]).min() > t:
+            continue
+        # judged on the part off both lines: a cap's or a notch's sides run along or across them, a
+        # rounded corner's arc sweeps round
+        off = np.flatnonzero(np.minimum(d1, d2) > near)
+        perp = lambda v: np.array([-v[1], v[0]])
+        if len(off) and _square(seg[max(0, off[0] - 1):off[-1] + 2], (v1, perp(v1), v2, perp(v2)), near) < 0.75:
+            continue
+        for q, r in enumerate(run):
+            pcs[r] = ["corner", pcs[r][1], X if q == 0 else None, None, False]
+
+
+def _assemble(pcs):
+    """The ring's new points from its pieces, and whether anything changed."""
+    out, changed = [], False
+    n = len(pcs)
+    for j, (kind, seg, p, v, exact) in enumerate(pcs):
+        prev = pcs[(j - 1) % n][0]
+        if kind == "corner":
+            if p is not None:
+                out.append(p)
+            changed = True
+        elif kind == "bridge":
+            changed = True
+        elif kind == "raw" or exact:
+            out.extend(seg[:-1] if not (exact and prev == "corner") else seg[1:-1])
+        else:
+            A, B = seg[0], seg[-1]
+            Ap, Bp = p + v * np.dot(A - p, v), p + v * np.dot(B - p, v)
+            if prev != "corner":
+                out.append(A)
+            if prev == "corner" or math.hypot(*(Ap - A)) > 0.5:
+                out.append(Ap)
+            nxt = pcs[(j + 1) % n][0]
+            if nxt in ("corner", "bridge") or math.hypot(*(Bp - B)) > 0.5:
+                out.append(Bp)
+            changed = True
+    return out, changed
+
+
+def _one_line(seg, t, near, Lmin):
+    """Whether a stretch of an edge is one straight line with steps no deeper than t (both its ends on it)."""
+    if len(seg) < 4 or math.hypot(*(seg[-1] - seg[0])) < Lmin:
+        return False
+    fit = _piece_line(seg, near)
+    if fit is None:
+        return False
+    on = np.abs(fit[2]) <= near
+    return bool(on[0] and on[-1] and on.mean() >= STRAIGHT_SHARE and np.abs(fit[2]).max() <= t
+                and _steplike(fit[2], near))
+
+
+def _ring_area(P):
+    x, y = P[:, 0], P[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def scanfill(rings, shape, origin=(0, 0)):
+    """
+    The even-odd fill of closed rings ((n, 2) arrays of x, y, pixel middles at whole
+    numbers): bool (h, w), its top left at origin. A pixel is in when its middle is, so the
+    outlines traced from a mask fill back to exactly that mask.
+    """
+    h, w = shape
+    ox, oy = origin
+    x0 = np.concatenate([np.asarray(R, float)[:, 0] for R in rings]) - ox
+    y0 = np.concatenate([np.asarray(R, float)[:, 1] for R in rings]) - oy
+    x1 = np.concatenate([np.roll(np.asarray(R, float)[:, 0], -1) for R in rings]) - ox
+    y1 = np.concatenate([np.roll(np.asarray(R, float)[:, 1], -1) for R in rings]) - oy
+    lo = np.clip(np.ceil(np.minimum(y0, y1)), 0, h)          # each edge crosses rows lo .. hi - 1
+    hi = np.clip(np.ceil(np.maximum(y0, y1)), 0, h)
+    n = (hi - lo).astype(np.int64)
+    keep = np.flatnonzero(n > 0)
+    if not len(keep):
+        return np.zeros(shape, bool)
+    e = np.repeat(keep, n[keep])
+    first = np.repeat(np.cumsum(n[keep]) - n[keep], n[keep])
+    row = (lo[e] + (np.arange(len(e)) - first)).astype(np.int64)
+    x = x0[e] + (row - y0[e]) / (y1[e] - y0[e]) * (x1[e] - x0[e])
+    col = np.clip(np.ceil(x), 0, w).astype(np.int64)
+    flip = np.zeros((h, w + 1), np.uint8)
+    np.bitwise_xor.at(flip, (row, col), 1)
+    return np.bitwise_xor.accumulate(flip, axis=1)[:, :w].astype(bool)
+
+
+def straighten_edges(road, mpp, share=0.35, min_m=1.0, max_m=3.0):
+    """
+    The streets' edges straightened (bool H x W in, a new one out, and notes). Google's
+    street map has steps along its streets: square caps where side streets end against a
+    road, notches where buildings are drawn over a street's edge, steps where a street's
+    pieces join. Each edge, traced between its pixels, is cut into pieces (Douglas-Peucker,
+    steps up to t deep in one piece; t: share of the streets' width, between min_m and
+    max_m); a piece whose points mostly lie on one line (at least half within
+    STRAIGHT_NEAR_M) and that does not bow like a curve becomes that line; a gentle bend is
+    split where it fits worst and its halves tried. Corners, junctions, curves (a
+    roundabout), and anything deeper than t (a side street, a dead end) stay. Only the
+    pixels between an edge and its straight line change; an outline that would lose half its
+    area (a thin gap between two carriageways) is left as it was.
+    """
+    from skimage import measure
+    H, W = road.shape
+    edge = int((road ^ ndi.binary_erosion(road)).sum())
+    width_px = 2.0 * float(road.sum()) / max(1, edge)
+    t = min(max_m, max(min_m, share * width_px * mpp)) / mpp
+    notes = {"straight_width_m": round(width_px * mpp, 1), "straight_depth_m": round(t * mpp, 2)}
+    if share <= 0 or t < 3 or not road.any():
+        return road, notes
+    near = max(1.5, STRAIGHT_NEAR_M / mpp)
+    Lmin = 2.5 * t
+    out = road.copy()
+    n_px = n_rings = 0
+    for ring in measure.find_contours(np.pad(road, 1).astype(np.uint8), 0.5):
+        if len(ring) < 8 or not np.allclose(ring[0], ring[-1]):
+            continue
+        P = ring[:-1, ::-1] - 1.0                              # (x, y), pixel middles at whole numbers
+        far = int(np.argmax(np.hypot(P[:, 0] - P[0, 0], P[:, 1] - P[0, 1])))
+        Q = np.vstack([P, P[:1]])
+        idx = list(np.union1d(_dp(Q[:far + 1], t), far + _dp(Q[far:], t)))
+        # a cut that fell on a step's own corner: the two pieces joined when, together, they are one
+        # straight edge (both ends on its line); a corner or a turn stays
+        k = 1
+        while k < len(idx) - 1:
+            if _one_line(Q[idx[k - 1]:idx[k + 1] + 1], t, near, Lmin):
+                del idx[k]
+            else:
+                k += 1
+        pcs = []
+        for a, b in zip(idx[:-1], idx[1:]):
+            _pieces(Q[a:b + 1], t, near, Lmin, pcs)
+        _corners(pcs, t, near)
+        new, changed = _assemble(pcs)
+        if not changed:
+            continue
+        N = np.array(new)
+        a0 = _ring_area(P)
+        if abs(_ring_area(N) - a0) > 0.5 * abs(a0):
+            continue
+        x0 = max(0, int(math.floor(min(P[:, 0].min(), N[:, 0].min()))) - 1)
+        y0 = max(0, int(math.floor(min(P[:, 1].min(), N[:, 1].min()))) - 1)
+        x1 = min(W, int(math.ceil(max(P[:, 0].max(), N[:, 0].max()))) + 2)
+        y1 = min(H, int(math.ceil(max(P[:, 1].max(), N[:, 1].max()))) + 2)
+        flip = scanfill([P], (y1 - y0, x1 - x0), (x0, y0)) ^ scanfill([N], (y1 - y0, x1 - x0), (x0, y0))
+        out[y0:y1, x0:x1] ^= flip
+        n_px += int(flip.sum())
+        n_rings += 1
+    notes.update(straightened_m2=round(n_px * mpp * mpp, 1), straightened_outlines=n_rings)
+    return out, notes
+
+
 def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
     """
     The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
     orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
     the building outlines, as blue as the roads but a pixel or two wide, taken off, and the
-    thin lines: footpaths, parking lanes, service passages), small holes filled (the one-way
-    arrows drawn on a street), small specks dropped; with
+    thin lines: footpaths, parking lanes, service passages, and the streets' edges
+    straightened), small holes filled (the one-way arrows drawn on a street), small specks
+    dropped; with
     osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
     osm_reach_m dropped too. Returns (road, notes).
     """
@@ -328,6 +660,11 @@ def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
         k = np.zeros(n + 1, bool)
         k[1:] = keep
         road = k[lab]
+    if style == "new":
+        p = {**PALETTE["new"], **(pal.get("new") or {})}
+        road, sn = straighten_edges(road, mpp, float(p["straight_share"]), float(p["straight_min_m"]),
+                                    float(p["straight_max_m"]))
+        notes.update(sn)
     notes["road_px"] = int(road.sum())
     return road, notes
 

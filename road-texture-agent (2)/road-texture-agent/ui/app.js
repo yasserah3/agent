@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.17-coords15';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.18-coords16';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -925,6 +925,7 @@ const UI_VERSION = '2026.10.17-coords15';   // must match VERSION in server.py
     if(area.osm_roads != null) bits.push(`${fmt(area.osm_roads)} OSM road ways, ${Math.round((area.osm_on_road || 0) * 100)}% of them on the alpha's roads`);
     if(a.far_from_osm) bits.push(`${a.far_from_osm} white area(s) with no OSM road near left out (${fmt(Math.round(a.far_from_osm_m2))} m²)`);
     if(a.thin_lines) bits.push(`${a.thin_lines} thin line(s) left out: footpaths, parking lanes, service passages under 2 m wide (${fmt(Math.round(a.thin_m2))} m²)`);
+    if(a.straightened_m2) bits.push(`street edges straightened: ${fmt(Math.round(a.straightened_m2))} m² of Google's steps (caps, notches) evened out`);
     if(area.missing_tiles) bits.push(`${area.missing_tiles} satellite tile(s) missing`);
     $('#coNote').className = area.missing_tiles ? 'note bad' : 'note';
     $('#coNote').textContent = bits.join('; ') + '. Check: the alpha\'s edge (amber) and the OSM roads (cyan) over the satellite.';

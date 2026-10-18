@@ -137,6 +137,24 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   A real street map of Riyadh (zoom 20) came in the 2024 colours: streets
   (170, 185, 201), land (248, 247, 247), buildings (233, 234, 239), cream
   buildings (250, 245, 235).
+- **Straight street edges** (the 2024 colours): Google's street map has steps along
+  its streets, and the alpha used to copy them pixel for pixel: square caps where a
+  side street ends against a road, notches where buildings are drawn over a
+  street's edge, steps where a street's pieces join. Now each edge of the alpha is
+  traced and cut into pieces; a piece whose points mostly lie on one line, with both
+  its ends on it, becomes that line, and a short stretch between two edges meeting
+  at a corner (30° or more) becomes their corner when it is square, like a cap or a
+  notch. Steps up to about a third of the streets' width deep go (between 1 and
+  3 m; "straight_share", "straight_min_m", "straight_max_m" in palette.json's "new";
+  straight_share 0 keeps them). What stays: corners and junctions, curves and
+  roundabouts (a piece that bows or drifts away from its line evenly is a curve), a
+  street that turns, rounded corners, side streets and dead ends (deeper than the
+  limit), the narrow gap between a road's two sides. Only the pixels between an edge
+  and its straight line change. On the test city with Google-style caps and notches
+  drawn in (on straight edges and at a junction's corners) every one was put right,
+  a 4 m dead-end alley stayed, the roundabout stayed round and nothing else
+  changed; the classic colours' alpha is unchanged; on a full 7455 × 7496 map it
+  adds a few seconds.
 - **Thin lines are not streets** (the 2024 colours): Google draws footpaths,
   parking lanes and service passages as thin blue-grey lines, close to the
   streets' colour. A blue-grey line narrower than 2 m (where no 2 m disk fits)
