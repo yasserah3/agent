@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.18-coords17"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.18-coords18"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
@@ -4192,6 +4192,15 @@ def coords_settings_save(payload: dict):
             s["zoom"] = max(15, min(22, int(payload["zoom"])))
         except (TypeError, ValueError):
             raise HTTPException(400, "zoom: a whole number, 15 to 22")
+    if "streets_zoom" in payload:
+        # the streets from the street map downloaded again at this zoom (no buildings drawn), 0: the area's own
+        try:
+            z = int(payload["streets_zoom"] or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "streets zoom: 0 (the area's own street map) or 14 to 19")
+        if z and not 14 <= z <= 19:
+            raise HTTPException(400, "streets zoom: 0 (the area's own street map) or 14 to 19")
+        s["streets_zoom"] = z
     if "buildings_map" in payload:
         # the buildings read from the street map (0), or from this Universal Maps Downloader map type
         try:
@@ -4504,6 +4513,7 @@ def coords_place_decals_settings(gid: str):
 def coords_file(key: str, name: str):
     """An area's picture: satellite, street, alpha, check (the alpha's edge over the satellite), overlay."""
     files = {"satellite": "satellite_preview.jpg", "street": "street_preview.png", "alpha": "alpha_preview.png",
+             "street_low": "street_low_preview.png",
              "check": "check_preview.jpg", "overlay": "overlay.png", "satellite_full": "satellite.png",
              "street_full": "street.png", "alpha_full": "alpha.png", "buildings": "buildings_preview.png",
              "findings": "analysis/findings_preview.jpg", "confidence": "analysis/confidence_preview.jpg"}

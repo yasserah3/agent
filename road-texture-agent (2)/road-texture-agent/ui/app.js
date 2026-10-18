@@ -1,4 +1,4 @@
-const UI_VERSION = '2026.10.18-coords17';   // must match VERSION in server.py
+const UI_VERSION = '2026.10.18-coords18';   // must match VERSION in server.py
 (function(){
   const $ = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
@@ -894,9 +894,11 @@ const UI_VERSION = '2026.10.18-coords17';   // must match VERSION in server.py
     try{
       const s = save ? await api('/api/coords/settings', { method:'POST', headers:{'Content-Type':'application/json'},
                          body: JSON.stringify({ downloader: $('#coDownloader').value, pbf: $('#coPbf').value, zoom: +$('#coZoom').value,
-                                                buildings_map: Math.max(0, Math.round(+$('#coBldMap').value || 0)) }) })
+                                                buildings_map: Math.max(0, Math.round(+$('#coBldMap').value || 0)),
+                                                streets_zoom: +$('#coStreets').value }) })
                      : await api('/api/coords/settings');
       $('#coDownloader').value = s.downloader || ''; $('#coPbf').value = s.pbf || ''; $('#coBldMap').value = s.buildings_map || 0;
+      $('#coStreets').value = String(s.streets_zoom == null ? 16 : s.streets_zoom);
       if(!save) $('#coZoom').value = s.zoom || 20;
       const from = [s.downloader_from && `downloader from ${s.downloader_from}`, s.pbf_from && `PBF from ${s.pbf_from}`].filter(Boolean);
       $('#coFilesState').textContent = s.downloader ? (s.pbf ? '· set' : '· no PBF') : '· not set';
@@ -906,7 +908,7 @@ const UI_VERSION = '2026.10.18-coords17';   // must match VERSION in server.py
       return s;
     }catch(e){ $('#coFilesNote').textContent = e.message; return null; }
   }
-  ['coDownloader', 'coPbf', 'coBldMap'].forEach(k => $('#' + k).addEventListener('change', () => coSettings(true)));
+  ['coDownloader', 'coPbf', 'coBldMap', 'coStreets'].forEach(k => $('#' + k).addEventListener('change', () => coSettings(true)));
   function coBar(frac, text){
     const b = $('#coBar'); b.hidden = false;
     $('i', b).style.width = `${Math.round(Math.max(0, Math.min(1, frac || 0)) * 100)}%`;
@@ -915,18 +917,22 @@ const UI_VERSION = '2026.10.18-coords17';   // must match VERSION in server.py
   async function coShowArea(area){
     CO.area = area;
     const v = Date.now().toString(36);
+    const a = area.alpha || {};
+    const low = a.streets_from != null && a.streets_from !== area.zoom;
     $$('#coThumbs figure').forEach(f => {
+      if(f.dataset.k === 'street_low'){ f.hidden = !low; if(!low) return; $('figcaption', f).textContent = `Zoom ${a.streets_from}`; }
       const img = new Image(); img.src = `${API}/api/coords/area/${area.key}/${f.dataset.k}?v=${v}`;
       img.alt = f.dataset.k; $('.thumb', f).innerHTML = ''; $('.thumb', f).appendChild(img);
     });
     $('#coThumbs').hidden = false;
-    const a = area.alpha || {};
     const bits = [`${fmt(area.width)} × ${fmt(area.height)} px at ${area.mpp.toFixed(3)} m a pixel`];
+    if(low) bits.push(`streets from the street map at zoom ${a.streets_from} (no buildings over them), ${Math.round((a.streets_agree || 0) * 100)}% the same as zoom ${area.zoom}'s`
+      + (a.streets_from_area_m2 ? `; ${fmt(Math.round(a.streets_from_area_m2))} m² of small streets only zoom ${area.zoom} shows added` : ''));
     if(area.osm_roads != null) bits.push(`${fmt(area.osm_roads)} OSM road ways, ${Math.round((area.osm_on_road || 0) * 100)}% of them on the alpha's roads`);
     if(a.far_from_osm) bits.push(`${a.far_from_osm} white area(s) with no OSM road near left out (${fmt(Math.round(a.far_from_osm_m2))} m²)`);
     if(a.thin_lines) bits.push(`${a.thin_lines} thin line(s) left out: footpaths, parking lanes, service passages under 2 m wide (${fmt(Math.round(a.thin_m2))} m²)`);
     if(a.under_buildings) bits.push(`${a.under_buildings} place(s) where Google draws a building over a street: the street filled back under it (${fmt(Math.round(a.under_buildings_m2))} m²)`);
-    if(a.straightened_m2) bits.push(`street edges straightened: ${fmt(Math.round(a.straightened_m2))} m² of Google's steps (caps, notches) evened out`);
+    if(a.straightened_m2 >= 0.5) bits.push(`street edges straightened: ${fmt(Math.round(a.straightened_m2))} m² of Google's steps (caps, notches) evened out`);
     if(area.missing_tiles) bits.push(`${area.missing_tiles} satellite tile(s) missing`);
     $('#coNote').className = area.missing_tiles ? 'note bad' : 'note';
     $('#coNote').textContent = bits.join('; ') + '. Check: the alpha\'s edge (amber) and the OSM roads (cyan) over the satellite.';
@@ -934,7 +940,7 @@ const UI_VERSION = '2026.10.18-coords17';   // must match VERSION in server.py
   $$('#coThumbs figure').forEach(f => f.addEventListener('click', async () => {
     if(!CO.area) return;
     const img = await loadImage(`${API}/api/coords/area/${CO.area.key}/${f.dataset.k}?v=${Date.now().toString(36)}`);
-    genVp.show(img, { satellite: 'Satellite', street: 'Street map', alpha: 'Alpha', check: 'Check: the alpha\'s edge and the OSM roads over the satellite' }[f.dataset.k]);
+    genVp.show(img, { satellite: 'Satellite', street: 'Street map', street_low: 'Street map at zoom 16 (the streets)', alpha: 'Alpha', check: 'Check: the alpha\'s edge and the OSM roads over the satellite' }[f.dataset.k]);
   }));
   async function coStart(){
     if(CO.running) return;

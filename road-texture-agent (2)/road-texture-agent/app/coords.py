@@ -14,7 +14,10 @@ loaded street mask, with its metres a pixel set from the zoom and the latitude.
 
 The street map's roads are drawn by Google at map widths, close to but not exactly
 the asphalt: the satellite is used for the details (the analysis, app/analysis of
-the next step), not to move the alpha's edges.
+the next step), not to move the alpha's edges. At zoom 17 and up Google draws the
+buildings too, some over the streets' edges; so the street map is also downloaded at
+zoom 16 (STREETS_ZOOM, a few tiles), where it draws none, and the streets are taken
+from that one (low_streets); the buildings are still read from the area's own zoom.
 
 Every area keeps its files in workspace/coords/<key>/ (key: the bounds and zoom),
 so asking for the same area again downloads nothing.
@@ -45,6 +48,7 @@ SATELLITE_ID = 1               # Google Satellite in Universal Maps Downloader
 STREET_ID = 66                 # Google Street Map (without labels)
 MAX_PIXELS = 80_000_000        # one area's crop at most (as the OSM tool's exports)
 MAX_TILES = 1600               # one downloader job at most (app/osm/satellite.py)
+STREETS_ZOOM = 16              # the street map again at this zoom for the streets: Google draws no buildings on it
 PREVIEW_PX = 1024
 
 # the street map's road colours (Google's map style, PNG tiles so the colours are exact):
@@ -69,7 +73,7 @@ PALETTE = {
             "straight_share": 0.35, "straight_min_m": 1.0, "straight_max_m": 3.0, "under_buildings": 1},
 }
 
-COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("buildings_map", 1.0), ("crop", 1.0),
+COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("street_low", 0.5), ("buildings_map", 1.0), ("crop", 1.0),
                ("missing", 0.5), ("alpha", 1.0), ("osm", 1.0), ("buildings", 1.0), ("previews", 0.5)]
 
 
@@ -145,7 +149,7 @@ def osm_tool_dir():
 
 def load_settings(root):
     """The downloader's path, the PBF's path and the zoom (saved once; the OSM tool's downloader path as a start)."""
-    s = {"downloader": "", "pbf": "", "zoom": 20, "buildings_map": 0}
+    s = {"downloader": "", "pbf": "", "zoom": 20, "buildings_map": 0, "streets_zoom": STREETS_ZOOM}
     try:
         s.update(json.loads((Path(root) / "settings.json").read_text()))
     except (OSError, ValueError):
@@ -167,7 +171,7 @@ def load_settings(root):
 
 
 def save_settings(root, s):
-    keep = {k: s[k] for k in ("downloader", "pbf", "zoom", "buildings_map") if k in s}
+    keep = {k: s[k] for k in ("downloader", "pbf", "zoom", "buildings_map", "streets_zoom") if k in s}
     Path(root).mkdir(parents=True, exist_ok=True)
     tmp = Path(root) / f".settings.{uuid.uuid4().hex[:6]}.tmp"
     tmp.write_text(json.dumps(keep, indent=2))
@@ -771,33 +775,13 @@ def under_buildings(road, bld, mpp, anchor_m=4.0, max_m=150.0, max_depth_m=15.0)
     return out, notes
 
 
-def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
+def _tidy(road, mpp, pal, osm_lines, notes):
     """
-    The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
-    orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
-    the building outlines, as blue as the roads but a pixel or two wide, taken off, and the
-    thin lines: footpaths, parking lanes, service passages; the streets under the buildings
-    drawn over their edges filled back, and the streets' edges straightened), small holes
-    filled (the one-way arrows drawn on a street), small specks dropped; with
-    osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
-    osm_reach_m dropped too. Returns (road, notes).
+    An alpha's small holes filled (the one-way arrows drawn on a street) and its small specks
+    dropped; with osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM
+    road within osm_reach_m dropped too. Counts in notes.
     """
-    style = street_style(rgb, pal)
-    if style == "new":
-        p = {**PALETTE["new"], **(pal.get("new") or {})}
-        road = _new_colour(rgb, pal)
-        k = max(1, int(round(float(p["open_m"]) / mpp / 2)))
-        road = ndi.binary_opening(road, structure=np.ones((2 * k + 1, 2 * k + 1), bool))
-        thin = thin_lines(road, mpp, float(p["thin_m"]), float(p["thin_len_m"]))
-    else:
-        road = _classic_road(rgb, pal)
-        thin = None
-    notes = {"coloured_px": int(road.sum()), "style": style}
     px_m2 = mpp * mpp
-    if thin is not None and thin.any():
-        road &= ~thin
-        notes["thin_lines"] = int(ndi.label(thin, structure=np.ones((3, 3), bool))[1])
-        notes["thin_m2"] = round(float(thin.sum()) * px_m2, 1)
     # holes: what is not road and does not reach the edge, small
     holes = ~road
     lab, n = ndi.label(holes)
@@ -826,6 +810,37 @@ def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
         k = np.zeros(n + 1, bool)
         k[1:] = keep
         road = k[lab]
+    return road
+
+
+def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
+    """
+    The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
+    orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
+    the building outlines, as blue as the roads but a pixel or two wide, taken off, and the
+    thin lines: footpaths, parking lanes, service passages; the streets under the buildings
+    drawn over their edges filled back, and the streets' edges straightened), small holes
+    filled (the one-way arrows drawn on a street), small specks dropped; with
+    osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
+    osm_reach_m dropped too. Returns (road, notes).
+    """
+    style = street_style(rgb, pal)
+    if style == "new":
+        p = {**PALETTE["new"], **(pal.get("new") or {})}
+        road = _new_colour(rgb, pal)
+        k = max(1, int(round(float(p["open_m"]) / mpp / 2)))
+        road = ndi.binary_opening(road, structure=np.ones((2 * k + 1, 2 * k + 1), bool))
+        thin = thin_lines(road, mpp, float(p["thin_m"]), float(p["thin_len_m"]))
+    else:
+        road = _classic_road(rgb, pal)
+        thin = None
+    notes = {"coloured_px": int(road.sum()), "style": style}
+    px_m2 = mpp * mpp
+    if thin is not None and thin.any():
+        road &= ~thin
+        notes["thin_lines"] = int(ndi.label(thin, structure=np.ones((3, 3), bool))[1])
+        notes["thin_m2"] = round(float(thin.sum()) * px_m2, 1)
+    road = _tidy(road, mpp, pal, osm_lines, notes)
     if style == "new":
         p = {**PALETTE["new"], **(pal.get("new") or {})}
         if float(p.get("under_buildings", 1)):
@@ -838,6 +853,117 @@ def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
         notes.update(sn)
     notes["road_px"] = int(road.sum())
     return road, notes
+
+
+# ------------------------------------------------------------------ the streets from the street map at a low zoom
+
+def _low_colours(rgb, road_at, land_at):
+    """
+    The low zoom map's street colours (up to 4, each at least 8% of the pixels under the
+    area's own streets: a main road may be drawn in another shade) and its land's colour (the
+    commonest far from any street), or None when there are not enough of either.
+    """
+    on, off = rgb[road_at].astype(np.int32), rgb[land_at].astype(np.int32)
+    if len(on) < 20 or len(off) < 20:
+        return None
+    cols, counts = np.unique(off, axis=0, return_counts=True)
+    land = cols[int(np.argmax(counts))].astype(np.float64)
+    cols, counts = np.unique(on, axis=0, return_counts=True)
+    roads = []
+    for k in np.argsort(-counts):
+        c = cols[k].astype(np.float64)
+        near = [r for r in roads if np.abs(r[0] - c).max() <= 8]
+        if near:
+            near[0][1] += counts[k]
+        elif len(roads) < 8:
+            roads.append([c, int(counts[k])])
+    total = float(len(on))
+    roads = [r[0] for r in sorted(roads, key=lambda r: -r[1]) if r[1] >= 0.08 * total and np.abs(r[0] - land).max() >= 10][:4]
+    return (roads, land) if roads else None
+
+
+def low_streets(img, geo, extent, size, road, mpp, pal=PALETTE, osm_lines=None):
+    """
+    The streets of the street map downloaded at a low zoom (STREETS_ZOOM, where Google draws
+    no buildings, so no street is cut by one), on the area's grid (extent, size). Its colours
+    are learnt from road (the alpha of the area's own street map: Google draws the low zoom in
+    other shades): the colours under its streets and the land's far from them. Each low zoom
+    pixel's share of street is where its colour lies between the land's and a street's (the
+    anti-aliased pixels at an edge say where in them the edge falls); the shares are
+    stretched smoothly onto the grid and cut at a half, so the edges come out smooth and in
+    place, not in 2 m steps. Streets the low zoom leaves out (the smallest) are taken from
+    road, holes filled, specks dropped, and the edges straightened. Returns (road, notes), or
+    (None, notes) when no street colour is found.
+    """
+    rgb = np.asarray(img.convert("RGB"))
+    sh, sw = rgb.shape[:2]
+    ex0, ey0, ex1, ey1 = geo["extent"]
+    sx, sy = (ex1 - ex0) / geo["source_size"][0], (ey1 - ey0) / geo["source_size"][1]
+    x0, y0, x1, y1 = extent
+    w, h = size
+    px = (x1 - x0) / w
+    notes = {"streets_zoom_mpp": round(sx / px * mpp, 2)}
+    # where each low zoom pixel's middle falls on a coarse copy of the area's alpha (4 m a cell at most)
+    f = max(1, int(round(min(4.0, max(0.5, sx / px * mpp / 2)) / mpp)))
+    small = road[::f, ::f]
+    inside = ndi.distance_transform_edt(small) * f * mpp
+    outside = ndi.distance_transform_edt(~small) * f * mpp
+    gx = np.floor((ex0 + (np.arange(sw) + 0.5) * sx - x0) / px / f).astype(int)
+    gy = np.floor((y1 - (ey1 - (np.arange(sh) + 0.5) * sy)) / px / f).astype(int)
+    ok = (gx >= 0) & (gx < small.shape[1])
+    okr = (gy >= 0) & (gy < small.shape[0])
+    road_at = np.zeros((sh, sw), bool)
+    land_at = np.zeros((sh, sw), bool)
+    sub = np.ix_(np.flatnonzero(okr), np.flatnonzero(ok))
+    cell = (gy[okr][:, None], gx[ok][None, :])
+    road_at[sub] = inside[cell] >= 1.5                       # well inside a street
+    for away in (15.0, 8.0, 4.0):                            # well away from any (a close-built town: less far)
+        land_at[sub] = outside[cell] >= away
+        if land_at.sum() >= 20:
+            break
+    found = _low_colours(rgb, road_at, land_at)
+    if found is None:
+        notes["streets_low"] = "no street colour found"
+        return None, notes
+    roads, land = found
+    notes["streets_low_colours"] = [[int(v) for v in c] for c in roads]
+    notes["streets_low_land"] = [int(v) for v in land]
+    c = rgb.astype(np.float32) - land.astype(np.float32)
+    share = np.zeros((sh, sw), np.float32)
+    for col in roads:
+        d = (col - land).astype(np.float32)
+        dd = float(d @ d)
+        t = (c @ d) / dd
+        off = np.sqrt(np.maximum(0.0, (c * c).sum(axis=2) - t * t * dd))
+        share = np.maximum(share, np.where(off <= max(8.0, 0.2 * math.sqrt(dd)), np.clip(t, 0, 1), 0).astype(np.float32))
+    grid = np.asarray(_onto(Image.fromarray(share, "F"), geo, extent, size, Image.Resampling.BICUBIC))
+    low = grid > 0.5
+    del grid
+    if not low.any():
+        notes["streets_low"] = "no street on the low zoom map"
+        return None, notes
+    # the area's own streets that the low zoom leaves out: what lies 3 m and more from its streets, with the
+    # stretch that joins it to them
+    g = max(1, int(round(0.5 / mpp)))
+    lo = low[::g, ::g]
+    far = road[::g, ::g][:lo.shape[0], :lo.shape[1]] & ~lo & (ndi.distance_transform_edt(~lo) * g * mpp >= 3.0)
+    added = 0
+    if far.any():
+        reach = ndi.distance_transform_edt(~far) * g * mpp <= 4.0
+        yy, xx = np.nonzero(road & ~low)
+        take = reach[np.minimum(yy // g, reach.shape[0] - 1), np.minimum(xx // g, reach.shape[1] - 1)]
+        low[yy[take], xx[take]] = True
+        added = int(take.sum())
+        notes["streets_from_area_m2"] = round(added * mpp * mpp, 1)
+    both, either = int((low & road).sum()), int((low | road).sum())
+    notes["streets_agree"] = round(both / max(1, either), 3)
+    notes["coloured_px"] = int(low.sum())
+    low = _tidy(low, mpp, pal, osm_lines, notes)
+    p = {**PALETTE["new"], **(pal.get("new") or {})}
+    low, sn = straighten_edges(low, mpp, float(p["straight_share"]), float(p["straight_min_m"]), float(p["straight_max_m"]))
+    notes.update(sn)
+    notes["road_px"] = int(low.sum())
+    return low, notes
 
 
 # ------------------------------------------------------------------ rasters
@@ -905,6 +1031,12 @@ def crop_box(geo, bounds):
 
 def onto_grid(path, geo, extent, size, resample=Image.Resampling.NEAREST):
     """Another raster (the street map) cut to the satellite crop's grid: extent (x0, y0, x1, y1), size (w, h)."""
+    with Image.open(path) as im:
+        return _onto(im.convert("RGB"), geo, extent, size, resample)
+
+
+def _onto(img, geo, extent, size, resample):
+    """A georeferenced picture (geo: its extent and size) cut and scaled to the area's grid."""
     ex0, ey0, ex1, ey1 = geo["extent"]
     sw, sh = geo["source_size"]
     sx, sy = (ex1 - ex0) / sw, (ey1 - ey0) / sh
@@ -913,10 +1045,11 @@ def onto_grid(path, geo, extent, size, resample=Image.Resampling.NEAREST):
     if x0 < ex0 - sx or y0 < ey0 - sy or x1 > ex1 + sx or y1 > ey1 + sy:
         raise ValueError("the street map does not cover the whole area: download it again")
     a, e = (x1 - x0) / w / sx, (y1 - y0) / h / sy
-    # Pillow samples at the output pixel's corner: half a source pixel's worth of scale moved to its centre
-    c, f = (x0 - ex0) / sx + (a - 1) / 2, (ey1 - y1) / sy + (e - 1) / 2
-    with Image.open(path) as im:
-        return im.convert("RGB").transform((w, h), Image.Transform.AFFINE, (a, 0, c, 0, e, f), resample)
+    # Pillow takes each output pixel's middle to the source and samples it there (pixel middles at +0.5 on
+    # both sides): the grid's edge, in source pixels, is the whole offset (a map stretched 16 times, as the
+    # zoom 16 street map, lands where it should)
+    c, f = (x0 - ex0) / sx, (ey1 - y1) / sy
+    return img.transform((w, h), Image.Transform.AFFINE, (a, 0, c, 0, e, f), resample)
 
 
 def missing_tiles(rgb, extent, zoom):
@@ -1056,8 +1189,10 @@ def build_area(est, settings, root, register, job=None):
     else:
         say("no PBF set: the alpha without the OSM check, and no OSM roads drawn")
 
-    def download(stage, map_id, name, label):
-        prog.stage(stage, f"downloading the {label} ({est['tiles']:,} tiles)")
+    def download(stage, map_id, name, label, at=None):
+        at = at or zoom
+        n = est["tiles"] if at == zoom else SAT.tile_estimate(tuple(bounds), at)
+        prog.stage(stage, f"downloading the {label} ({n:,} tiles)")
         have = area.get(stage)
         if have and Path(have).is_file():
             say(f"the {label}: already downloaded")
@@ -1065,7 +1200,7 @@ def build_area(est, settings, root, register, job=None):
         if cancelled():
             raise Cancelled("stopped")
         try:
-            image, _ = SAT.download(settings["downloader"], folder / "downloads", f"{name}_{key}", map_id, zoom,
+            image, _ = SAT.download(settings["downloader"], folder / "downloads", f"{name}_{key}", map_id, at,
                                     tuple(bounds), progress=say, cancelled=cancelled)
         except SAT.Cancelled as e:
             raise Cancelled(str(e))
@@ -1075,6 +1210,19 @@ def build_area(est, settings, root, register, job=None):
 
     sat_path = download("satellite", SATELLITE_ID, "sat", "satellite map")
     street_path = download("street", STREET_ID, "street", "street map")
+    # the streets from the street map at a low zoom (no buildings drawn over them); 0: from the area's own
+    sz = int(settings.get("streets_zoom", STREETS_ZOOM) or 0)
+    low_path = None
+    if 0 < sz < zoom:
+        if area.get("street_low_zoom") != sz:
+            area.pop("street_low", None)               # another zoom than the one downloaded before
+        try:
+            low_path = download("street_low", STREET_ID, f"street{sz}", f"street map at zoom {sz} (for the streets)", sz)
+            area["street_low_zoom"] = sz
+        except Cancelled:
+            raise
+        except Exception as e:                         # noqa: BLE001 - the streets then come from the area's own map
+            say(f"the street map at zoom {sz} could not be downloaded ({e}): the streets from zoom {zoom}'s")
     # the buildings: read from the street map, or from another map type set for them
     bmap = int(settings.get("buildings_map") or 0)
     if area.get("buildings_map_type") != bmap:
@@ -1141,6 +1289,19 @@ def build_area(est, settings, root, register, job=None):
 
     prog.stage("alpha", "the alpha from the street map's roads")
     road, notes = street_alpha(np.asarray(street), mpp, palette(root), osm_lines)
+    road_area = road                                   # the area's own map's streets: its buildings are read off them
+    notes["streets_from"] = zoom
+    if low_path is not None:
+        with Image.open(low_path) as im:
+            low, ln = low_streets(im, read_geo(low_path), ext, size, road, mpp, palette(root), osm_lines)
+        if low is not None and low.any():
+            road = low
+            notes = {"style": notes["style"], "streets_from": sz, **ln, "area_alpha": notes}
+            say(f"the streets from the street map at zoom {sz} (no buildings drawn over them): "
+                f"{round(100 * ln.get('streets_agree', 0))}% the same as zoom {zoom}'s")
+        else:
+            say(f"the street map at zoom {sz}: {ln.get('streets_low', 'no streets read')}; the streets from zoom {zoom}'s")
+        _low_preview(low_path, folder)
     alpha_path = folder / "alpha.png"
     alpha = (road * 255).astype(np.uint8)
     try:                                       # the same as before: left as it is (it may be open elsewhere)
@@ -1154,7 +1315,7 @@ def build_area(est, settings, root, register, job=None):
     if notes.get("thin_lines"):
         say(f"{notes['thin_lines']} thin line(s) left out of the alpha ({notes['thin_m2']:.0f} m²): "
             "footpaths, parking lanes, service passages, under 2 m wide")
-    if notes.get("under_buildings"):
+    if notes.get("under_buildings") and notes.get("streets_from") == zoom:
         say(f"{notes['under_buildings']} place(s) where Google draws a building over a street: the street filled back "
             f"under it ({notes['under_buildings_m2']:.0f} m²)")
     if osm_lines is not None and osm_lines.any():
@@ -1167,7 +1328,7 @@ def build_area(est, settings, root, register, job=None):
     prog.stage("buildings", "the buildings on the street map")
     from app import footprints as FP
     try:
-        bdoc = FP.read_area(folder, area, None if bmap_path is not None else np.asarray(street), road, palette(root))
+        bdoc = FP.read_area(folder, area, None if bmap_path is not None else np.asarray(street), road_area, palette(root))
         area["buildings"] = dict(bdoc["notes"], source=bdoc["source"])
         say(f"{len(bdoc['buildings'])} buildings on the {'buildings' if bmap_path is not None else 'street'} map")
     except Exception as e:                    # noqa: BLE001 - the alpha stands without them
@@ -1199,6 +1360,18 @@ def _geojson(roads, path):
         feats.append({"type": "Feature", "properties": {"osm_id": rd["id"], "highway": rd["highway"]},
                       "geometry": {"type": "MultiLineString", "coordinates": coords}})
     Path(path).write_text(json.dumps({"type": "FeatureCollection", "features": feats}))
+
+
+def _low_preview(path, folder):
+    """The low zoom street map as it came (a few hundred pixels), for the page."""
+    try:
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            k = min(1.0, PREVIEW_PX / max(im.size))
+            _write(im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.Resampling.LANCZOS),
+                   folder / "street_low_preview.png", optional=True)
+    except OSError:
+        pass
 
 
 def _previews(folder, sat, street, road, osm_lines, gaps):
