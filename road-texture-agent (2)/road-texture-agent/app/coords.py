@@ -64,8 +64,9 @@ PALETTE = {
     # straight: the streets' edges straightened (Google's square caps, the notches of buildings
     # drawn over a street's edge, the steps where its pieces join), steps up to straight_share of
     # the streets' width deep (between straight_min_m and straight_max_m; straight_share 0: kept)
+    # under_buildings: the streets under the buildings drawn over their edges filled back (0: left out)
     "new": {"b_minus_r": 8, "r_min": 120, "r_max": 214, "open_m": 0.6, "thin_m": 2.0, "thin_len_m": 6.0,
-            "straight_share": 0.35, "straight_min_m": 1.0, "straight_max_m": 3.0},
+            "straight_share": 0.35, "straight_min_m": 1.0, "straight_max_m": 3.0, "under_buildings": 1},
 }
 
 COORDS_PLAN = [("index", 2.0), ("satellite", 10.0), ("street", 6.0), ("buildings_map", 1.0), ("crop", 1.0),
@@ -605,14 +606,179 @@ def straighten_edges(road, mpp, share=0.35, min_m=1.0, max_m=3.0):
     return out, notes
 
 
+# ------------------------------------------------------------------ the streets under the buildings drawn over them
+
+UNDER_SHARE = 0.6             # the edge where it leaves its line: at least this share of it along a building
+UNDER_DEPTH = 0.8             # ... and no deeper than this share of the street's width
+UNDER_BEND_DEG = 4.0          # an edge on both sides of a building: its two lines within this angle of each other
+UNDER_CORNER_DEG = 30.0       # two streets' edges meeting at a corner: at this angle or more (and 180 less it)
+
+
+def _line_fit(seg):
+    """The least-squares line of a straight piece's points: (point, unit direction along the piece)."""
+    c = seg.mean(axis=0)
+    v = np.linalg.svd(seg - c, full_matrices=False)[2][0]
+    return c, (v if np.dot(v, seg[-1] - seg[0]) >= 0 else -v)
+
+
+def _offsets(P, p, v):
+    """Each point's distance from the line (p, v), + to its left."""
+    return v[0] * (P[:, 1] - p[1]) - v[1] * (P[:, 0] - p[0])
+
+
+def _road_left(road, seg, v, reach):
+    """Whether the road lies to the left of an edge's piece (a few of its points looked past, the most of them)."""
+    H, W = road.shape
+    n = np.array([-v[1], v[0]])
+    votes = 0
+    for q in (0.25, 0.5, 0.75):
+        x, y = seg[int(q * (len(seg) - 1))] + n * reach
+        xi, yi = int(round(x)), int(round(y))
+        votes += 1 if 0 <= xi < W and 0 <= yi < H and road[yi, xi] else -1
+    return votes > 0
+
+
+def _reach(road, p, n, most):
+    """How far (pixels) the road runs from p along n (the street's width, from its edge)."""
+    H, W = road.shape
+    for k in range(1, int(most)):
+        x, y = int(round(p[0] + n[0] * k)), int(round(p[1] + n[1] * k))
+        if not (0 <= x < W and 0 <= y < H) or not road[y, x]:
+            return k
+    return int(most)
+
+
+def under_buildings(road, bld, mpp, anchor_m=4.0, max_m=150.0, max_depth_m=15.0):
+    """
+    The streets under the buildings Google draws over them (bool H x W in, a new one out,
+    and notes). At zoom 20 the street map draws buildings over streets' edges (the shops
+    along a main road, a building over a junction's corner): the road under them is not
+    drawn, so the alpha has bites; zoomed out, Google draws no buildings and the street
+    shows whole. Each road edge, traced between its pixels, is cut into straight pieces
+    (Douglas-Peucker); where the edge leaves a straight piece (at least anchor_m long) into
+    the road, along a building (bld: the buildings' fill pixels) for at least UNDER_SHARE
+    of the way, and comes back to the same line (another piece on it), the road between is
+    filled up to that line; where it comes to another street's edge instead (a building over
+    a junction's corner), up to the two lines, round the corner where they meet. Bites up to
+    max_m long and UNDER_DEPTH of the street's width deep (and max_depth_m); only pixels are
+    added, and an edge with no building over it is left as it was.
+    """
+    from skimage import measure
+    H, W = road.shape
+    notes = {"under_buildings": 0, "under_buildings_m2": 0.0}
+    if not road.any() or not bld.any():
+        return road, notes
+    near = max(1.5, STRAIGHT_NEAR_M / mpp)
+    tol = max(2.0, 0.3 / mpp)                 # two pieces on one line: this near it (and 2% of the gap between)
+    out_tol = max(2.0, 0.5 / mpp)             # the edge between them may stray this far out of the road
+    A = anchor_m / mpp
+    cos_bend, cos_corner = math.cos(math.radians(UNDER_BEND_DEG)), math.cos(math.radians(UNDER_CORNER_DEG))
+    over = ndi.binary_dilation(bld, iterations=max(1, int(round(0.4 / mpp)))) & ~road    # a building and its outline
+    out = road.copy()
+    n_px = n_bites = 0
+    for ring in measure.find_contours(np.pad(road, 1).astype(np.uint8), 0.5):
+        if len(ring) < 16 or not np.allclose(ring[0], ring[-1]):
+            continue
+        P = ring[:-1, ::-1] - 1.0                              # (x, y), pixel middles at whole numbers
+        n = len(P)
+        x0, y0 = np.clip(np.floor(P[:, 0]).astype(int), 0, W - 1), np.clip(np.floor(P[:, 1]).astype(int), 0, H - 1)
+        x1, y1 = np.minimum(x0 + 1, W - 1), np.minimum(y0 + 1, H - 1)
+        cov = over[y0, x0] | over[y0, x1] | over[y1, x0] | over[y1, x1]
+        if not cov.any() or cov.all():
+            continue
+        s0 = int(np.flatnonzero(~cov)[0])                      # the ring from a point with no building on it
+        P, cov = np.roll(P, -s0, axis=0), np.roll(cov, -s0)
+        far = int(np.argmax(np.hypot(P[:, 0] - P[0, 0], P[:, 1] - P[0, 1])))
+        Q = np.vstack([P, P[:1]])
+        C2 = np.concatenate([cov, cov, cov[:1]])
+        idx = np.union1d(_dp(Q[:far + 1], near), far + _dp(Q[far:], near))
+        lines = []
+        for a, b in zip(idx[:-1], idx[1:]):
+            if math.hypot(*(Q[b] - Q[a])) >= A:
+                p, v = _line_fit(Q[a:b + 1])
+                lines.append((a, b, p, v, 1.0 if _road_left(road, Q[a:b + 1], v, 3.0) else -1.0,
+                              float(C2[a:b + 1].mean())))       # how much of it runs along a building
+        if len(lines) < 2:
+            continue
+        L2 = lines + [(a + n, b + n, p, v, s, g) for a, b, p, v, s, g in lines]
+        Q2 = np.vstack([P, P, P[:1]])
+        arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(Q2, axis=0).T))])
+        done = -1
+        for li in range(len(lines)):
+            a, b, p, v, side, _ = lines[li]
+            if b <= done:
+                continue
+            nr = np.array([-v[1], v[0]]) * side                # into the road
+            deep = min(max_depth_m / mpp, UNDER_DEPTH * _reach(road, Q[(a + b) // 2] + nr, nr, 60.0 / mpp))
+            # the edge's next piece back on this line (past the buildings over it), or the next clear edge
+            # at a corner; the pieces along a building on the way (its sides, its front) passed by
+            for lk in range(li + 1, li + len(lines)):
+                a2, b2, p2, v2, side2, along2 = L2[lk]
+                gap = arc[a2] - arc[b]
+                if gap > max_m / mpp:
+                    break
+                c = float(np.dot(v, v2))
+                kind = None
+                if c >= cos_bend:
+                    off = max(np.abs(_offsets(Q2[[a2, b2]], p, v)).max(), np.abs(_offsets(Q2[[a, b]], p2, v2)).max())
+                    if off <= tol + 0.02 * gap:
+                        kind = "line"
+                if kind is None:
+                    if along2 >= 0.5:
+                        continue
+                    if not -cos_corner <= c <= cos_corner:
+                        break                                   # a clear edge going on elsewhere: no bite
+                    kind = "corner"
+                seg = Q2[b:a2 + 1]
+                if ((seg[:, 0] < 0) | (seg[:, 1] < 0) | (seg[:, 0] > W - 1) | (seg[:, 1] > H - 1)).any():
+                    break                                       # it runs off the map: not judged
+                d = _offsets(seg, p, v) * side                  # + into the road
+                poly = clip = None
+                if kind == "line":
+                    # a building (or a row of them) over the edge between: filled up to the line
+                    inside = d > near
+                    if (d.min() >= -out_tol and d.max() <= deep and inside.sum() >= 3
+                            and C2[b:a2 + 1][inside].mean() >= UNDER_SHARE):
+                        poly = seg
+                else:
+                    # a building over the junction's corner: filled up to both lines, round to where they meet
+                    X = _cross(p, v, p2, v2, UNDER_CORNER_DEG)
+                    e = np.maximum(d, _offsets(seg, p2, v2) * side2)
+                    inside = e > near
+                    if X is not None and inside.sum() >= 3:
+                        bend = np.hypot(seg[:, 0] - X[0], seg[:, 1] - X[1]) <= deep    # a rounded corner's arc
+                        if (e.max() <= deep and np.all((e >= -out_tol) | bend)
+                                and C2[b:a2 + 1][inside].mean() >= UNDER_SHARE):
+                            poly = np.vstack([seg, X[None]])
+                            clip = (p, v, side, p2, v2, side2)
+                if poly is not None:
+                    bx0, by0 = max(0, int(math.floor(poly[:, 0].min())) - 1), max(0, int(math.floor(poly[:, 1].min())) - 1)
+                    bx1, by1 = min(W, int(math.ceil(poly[:, 0].max())) + 2), min(H, int(math.ceil(poly[:, 1].max())) + 2)
+                    f = scanfill([poly], (by1 - by0, bx1 - bx0), (bx0, by0)) & ~out[by0:by1, bx0:bx1]
+                    if clip is not None:                # the corner's rounding kept: the road's side of either line
+                        gy, gx = np.mgrid[by0:by1, bx0:bx1]
+                        g = np.stack([gx.ravel(), gy.ravel()], 1).astype(float)
+                        pa, va, sa, pb, vb, sb = clip
+                        f &= ((_offsets(g, pa, va) * sa >= 0) | (_offsets(g, pb, vb) * sb >= 0)).reshape(f.shape)
+                    # what is filled is mostly the building itself (a curve along a building's wall is not)
+                    if f.any() and over[by0:by1, bx0:bx1][f].mean() >= 0.5:
+                        out[by0:by1, bx0:bx1] |= f
+                        n_px += int(f.sum())
+                        n_bites += 1
+                        done = a2
+                break
+    notes.update(under_buildings=n_bites, under_buildings_m2=round(n_px * mpp * mpp, 1))
+    return out, notes
+
+
 def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
     """
     The road (bool, H x W) in a street map (H x W x 3 uint8): its white and its yellow to
     orange (Google's classic colours) or its blue-grey (the 2024 colours, street_style:
     the building outlines, as blue as the roads but a pixel or two wide, taken off, and the
-    thin lines: footpaths, parking lanes, service passages, and the streets' edges
-    straightened), small holes filled (the one-way arrows drawn on a street), small specks
-    dropped; with
+    thin lines: footpaths, parking lanes, service passages; the streets under the buildings
+    drawn over their edges filled back, and the streets' edges straightened), small holes
+    filled (the one-way arrows drawn on a street), small specks dropped; with
     osm_lines (bool, the OSM roads drawn 1 px wide) the road pieces with no OSM road within
     osm_reach_m dropped too. Returns (road, notes).
     """
@@ -662,6 +828,11 @@ def street_alpha(rgb, mpp, pal=PALETTE, osm_lines=None):
         road = k[lab]
     if style == "new":
         p = {**PALETTE["new"], **(pal.get("new") or {})}
+        if float(p.get("under_buildings", 1)):
+            from app import footprints as FP
+            fills, _, tol, _ = FP.palette(pal, "new")
+            road, un = under_buildings(road, FP.fill_mask(rgb, fills, tol) > 0, mpp)
+            notes.update(un)
         road, sn = straighten_edges(road, mpp, float(p["straight_share"]), float(p["straight_min_m"]),
                                     float(p["straight_max_m"]))
         notes.update(sn)
@@ -983,6 +1154,9 @@ def build_area(est, settings, root, register, job=None):
     if notes.get("thin_lines"):
         say(f"{notes['thin_lines']} thin line(s) left out of the alpha ({notes['thin_m2']:.0f} m²): "
             "footpaths, parking lanes, service passages, under 2 m wide")
+    if notes.get("under_buildings"):
+        say(f"{notes['under_buildings']} place(s) where Google draws a building over a street: the street filled back "
+            f"under it ({notes['under_buildings_m2']:.0f} m²)")
     if osm_lines is not None and osm_lines.any():
         on = osm_lines & road
         area["osm_on_road"] = round(float(on.sum()) / max(1, int(osm_lines.sum())), 3)

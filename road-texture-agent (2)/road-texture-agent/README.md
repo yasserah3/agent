@@ -155,6 +155,28 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   a 4 m dead-end alley stayed, the roundabout stayed round and nothing else
   changed; the classic colours' alpha is unchanged; on a full 7455 × 7496 map it
   adds a few seconds.
+- **Streets under buildings** (the 2024 colours): at zoom 20 Google draws some
+  buildings over the streets' edges (the shops along a main road, a building over
+  a junction's corner), and the road under them is not drawn, so the alpha had
+  bites out of the street there; zoomed out, Google draws no buildings and the
+  street shows whole. Now, before the edges are straightened, each edge of the
+  alpha is traced: where it leaves a straight stretch (4 m or longer) into the
+  street along a building and comes back to the same line further on, the street
+  between is filled up to that line, however long the row of buildings (up to
+  150 m) and as deep as 80% of the street's width (up to 15 m); where it comes out
+  on the side street's edge instead, it is filled up to both edges and round the
+  corner where they meet (a rounded corner keeps its rounding). It is filled only
+  when the edge between runs mostly along a building and what is filled is mostly
+  that building, so a building next to a street, a curve along a building's wall,
+  a dead-end alley ending at a building and the street's own corners stay. A
+  building drawn right across a street (the street in two pieces) is left as it
+  is. The note under the area's pictures says how many places were filled
+  ("under_buildings" 0 in palette.json's "new" turns it off). On the test city
+  with buildings drawn 1 to 5 m over straight edges, alone and in rows, and over
+  junctions' corners, every one fully inside the map was put right; buildings
+  touching a street, a building across a street, buildings hugging a bend and a
+  dead-end alley stayed as they were, and nothing else changed; the classic
+  colours' alpha is unchanged; on a full 7455 × 7496 map it adds about 4 s.
 - **Thin lines are not streets** (the 2024 colours): Google draws footpaths,
   parking lanes and service passages as thin blue-grey lines, close to the
   streets' colour. A blue-grey line narrower than 2 m (where no 2 m disk fits)
