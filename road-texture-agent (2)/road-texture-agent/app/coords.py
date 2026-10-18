@@ -460,11 +460,14 @@ def _corners(pcs, t, near):
         if np.minimum(d1, d2).max() > t or np.hypot(seg[:, 0] - X[0], seg[:, 1] - X[1]).min() > t:
             continue
         # judged on the part off both lines: a cap's or a notch's sides run along or across them, a
-        # rounded corner's arc sweeps round
+        # rounded corner's arc sweeps round; and some of them across, as it steps off a line and back (a
+        # bend between two lines meeting at a shallow angle is near enough along both, but never across)
         off = np.flatnonzero(np.minimum(d1, d2) > near)
         perp = lambda v: np.array([-v[1], v[0]])
-        if len(off) and _square(seg[max(0, off[0] - 1):off[-1] + 2], (v1, perp(v1), v2, perp(v2)), near) < 0.75:
-            continue
+        if len(off):
+            part = seg[max(0, off[0] - 1):off[-1] + 2]
+            if _square(part, (v1, perp(v1), v2, perp(v2)), near) < 0.75 or _square(part, (perp(v1), perp(v2)), near) < 0.05:
+                continue
         for q, r in enumerate(run):
             pcs[r] = ["corner", pcs[r][1], X if q == 0 else None, None, False]
 
