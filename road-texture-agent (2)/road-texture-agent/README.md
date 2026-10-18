@@ -167,10 +167,16 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   2 m steps: Google draws the zoom 16 map in other shades, so its colours are learnt
   from the area's own alpha (the colours under its streets and the land's far from
   them), each zoom 16 pixel's share of street read from where its colour lies between
-  the two (the soft pixels along an edge say where the edge falls inside them), and
-  the shares stretched smoothly onto the area's grid. On the test city that put the
-  edges within 0.05 m of where zoom 16 draws them (95% within 0.14 m); a full 7455 ×
-  7496 map takes about 15 s more. The small streets zoom 16 leaves out are taken
+  the two (the soft pixels along an edge say where the edge falls inside them), the
+  streets' outlines traced through those shares, smoothed along their length (Google
+  shades an edge's pixels in a few steps, which made a slanted street's edge zigzag
+  from one pixel to the next; the junctions' corners are kept), their straight
+  stretches (9 m and longer, within a third of a zoom 16 pixel of one line) laid on
+  that line, and filled exactly on the area's grid. On slanted test streets drawn the
+  ways tile makers shade them (by share, light-based, with only a few in-between
+  colours, a 64-colour palette) the straight edges are 0.02 to 0.04 m from their true
+  line on average (at most 0.27 m), with no zigzag; a full 7455 × 7496 map takes about
+  8 s more. The small streets zoom 16 leaves out are taken
   from the area's own map. What changes: the widths are Google's zoom 16 widths,
   close to but not always the same as zoom 20's (the note under the pictures says how
   much of the two agree, and a "Zoom 16" picture shows the map). "the street map at

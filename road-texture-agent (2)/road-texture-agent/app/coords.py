@@ -49,6 +49,7 @@ STREET_ID = 66                 # Google Street Map (without labels)
 MAX_PIXELS = 80_000_000        # one area's crop at most (as the OSM tool's exports)
 MAX_TILES = 1600               # one downloader job at most (app/osm/satellite.py)
 STREETS_ZOOM = 16              # the street map again at this zoom for the streets: Google draws no buildings on it
+LOW_SMOOTH = 1.0               # its streets' outlines smoothed along their length over this many of its pixels
 PREVIEW_PX = 1024
 
 # the street map's road colours (Google's map style, PNG tiles so the colours are exact):
@@ -882,6 +883,118 @@ def _low_colours(rgb, road_at, land_at):
     return (roads, land) if roads else None
 
 
+LOW_CORNER_DEG = 70.0          # an outline turning this much within 2.5 of the low zoom's pixels either side: a corner, kept
+
+
+def _smooth_ring(r, c, k, w):
+    """
+    A closed outline (evenly spaced points) smoothed along its length (a Gaussian, k points),
+    its corners kept where they are: where it turns LOW_CORNER_DEG or more between the w
+    points before and the w after (a junction's corner; a roundabout turns slower), each
+    stretch between two corners smoothed on its own, its ends held.
+    """
+    n = len(r)
+    ang = lambda dr, dc: np.arctan2(dr, dc)
+    before = ang(r - np.roll(r, w), c - np.roll(c, w))
+    after = ang(np.roll(r, -w) - r, np.roll(c, -w) - c)
+    turn = np.abs((after - before + np.pi) % (2 * np.pi) - np.pi)
+    sharp = turn >= math.radians(LOW_CORNER_DEG)
+    # one point a corner: the sharpest of each run of sharp points
+    corners = []
+    if sharp.any() and not sharp.all():
+        start = int(np.flatnonzero(~sharp)[0])
+        idx = (np.arange(n) + start) % n
+        run = []
+        for i in idx:
+            if sharp[i]:
+                run.append(i)
+            elif run:
+                corners.append(max(run, key=lambda j: turn[j]))
+                run = []
+        if run:
+            corners.append(max(run, key=lambda j: turn[j]))
+    if not corners:
+        return ndi.gaussian_filter1d(r, k, mode="wrap"), ndi.gaussian_filter1d(c, k, mode="wrap")
+    corners = sorted(corners)
+    out_r, out_c = r.copy(), c.copy()
+    for a, b in zip(corners, corners[1:] + [corners[0] + n]):
+        ids = np.arange(a, b + 1) % n
+        if len(ids) < 3:
+            continue
+        rr, cc = ndi.gaussian_filter1d(r[ids], k, mode="nearest"), ndi.gaussian_filter1d(c[ids], k, mode="nearest")
+        # the stretch's ends held at the corners, the smoothing let in over k points
+        fade = np.minimum(1.0, np.minimum(np.arange(len(ids)), np.arange(len(ids))[::-1]) / max(1.0, k))
+        out_r[ids[1:-1]] = (r[ids] + (rr - r[ids]) * fade)[1:-1]
+        out_c[ids[1:-1]] = (c[ids] + (cc - c[ids]) * fade)[1:-1]
+    return out_r, out_c
+
+
+LOW_STRAIGHT = (4.0, 0.3)      # a stretch of outline this long (its pixels) and this near one line: made that line
+
+
+def _straight_runs(r, c, spec):
+    """
+    A smoothed closed outline with its straight stretches made straight: Douglas-Peucker at
+    a fifth of the low zoom's pixel; a piece at least spec[0] long whose points all lie
+    within spec[1] of their least-squares line is laid on that line (its ends stay put, so a
+    corner or a curve beside it is as it was).
+    """
+    P = np.stack([c, r], axis=1)
+    n = len(P)
+    Q = np.vstack([P, P[:1]])
+    far = int(np.argmax(np.hypot(P[:, 0] - P[0, 0], P[:, 1] - P[0, 1])))
+    idx = np.union1d(_dp(Q[:far + 1], 0.2), far + _dp(Q[far:], 0.2))
+    out = Q.copy()
+    for a, b in zip(idx[:-1], idx[1:]):
+        if b - a < 3 or math.hypot(*(Q[b] - Q[a])) < spec[0]:
+            continue
+        p, v = _line_fit(Q[a:b + 1])
+        if np.abs(_offsets(Q[a:b + 1], p, v)).max() > spec[1]:
+            continue
+        seg = Q[a + 1:b]
+        out[a + 1:b] = p + np.outer((seg - p) @ v, v)
+    out = out[:n]
+    return out[:, 1], out[:, 0]
+
+
+def _outlines(share, geo, extent, size, smooth):
+    """
+    The streets of a low zoom map's street shares (H x W, 0 to 1) on the area's grid: their
+    outlines traced at a half between its pixel middles, smoothed along their length over
+    smooth of its pixels (Google's tiles shade an edge's pixels in a few steps, not by how
+    much of them is street, so the traced edge wobbles from one pixel to the next along a
+    slanted street), and filled exactly on the grid.
+    """
+    from skimage import measure
+    ex0, ey0, ex1, ey1 = geo["extent"]
+    sx, sy = (ex1 - ex0) / geo["source_size"][0], (ey1 - ey0) / geo["source_size"][1]
+    x0, y0, x1, y1 = extent
+    w, h = size
+    px = (x1 - x0) / w
+    rings = []
+    for ring in measure.find_contours(np.pad(share, 1), 0.5):
+        if len(ring) < 4:
+            continue
+        r, c = ring[:-1, 0] - 1.0, ring[:-1, 1] - 1.0          # the low zoom's pixel middles at whole numbers
+        if smooth > 0:
+            # the same spacing all round (a quarter pixel), then a Gaussian along it, round the closed outline
+            seg = np.hypot(np.diff(r, append=r[:1]), np.diff(c, append=c[:1]))
+            s_at = np.concatenate([[0.0], np.cumsum(seg)])
+            n = max(8, int(round(s_at[-1] / 0.25)))
+            t = np.linspace(0.0, s_at[-1], n, endpoint=False)
+            r = np.interp(t, s_at, np.append(r, r[0]))
+            c = np.interp(t, s_at, np.append(c, c[0]))
+            step = s_at[-1] / n
+            k = smooth / step
+            if k < n / 4:                                      # an outline smaller than the smoothing: left as it is
+                r, c = _smooth_ring(r, c, k, max(2, int(round(2.5 / step))))
+                r, c = _straight_runs(r, c, LOW_STRAIGHT)
+        gx = (ex0 + (c + 0.5) * sx - x0) / px - 0.5
+        gy = (y1 - (ey1 - (r + 0.5) * sy)) / px - 0.5
+        rings.append(np.stack([gx, gy], axis=1))
+    return scanfill(rings, (h, w)) if rings else np.zeros((h, w), bool)
+
+
 def low_streets(img, geo, extent, size, road, mpp, pal=PALETTE, osm_lines=None):
     """
     The streets of the street map downloaded at a low zoom (STREETS_ZOOM, where Google draws
@@ -890,10 +1003,10 @@ def low_streets(img, geo, extent, size, road, mpp, pal=PALETTE, osm_lines=None):
     other shades): the colours under its streets and the land's far from them. Each low zoom
     pixel's share of street is where its colour lies between the land's and a street's (the
     anti-aliased pixels at an edge say where in them the edge falls); the shares are
-    stretched smoothly onto the grid and cut at a half, so the edges come out smooth and in
-    place, not in 2 m steps. Streets the low zoom leaves out (the smallest) are taken from
-    road, holes filled, specks dropped, and the edges straightened. Returns (road, notes), or
-    (None, notes) when no street colour is found.
+    traced at a half, the outlines smoothed along their length (corners kept) and filled on
+    the grid, so the edges come out straight and in place, not in 2 m steps nor zigzag.
+    Streets the low zoom leaves out (the smallest) are taken from road, holes filled and
+    specks dropped. Returns (road, notes), or (None, notes) when no street colour is found.
     """
     rgb = np.asarray(img.convert("RGB"))
     sh, sw = rgb.shape[:2]
@@ -936,9 +1049,7 @@ def low_streets(img, geo, extent, size, road, mpp, pal=PALETTE, osm_lines=None):
         t = (c @ d) / dd
         off = np.sqrt(np.maximum(0.0, (c * c).sum(axis=2) - t * t * dd))
         share = np.maximum(share, np.where(off <= max(8.0, 0.2 * math.sqrt(dd)), np.clip(t, 0, 1), 0).astype(np.float32))
-    grid = np.asarray(_onto(Image.fromarray(share, "F"), geo, extent, size, Image.Resampling.BICUBIC))
-    low = grid > 0.5
-    del grid
+    low = _outlines(share, geo, extent, size, LOW_SMOOTH)
     if not low.any():
         notes["streets_low"] = "no street on the low zoom map"
         return None, notes
@@ -959,9 +1070,6 @@ def low_streets(img, geo, extent, size, road, mpp, pal=PALETTE, osm_lines=None):
     notes["streets_agree"] = round(both / max(1, either), 3)
     notes["coloured_px"] = int(low.sum())
     low = _tidy(low, mpp, pal, osm_lines, notes)
-    p = {**PALETTE["new"], **(pal.get("new") or {})}
-    low, sn = straighten_edges(low, mpp, float(p["straight_share"]), float(p["straight_min_m"]), float(p["straight_max_m"]))
-    notes.update(sn)
     notes["road_px"] = int(low.sum())
     return low, notes
 
