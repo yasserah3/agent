@@ -170,13 +170,25 @@ the OSM tool, and a zoom: 20 by default, 0.136 m a pixel in Riyadh).
   the two (the soft pixels along an edge say where the edge falls inside them), the
   streets' outlines traced through those shares, smoothed along their length (Google
   shades an edge's pixels in a few steps, which made a slanted street's edge zigzag
-  from one pixel to the next; the junctions' corners are kept), their straight
-  stretches (9 m and longer, within a third of a zoom 16 pixel of one line) laid on
-  that line, and filled exactly on the area's grid. On slanted test streets drawn the
-  ways tile makers shade them (by share, light-based, with only a few in-between
-  colours, a 64-colour palette) the straight edges are 0.02 to 0.04 m from their true
-  line on average (at most 0.27 m), with no zigzag; a full 7455 × 7496 map takes about
-  8 s more. The small streets zoom 16 leaves out are taken
+  from one pixel to the next; the junctions' corners are kept), each block's sides
+  made straight, and filled exactly on the area's grid. Straight sides: the edge read
+  from zoom 16 still wavers by up to a metre or two along a street, so every side of
+  a block from one junction's corner to the next (a corner: the edge turning sharply
+  in one place, also where Google rounds it) that lies within one zoom 16 pixel
+  (2.2 m) of a line becomes that line; one that does not is cut where it strays most
+  and each part tried again, so a street that bends sharply becomes two straight
+  lines. Two sides meet where their lines cross, rounded as much as Google rounded
+  that corner. Curves stay curved: a stretch turning 35° and more all along it, one
+  lying on a circle, and a roundabout's edge between its streets (a tight circle,
+  30 zoom 16 pixels across at most). A strip under 2 zoom 16 pixels wide (a median
+  zoom 16 barely draws) is only smoothed, so two lines along it cannot squeeze it
+  away. On a test grid whose street edges waver by 1 m
+  and 1.6 m the edges come out straight and 0.17 m and 0.26 m from the true lines on
+  average (0.36 m and 0.57 m with smoothing alone), the stand-in city's roundabout
+  stays round, and a full 7455 × 7496 map takes about 8 to 13 s more. The price: a
+  street that bends or curves gently (less than about 2 m off one line along a
+  block) comes out as one straight line, up to a metre or two off its true edge
+  at the bend. The small streets zoom 16 leaves out are taken
   from the area's own map. What changes: the widths are Google's zoom 16 widths,
   close to but not always the same as zoom 20's (the note under the pictures says how
   much of the two agree, and a "Zoom 16" picture shows the map). "the street map at

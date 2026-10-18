@@ -883,39 +883,55 @@ def _low_colours(rgb, road_at, land_at):
     return (roads, land) if roads else None
 
 
-LOW_CORNER_DEG = 70.0          # an outline turning this much within 2.5 of the low zoom's pixels either side: a corner, kept
+LOW_THIN = 2.0                 # an outline narrower than this (its pixels: twice its area over its length) left smoothed only
+LOW_CORNER_DEG = (70.0, 45.0, 0.7)  # a corner: the outline turning 70 degrees within 2.5 of the low zoom's pixels either
+                                   # side, or 45 within 5 with 0.7 of that within the 2.5 (a rounded corner: the turn
+                                   # all in one place; a roundabout turns as much again over the longer reach)
 
 
-def _smooth_ring(r, c, k, w):
+def _ring_corners(r, c, w):
     """
-    A closed outline (evenly spaced points) smoothed along its length (a Gaussian, k points),
-    its corners kept where they are: where it turns LOW_CORNER_DEG or more between the w
-    points before and the w after (a junction's corner; a roundabout turns slower), each
-    stretch between two corners smoothed on its own, its ends held.
+    A closed outline's corners (evenly spaced points): where it turns LOW_CORNER_DEG[0] or
+    more between the w points before and the w after, or LOW_CORNER_DEG[1] between the 2w
+    before and after with LOW_CORNER_DEG[2] of that between the w (a junction's corner that
+    Google drew rounded; a roundabout turns slower, as much again over twice the reach), the
+    sharpest point of each such run; sorted indices.
     """
     n = len(r)
-    ang = lambda dr, dc: np.arctan2(dr, dc)
-    before = ang(r - np.roll(r, w), c - np.roll(c, w))
-    after = ang(np.roll(r, -w) - r, np.roll(c, -w) - c)
-    turn = np.abs((after - before + np.pi) % (2 * np.pi) - np.pi)
-    sharp = turn >= math.radians(LOW_CORNER_DEG)
-    # one point a corner: the sharpest of each run of sharp points
+    sharp_deg, round_deg, share = LOW_CORNER_DEG
+
+    def turn_at(k):
+        before = np.arctan2(r - np.roll(r, k), c - np.roll(c, k))
+        after = np.arctan2(np.roll(r, -k) - r, np.roll(c, -k) - c)
+        return np.abs((after - before + np.pi) % (2 * np.pi) - np.pi)
+
+    turn = turn_at(w)
+    wide = turn_at(2 * w) if 4 * w < n else turn
+    sharp = (turn >= math.radians(sharp_deg)) | ((wide >= math.radians(round_deg)) & (turn >= share * wide))
     corners = []
     if sharp.any() and not sharp.all():
         start = int(np.flatnonzero(~sharp)[0])
-        idx = (np.arange(n) + start) % n
         run = []
-        for i in idx:
+        for i in (np.arange(n) + start) % n:
             if sharp[i]:
                 run.append(i)
             elif run:
-                corners.append(max(run, key=lambda j: turn[j]))
+                corners.append(max(run, key=lambda j: turn[j] + wide[j]))
                 run = []
         if run:
-            corners.append(max(run, key=lambda j: turn[j]))
+            corners.append(max(run, key=lambda j: turn[j] + wide[j]))
+    return sorted(corners)
+
+
+def _smooth_ring(r, c, k, corners):
+    """
+    A closed outline (evenly spaced points) smoothed along its length (a Gaussian, k points),
+    its corners kept where they are: each stretch between two corners smoothed on its own,
+    its ends held.
+    """
+    n = len(r)
     if not corners:
         return ndi.gaussian_filter1d(r, k, mode="wrap"), ndi.gaussian_filter1d(c, k, mode="wrap")
-    corners = sorted(corners)
     out_r, out_c = r.copy(), c.copy()
     for a, b in zip(corners, corners[1:] + [corners[0] + n]):
         ids = np.arange(a, b + 1) % n
@@ -929,31 +945,104 @@ def _smooth_ring(r, c, k, w):
     return out_r, out_c
 
 
-LOW_STRAIGHT = (4.0, 0.3)      # a stretch of outline this long (its pixels) and this near one line: made that line
+LOW_SIDE = (1.0, 3.0, 35.0, 0.3, 30.0, 0.15)
+# a block's side within 1 of the low zoom's pixels of one line is that line; a bend split, parts 3 pixels and more;
+# a curve kept as it is: a stretch turning 35 degrees and more, steadily along it, or on one circle to within 0.3 of
+# a pixel, or a tight one (radius 30 pixels at most, a roundabout's edge) to within 0.15 and well under its line's
 
 
-def _straight_runs(r, c, spec):
+def _circle(Q):
+    """The circle nearest a stretch's points (least squares): its radius and how far the farthest point lies off it."""
+    x, y = Q[:, 0] - Q[:, 0].mean(), Q[:, 1] - Q[:, 1].mean()
+    A = np.stack([x, y, np.ones_like(x)], axis=1)
+    (a, b, k), *_ = np.linalg.lstsq(A, x * x + y * y, rcond=None)
+    R = math.sqrt(max(0.0, k + a * a / 4 + b * b / 4))
+    return R, float(np.abs(np.hypot(x - a / 2, y - b / 2) - R).max())
+
+
+def _turn(P):
+    """How much a stretch of outline turns (degrees): between the lines of its first and its last third."""
+    k = max(2, len(P) // 3)
+    v1, v2 = _line_fit(P[:k])[1], _line_fit(P[-k:])[1]
+    return math.degrees(math.acos(min(1.0, abs(float(np.dot(v1, v2))))))
+
+
+def _block_sides(r, c, corners, step, spec=LOW_SIDE):
     """
-    A smoothed closed outline with its straight stretches made straight: Douglas-Peucker at
-    a fifth of the low zoom's pixel; a piece at least spec[0] long whose points all lie
-    within spec[1] of their least-squares line is laid on that line (its ends stay put, so a
-    corner or a curve beside it is as it was).
+    A smoothed closed outline's block sides made straight: a straight street's edge read
+    from the low zoom still wavers by a metre or two along it. Each stretch
+    between two corners (a side of a block, from one junction to the next) lying within
+    spec[0] of its least-squares line becomes that line; one that does not is cut where it
+    lies farthest from its line and each part tried the same way (three times at most, parts
+    of spec[1] and more), so a street that bends becomes two straight lines. A curve stays as
+    it is: a stretch turning spec[2] degrees or more, each half of it turning too (a
+    roundabout turns all along; a bend turns at one place), or one lying on a circle to
+    within spec[3], or a tight one (radius spec[4] at most: a roundabout's edge between its
+    streets) to within spec[5]. Where two straight sides meet (a junction's corner, a bend)
+    they meet where their lines cross, rounded as much as the outline was there.
     """
+    tol, part, curve, arc, ring, ring_tol = spec
+    n = len(r)
     P = np.stack([c, r], axis=1)
-    n = len(P)
-    Q = np.vstack([P, P[:1]])
-    far = int(np.argmax(np.hypot(P[:, 0] - P[0, 0], P[:, 1] - P[0, 1])))
-    idx = np.union1d(_dp(Q[:far + 1], 0.2), far + _dp(Q[far:], 0.2))
-    out = Q.copy()
-    for a, b in zip(idx[:-1], idx[1:]):
-        if b - a < 3 or math.hypot(*(Q[b] - Q[a])) < spec[0]:
+    e = max(1, int(round(1.0 / step)))                  # a pixel at each end left out of the fit (the corners' rounding)
+
+    def fit(ids, depth):
+        if len(ids) * step < part:
+            return [(ids, None)]
+        cut = e if len(ids) > 2 * e + 2 else 0
+        mid = ids[cut:len(ids) - cut]
+        p, v = _line_fit(P[mid])
+        off = _offsets(P[mid], p, v)
+        th = _turn(P[mid])
+        dev = float(np.abs(off).max())
+        R, res = _circle(P[mid]) if len(mid) >= 8 else (0.0, math.inf)
+        if res <= arc if dev > tol else (R <= ring and dev >= 0.2 and res <= min(ring_tol, 0.4 * dev)):
+            return [(ids, None)]                         # one smooth arc: a curved street, a roundabout's edge
+        if dev <= tol and th < curve:
+            return [(ids, (p, v))]
+        m = int(np.argmax(np.abs(off))) + cut
+        halves = m * step >= part and (len(ids) - m) * step >= part
+        # a curve turns all along it (each half turns too), its ends' rounding left out
+        if depth >= 3 or not halves or (th >= curve and min(_turn(P[ids[cut:m + 1]]), _turn(P[ids[m:len(ids) - cut]])) >= 0.3 * th):
+            return [(ids, None)]
+        return fit(ids[:m + 1], depth + 1) + fit(ids[m:], depth + 1)
+
+    if not corners:
+        return r, c
+    pieces = []
+    for a, b in zip(corners, corners[1:] + [corners[0] + n]):
+        pieces += fit(np.arange(a, b + 1) % n, 0)
+    # each piece's points (its last one is the next piece's first): on its line, or as they were
+    segs = []
+    for ids, ln in pieces:
+        q = P[ids]
+        if ln is not None:
+            q = ln[0] + np.outer((q - ln[0]) @ ln[1], ln[1])
+        segs.append(q)
+    m = len(segs)
+    for i in range(m):
+        j = (i + 1) % m
+        la, lb = pieces[i][1], pieces[j][1]
+        if la is None or lb is None:
             continue
-        p, v = _line_fit(Q[a:b + 1])
-        if np.abs(_offsets(Q[a:b + 1], p, v)).max() > spec[1]:
+        va, vb = la[1] * np.sign(np.dot(la[1], segs[i][-1] - segs[i][0]) or 1), lb[1] * np.sign(np.dot(lb[1], segs[j][-1] - segs[j][0]) or 1)
+        X = _cross(la[0], va, lb[0], vb, 8.0)
+        if X is None:
             continue
-        seg = Q[a + 1:b]
-        out[a + 1:b] = p + np.outer((seg - p) @ v, v)
-    out = out[:n]
+        # how round the outline was there: how near it came to where the lines cross
+        near = P[np.concatenate([pieces[i][0], pieces[j][0]])]
+        gap = float(np.hypot(near[:, 0] - X[0], near[:, 1] - X[1]).min())
+        if gap > 3.0 + tol:
+            continue
+        half = 0.5 * math.acos(max(-1.0, min(1.0, float(np.dot(va, vb)))))
+        d = min(max(2.0 * gap / max(math.sin(half), 0.05), 0.5), 0.4 * math.hypot(*(segs[i][-1] - segs[i][0])),
+                0.4 * math.hypot(*(segs[j][-1] - segs[j][0])))
+        A, B = X - va * d, X + vb * d
+        t = np.linspace(0.0, 1.0, max(3, int(round(2 * d / step))))[:, None]
+        bend = (1 - t) ** 2 * A + 2 * t * (1 - t) * X + t * t * B          # the corner rounded: a curve from A to B
+        segs[i] = np.vstack([segs[i][(segs[i] - X) @ va < -d], bend])
+        segs[j] = np.vstack([bend[-1:], segs[j][(segs[j] - X) @ vb > d]])
+    out = np.vstack([sg[:-1] if len(sg) > 1 else sg for sg in segs])
     return out[:, 1], out[:, 0]
 
 
@@ -987,8 +1076,12 @@ def _outlines(share, geo, extent, size, smooth):
             step = s_at[-1] / n
             k = smooth / step
             if k < n / 4:                                      # an outline smaller than the smoothing: left as it is
-                r, c = _smooth_ring(r, c, k, max(2, int(round(2.5 / step))))
-                r, c = _straight_runs(r, c, LOW_STRAIGHT)
+                corners = _ring_corners(r, c, max(2, int(round(2.5 / step))))
+                r, c = _smooth_ring(r, c, k, corners)
+                # a block's sides made straight; not a strip under LOW_THIN wide (a median the low zoom barely
+                # draws: two lines along it could squeeze it away)
+                if abs(np.dot(c, np.roll(r, 1)) - np.dot(r, np.roll(c, 1))) / (n * step) >= LOW_THIN:
+                    r, c = _block_sides(r, c, corners, step)
         gx = (ex0 + (c + 0.5) * sx - x0) / px - 0.5
         gy = (y1 - (ey1 - (r + 0.5) * sy)) / px - 0.5
         rings.append(np.stack([gx, gy], axis=1))

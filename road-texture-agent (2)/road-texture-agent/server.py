@@ -102,7 +102,7 @@ from app import training as T
 from app.memory import Memory
 
 ROOT = Path(__file__).parent
-VERSION = "2026.10.18-coords19"   # must match UI_VERSION in ui/app.js
+VERSION = "2026.10.18-coords20"   # must match UI_VERSION in ui/app.js
 
 
 def _workspace_path():
